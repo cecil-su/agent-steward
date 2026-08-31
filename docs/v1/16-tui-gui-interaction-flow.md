@@ -1,6 +1,6 @@
 # TUI 与 GUI 协同交互流程图
 
-本图以“从任一客户端创建任务，在另一客户端观察或审批”为例，展示 TUI、GUI、任务角色和外层优化角色如何通过同一状态权威协同。
+本图描述 AI 与优化角色启用后的 TUI/GUI 协同。第一阶段只实现其中的任务创建、同步、推进、阻塞、Review 和验收部分，详见[任务管理流程图](18-task-management-workflow.md)。
 
 ```mermaid
 sequenceDiagram

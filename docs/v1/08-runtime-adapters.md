@@ -1,5 +1,7 @@
 # Herdr 与原生 Subagent Runtime
 
+> 阶段说明：Runtime Adapter 属于第二优先级。只有任务内核和 TUI/GUI 日用闭环稳定后，才选择一个 Runtime 做首个垂直切片；多 Runtime 支持不阻塞 `0.1`。
+
 ## 1. 目标
 
 核心同时支持：

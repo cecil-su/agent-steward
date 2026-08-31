@@ -1,100 +1,127 @@
 # V1 需求说明
 
-## 1. 功能需求
+## 1. 优先级 A：任务管理核心
 
-### FR-001 任务管理
+### FR-001 项目、任务与子任务
 
-- 支持任务、批次父子关系、阶段、状态、阻塞条件和唯一下一步。
-- 支持按完整任务标识、外部编号、状态和 owner 查询。
-- 状态转换必须经过状态机和版本前置检查。
+- 创建、编辑、归档 Project、Task 和 Subtask。
+- Task 至少包含标题、描述、状态、优先级、项目、owner、下一步和验收标准。
+- 支持父子、阻塞和相关关系；关系必须可查询、可视化且避免明显循环依赖。
 
-### FR-002 会话管理
+### FR-002 生命周期
 
-- 保存 Session、Invocation、Assignment 和 AgentRun 的独立身份。
-- 支持同一 Session 跨 Invocation 恢复。
-- 恢复时必须重新校验任务事实、owner epoch 和授权范围。
+- 默认状态为 `Inbox → Ready → In Progress → Blocked → Review → Done`。
+- `Cancelled` 是业务终态，`Archived` 是存储状态，不与完成混淆。
+- 状态转换由统一状态机校验，并记录操作者、原因、时间和版本。
+- 从 Blocked 恢复时回到明确的可执行状态，而不是丢失此前上下文。
 
-### FR-003 角色与委派
+### FR-003 任务管理与所有权
 
-- 支持 Human/Admin、Registry Main、Task Owner、Scout、Writer、Reviewer、Tester、Optimizer 等角色。
-- 角色由上级 principal 派发 grant，Agent 不得自行声明或提权。
-- Grant 可绑定 Task、Assignment、Worktree、路径、操作、期限和 owner epoch。
+- Task Manager 能分流 Inbox、设定优先级、建立依赖、分配 owner、跟踪阻塞并选择下一任务。
+- 每个活跃任务最多有一个当前 Task Owner；Worker 可以有多个。
+- Owner 可以是人、AI 或自动化 Actor，但都受相同生命周期约束。
+- Task Owner 必须维护唯一下一步；没有下一步的活跃任务应被系统提示。
 
-### FR-004 子代理编排
+### FR-004 视图、查询与提醒
 
-- 支持创建、恢复、查询和关闭 Agent Run。
-- 同时支持 Herdr 和宿主原生 subagent。
-- Runtime 状态只作为协调事实，不直接改变任务验收状态。
+- 提供 Inbox、Today/Next、按项目、按 owner、Blocked、Review 和 Done 视图。
+- 支持搜索、过滤、排序、保存视图和查看任务时间线。
+- 能识别无 owner、无下一步、长期阻塞和等待验收的任务。
 
-### FR-005 事件与 Artifact
+### FR-005 TUI 与 GUI
 
-- 支持至少一次事件投递、event ID 幂等和显式 ack。
-- 支持报告、测试结果、Git 快照和上下文 checkpoint。
-- event/report 不能自动等同于验收结论。
+- TUI 与 GUI 均能完成捕获、查看、编辑、推进、阻塞、验收和归档。
+- 两端共享 Command、Query 与 Event 契约，不直接各自实现业务规则。
+- 任一客户端写入后，另一客户端能通过事件流增量刷新；断线后可按版本恢复。
 
-### FR-006 Git 治理
+### FR-006 事件、评论与产物
 
-- 支持 Git 只读事实采集和受控生命周期操作。
-- commit、merge、push 使用 Plan → Approve → Execute → Verify。
-- 用户可按操作配置 deny、ask、allow-once、allow-task、allow-repo、allow-global。
+- 所有任务变化生成不可变 Task Event，支持幂等写入和按版本读取。
+- 支持评论、附件、链接、交付物和验收记录。
+- 任务当前状态由事务化数据维护；事件历史用于时间线、同步、恢复和审计。
 
-### FR-007 本地数据
+### FR-007 本地数据与恢复
 
-- SQLite 是结构化状态权威。
-- 完整会话和大型 Artifact 保存在本地加密 Blob Store。
-- 默认不上传遥测。
-- 支持数据查看、导出、删除和保留策略。
+- SQLite 是结构化状态的唯一权威；Markdown 只作为导出格式。
+- 默认不上传遥测，离线时仍能完成全部任务管理操作。
+- 支持备份、恢复、数据导出、删除和 schema migration。
 
-### FR-008 CLI 与 MCP
+## 2. 优先级 B：AI 执行与流程体验
 
-- CLI 和 MCP 调用同一 Application Service。
-- 两者均不携带固有管理员权限。
-- MCP 返回结构化、边界明确且可机器校验的结果。
+### FR-101 AI 接入
 
-### FR-009 自身优化
+- AI 通过通用 Actor 身份成为 Owner 或 Worker，不创建独立任务副本。
+- MCP、CLI 和 Runtime Adapter 调用与 TUI/GUI 相同的 Application Service。
+- 首期只需支持一个 AI Runtime 的端到端垂直切片，其余通过 Adapter contract 后续扩展。
 
-- 统计重复流程、澄清、返工、finding、工具失败和上下文消耗。
-- 区分 user、assistant、tool、repository、web 等内容来源。
-- 生成 Prompt、流程和 Skill 候选。
-- 未经用户授权不得修改 live 配置、规则或代码。
+### FR-102 Assignment 与子代理
 
-### FR-010 审计与恢复
+- Task Owner 可把阶段工作拆成 Assignment 并交给一个或多个 Agent Run。
+- 支持记录 Session、Invocation、上下文摘要、允许操作和产物。
+- Runtime 的 `completed` 只把任务或 Assignment 推进到 Review，不能直接写 Done。
 
-- 所有写操作记录 principal、grant、输入版本、计划、结果和时间。
-- 崩溃后能够判断操作未开始、执行中、已完成或需要人工协调。
-- 审计日志不可由 Agent 删除或改写。
+### FR-103 证据、权限与高风险操作
 
-## 2. 非功能需求
+- AI 输出必须关联 Artifact、测试结果或可复核说明。
+- 高风险 Git 或系统操作采用 Plan → Approve → Execute → Verify。
+- Agent 不得自我提权、伪造用户批准或删除任务和审计历史。
 
-### NFR-001 安全
+## 3. 优先级 C：需求、偏好与优化
 
-- 防范受到 Prompt Injection 影响、拥有普通项目 shell 权限的 Agent 越权调用管理能力。
+### FR-201 需求与偏好整理
+
+- 从用户明确输入、任务决策和验收反馈中整理 Requirement、Decision 与 Preference。
+- 每条内容保留来源、作用域、置信度和确认状态。
+- 外部网页、仓库文本和 AI 推断不能自动成为已确认的用户偏好。
+
+### FR-202 优化候选
+
+- 识别重复澄清、返工、阻塞模式、工具失败和上下文浪费。
+- 生成流程、Prompt、模板或 Skill 候选，并附证据、预期收益、风险和回滚方法。
+- 未经用户确认不得修改 live 配置、规则、Prompt、Skill 或代码。
+
+## 4. 非功能需求
+
+### NFR-001 一致性与可靠性
+
+- 状态写入和 Task Event 在同一事务提交。
+- 可变实体使用 `currentVersion` / `expectedVersion` 防止静默覆盖。
+- 进程崩溃后可恢复到已确认状态，不依赖聊天摘要猜测。
+
+### NFR-002 可用性
+
+- 高频操作在 TUI 中键盘可达，在 GUI 中可发现。
+- 核心交互不依赖网络、AI 账号或外部服务。
+- 错误信息必须说明失败原因和可恢复动作。
+
+### NFR-003 可测试性与扩展性
+
+- 状态机、依赖、版本冲突、事件同步和数据迁移具有确定性测试。
+- TUI、GUI、CLI 与 MCP 共享契约测试。
+- 核心不写死操作系统、Agent Runtime 或 Git 平台。
+
+### NFR-004 隐私与安全
+
+- 默认本地存储、无遥测；敏感附件和会话数据提供加密路径。
+- 威胁模型防范受 Prompt Injection 影响、拥有普通项目 shell 权限的 Agent 越权。
 - 不以抵御本机管理员、恶意软件或操作系统攻破为目标。
 
-### NFR-002 可移植性
+## 5. 分阶段验收
 
-- 核心不写死 Windows、Pi、Herdr、NRS 或单一 Git 平台。
-- V1 优先保证 Windows 可用，同时设计跨平台路径和进程接口。
+### `0.1` 任务管理器
 
-### NFR-003 可测试性
+- 不配置 AI 也能完成捕获、分流、分配、推进、阻塞、Review、Done 和归档闭环。
+- TUI 与 GUI 展示同一数据；并发修改不会静默覆盖。
+- 项目、子任务、依赖、owner、下一步、评论、产物和时间线均可用。
 
-- 状态机、权限、幂等、Git 计划和 Runtime Adapter 必须可通过确定性测试验证。
-- MCP 与 CLI 应共享相同契约测试。
+### `0.2` AI 执行
 
-### NFR-004 可观测性
+- AI 使用现有 Task 与生命周期，不形成第二套状态权威。
+- AI 完成后必须经过 Review；失败、阻塞和恢复都有可追踪事件。
+- 人类与 AI 通过不同客户端得到一致的权限和状态判定。
 
-- 关键操作提供结构化日志、关联 ID 和审计事件。
-- 原始数据、衍生索引和优化结果应区分版本与来源。
+### `0.3` 学习与优化
 
-### NFR-005 兼容性
-
-- Runtime Adapter 必须声明能力，不假设所有宿主都支持 resume、pane、push notification 或 layout。
-
-## 3. V1 验收原则
-
-- 未授权 Agent 无法创建或接管 Task Owner grant。
-- 过期 owner epoch 无法写入任务或执行 Git 操作。
-- 同一操作通过 CLI 和 MCP 得到相同权限判定。
-- Git 计划事实变化后不能继续执行。
-- 会话数据在关闭网络的情况下可完整记录、查询和导出。
-- Optimizer 只能生成候选，除非存在明确的更高等级授权。
+- 已确认需求和偏好与推断候选清晰分离。
+- 优化候选可以追溯到任务证据，应用前需要用户确认，并可回滚。
+- 能证明至少一类重复澄清、返工或流程浪费得到下降。

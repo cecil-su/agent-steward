@@ -2,6 +2,8 @@
 
 > 本文命令和工具名是 V1 候选契约，编码前仍可调整。
 
+阶段说明：`0.1` 先实现 TUI/GUI 所需的 Task Command/Query/Event 子集；自动化 CLI 可随核心提供，MCP 与 AI 专用命令在 `0.2` 接入。
+
 ## 1. 设计原则
 
 - CLI 与 MCP 共用 Application Service、状态机和 Policy Engine。

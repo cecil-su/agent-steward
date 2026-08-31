@@ -1,105 +1,88 @@
 # V1 实施路线
 
-V1 采用可验证的垂直切片推进，不一次性实现所有自治能力。
+V1 采用可验证的垂直切片推进。排序原则是：先证明任务管理价值，再证明 AI 增强价值，最后证明长期优化价值。
 
-## Phase 0：设计冻结与实验
+## Phase 0：任务管理基线与技术实验
 
-目标：关闭会影响信任边界和存储的关键决策。
+- 冻结 Task 最小字段、状态机、关系和验收语义；
+- 选择技术栈、SQLite migration 方案和本地进程边界；
+- 确认 TUI/GUI 交付策略与共享 Command/Query/Event 契约；
+- 验证事务写入 Task + Task Event、版本冲突和事件续传；
+- 定义最小数据备份、导出和恢复方案；
+- 用低保真原型验证 Inbox、Next、Blocked、Review 四条高频路径。
 
-- 明确威胁模型和 Standard/Hardened 模式；
-- 选择技术栈、SQLite/加密方案和 Local RPC；
-- 选择可信用户审批方式；
-- 选择首个 Native Subagent Host；
-- 编写领域 schema、状态机和 Runtime conformance contract；
-- 对 Windows sandbox/独立身份、Git metadata ACL 和凭据隔离做 capability probe。
+退出条件：不依赖 AI 的任务闭环、权威数据和客户端边界没有关键歧义。
 
-退出条件：安全模型不存在“同一 Agent 可直接绕过”的未说明路径。
+## Phase 1：本地任务内核
 
-## Phase 1：只读控制平面
+- `taskd` skeleton、SQLite schema 和 migration；
+- Project、Task、Subtask、Actor、Ownership 与 TaskRelation；
+- Inbox/Ready/In Progress/Blocked/Review/Done 状态机；
+- Command、Query、expectedVersion、幂等和 event outbox；
+- 评论、Artifact 元数据、ReviewDecision 和时间线；
+- backup/export/import 基础能力。
 
-- taskd skeleton；
-- SQLite schema/migration；
-- 导入现有 Markdown 的一次性只读 importer；
-- task/session/assignment 查询；
-- stewardctl list/show/audit；
-- MCP `task_list/get/confirmations/audit`；
-- Git、Herdr、Session 只读事实采集；
-- 默认无遥测验证。
+退出条件：契约测试能完整跑通捕获、分流、执行、阻塞、验收、返工和归档。
 
-退出条件：CLI/MCP 对同一事实返回一致结果，且无任何写 Git 生命周期。
+## Phase 2：可日用的 TUI 与 GUI
 
-## Phase 2：角色、事件和受控任务写入
+- TUI：快速捕获、键盘导航、过滤、批量分流和状态推进；
+- GUI：项目/列表/看板、依赖、任务详情、时间线和 Review；
+- snapshot + event cursor 同步、断线恢复和版本冲突界面；
+- Inbox、Next、Owner、Blocked、Review 和 Saved View；
+- 搜索、排序、提醒、空状态、错误恢复和可访问性；
+- 真实个人项目 dogfooding 与数据迁移测试。
 
-- Principal、RoleGrant、Capability、Lease、owner epoch；
-- Registry Main/Task Owner/child assignment；
-- expectedVersion 和幂等；
-- event outbox、至少一次投递、ack；
-- append-only audit；
-- Herdr Adapter；
-- Manual Adapter。
+退出条件：用户可以只靠该产品持续管理真实项目，且 TUI/GUI 不出现状态分叉。
 
-退出条件：过期会话、越权角色和重复 event 均被确定性处理。
+## Phase 3：任务流程体验完善
 
-## Phase 3：双 Runtime 支持
+- recurring/template、批量编辑和快捷命令；
+- blocker aging、无 owner/无下一步检测和 Review 队列；
+- 更好的依赖可视化、活动摘要和通知策略；
+- Markdown/JSON 导出与外部链接；
+- 性能、备份、恢复、崩溃一致性和跨平台打包。
 
-- Runtime SDK 与 capability discovery；
-- Herdr 完整生命周期；
-- 一个具体 Native Host Plugin；
-- spawn/resume/complete/blocked/reconciliation；
-- Runtime conformance test suite。
+退出条件：核心任务指标稳定，常用操作无需依赖 AI 补足产品缺口。
 
-退出条件：同一 Assignment contract 可在 Herdr 和 Native Runtime 下完成。
+## Phase 4：AI 执行增强
 
-## Phase 4：Git Plan 与本地生命周期
+- 通用 AI Actor、Assignment、Session、Invocation 和 AgentRun；
+- `steward-mcp` 与一个首选 Runtime Adapter；
+- ContextBrief、Artifact、阻塞/恢复和 Review handoff；
+- capability、owner epoch、最小审批与审计；
+- AI 完成不直接 Done 的端到端验证；
+- 需要时加入 Git inspect 与受控本地操作。
 
-- Git inspect；
-- managed Worktree；
-- Writer lease；
-- stage/commit/merge plan；
-- trusted approval；
-- execute/verify/reconciliation；
-- Hook 漂移和冲突测试。
+退出条件：人类和 AI 使用同一 Task，AI 能提高执行效率而不破坏状态与验收权威。
 
-退出条件：任何事实漂移都会使计划失效，Agent 不能通过 CLI/MCP 绕过 taskd。
+## Phase 5：需求、偏好与流程优化
 
-## Phase 5：Push 与 Hardened 模式
+- Requirement、Decision、Preference 与 Feedback；
+- 来源、作用域、置信度、确认和 supersede 流程；
+- 重复澄清、返工、阻塞和上下文浪费的确定性指标；
+- Prompt、流程、模板和 Skill 候选；
+- 用户确认、replay/shadow/canary 和回滚；
+- ContextBrief 按任务选择已确认信息，避免全量注入。
 
-- credential broker；
-- push plan/approval/verify；
-- Agent credential isolation；
-- 独立 OS 身份或 sandbox；
-- `.git` metadata 保护；
-- 安全安装和降级说明。
+退出条件：候选不自动生效，并能用任务历史证明至少一类效率损耗下降。
 
-退出条件：受限 Agent 不能直接使用用户凭据或原生 Git 绕过 push 策略。
+## Phase 6：高级集成与强化安全
 
-## Phase 6：完整 Session Store 与 Optimizer L0–L2
+- 更多 Runtime Adapter 与 conformance suite；
+- 完整 Session Store、本地加密和多宿主 importer；
+- Git commit/merge/push 的 Plan → Approve → Execute → Verify；
+- credential broker、Agent 隔离和 Hardened 模式；
+- 插件、Policy Pack、签名与兼容策略。
 
-- 多宿主 Session importer；
-- encrypted blob；
-- provenance；
-- 本地索引与用户偏好候选；
-- deterministic metrics；
-- Optimizer observe/analyze/propose；
-- Skill candidate 输出。
-
-退出条件：原始数据不出本机，外部内容不会被当成用户偏好，候选不会自动应用。
-
-## Phase 7：Optimizer L3–L4
-
-- 隔离 candidate；
-- replay/shadow/canary；
-- 独立 Reviewer；
-- 用户批准、版本发布和回滚；
-- Prompt/Skill/Policy Pack registry。
-
-退出条件：任何 live 优化都能追溯 proposal、证据、批准和回滚点。
+退出条件：扩展能力不会绕过 taskd，敏感凭据和高风险操作满足对应威胁模型。
 
 ## 发布建议
 
-- `0.1.x`：只读 task/session/MCP。
-- `0.2.x`：角色、assignment、event、Herdr/native。
-- `0.3.x`：Git plan 和本地 commit/merge。
-- `0.4.x`：Hardened push。
-- `0.5.x`：Session analytics 和 Optimizer。
-- `1.0.0`：安全边界、迁移和 adapter contract 稳定。
+- `0.1.x`：本地任务内核 + 可日用 TUI/GUI。
+- `0.2.x`：一个 AI Runtime 的完整任务执行闭环。
+- `0.3.x`：需求、偏好和优化候选。
+- `0.4.x`：更多 Runtime、Git 治理和 Hardened 能力。
+- `1.0.0`：任务 schema、客户端契约、迁移和扩展 API 稳定。
+
+每个版本都必须保留上一层独立价值：AI 不可用时 `0.2+` 仍是完整任务管理器，Optimizer 不可用时 `0.3+` 仍能正常管理和执行任务。

@@ -1,7 +1,12 @@
 # Agent Steward V1 设计文档
 
-状态：**设计基线草案**  
-目标：在编码前明确产品边界、威胁模型、权威数据、角色授权、Git 门禁、Runtime 适配和自优化机制。
+状态：**任务管理优先的设计基线草案**
+
+目标：先冻结一个不依赖 AI 也成立的任务管理器，再分阶段接入 AI 执行以及需求、偏好和流程优化能力。
+
+## 建议阅读顺序
+
+先读[产品定位](01-product-positioning.md)、[任务管理器架构图](17-task-manager-architecture.md)和[任务管理流程图](18-task-management-workflow.md)，再读[需求说明](02-requirements.md)、[总体架构](03-architecture.md)、[领域与数据模型](05-domain-model.md)和[V1 实施路线](11-roadmap.md)。第 13–16 篇描述 AI 与优化能力全部启用后的完整产品视图。
 
 ## 文档目录
 
@@ -21,22 +26,27 @@
 14. [核心业务流程图](14-core-workflow.md)
 15. [TUI 与 GUI 交互架构图](15-tui-gui-interaction-architecture.md)
 16. [TUI 与 GUI 协同交互流程图](16-tui-gui-interaction-flow.md)
+17. [任务管理器架构图](17-task-manager-architecture.md)
+18. [任务管理流程图](18-task-management-workflow.md)
 
 ## 已确认方向
 
 - 产品将作为独立的个人工具开发，并计划后续公开到 GitHub。
-- 定位类似 Codegraph 的本地工具：CLI 提供人类入口，MCP 为 AI 提供结构化能力。
-- 需要防范受到 Prompt Injection 影响、拥有普通项目 shell 权限的 Agent；不以抵御本机管理员或恶意软件为目标。
-- Git inspect、commit、merge、push 均可纳入工具，但具体授权边界由用户按操作、任务和仓库决定。
+- 第一需求是任务管理；首个可用版本不能依赖 AI、MCP 或 Git 自动化才能成立。
+- Task 是共享工作单元；项目、子任务、状态、依赖、owner、下一步、验收和历史是核心能力。
+- TUI 与 GUI 都是一等客户端，调用同一套 Command、Query 和 Event API，并读取同一权威状态。
+- 人类、AI 和自动化都使用通用 Actor/Owner 模型；Task Manager 只管理任务池，Task Owner 推进具体任务。
+- AI 执行和流程体验属于第二优先级，必须接入同一任务生命周期，不能形成独立的“AI 任务系统”。
+- 需求、用户偏好、流程与 Prompt 优化属于第三优先级，在任务循环外读取历史并生成候选。
 - SQLite 作为运行时唯一权威数据源。
-- 第一版数据全部保留在本地，默认无遥测上传；目标是理解用户意图、发现重复流程并产生 Prompt/Skill 优化候选。
-- Herdr 和宿主原生 subagent 都必须支持。
-- Optimizer 分阶段授权；默认只能观察和提出候选，用户授权后才允许进入实现和应用阶段。
-- AI 可以使用 CLI 或 MCP；两者都必须受同一个可信服务和 capability 约束。
+- 数据默认保留在本地且不上传遥测；所有任务变化记录为可追溯事件。
+- Optimizer 默认只能观察和提出候选，用户确认后才允许应用。
+- AI、高风险 Git 操作和多 Runtime 适配继续保留严格授权设计，但不阻塞任务管理 MVP。
 
 ## 非目标
 
-- V1 不提供云端多租户服务。
-- V1 不以团队协作、组织级 RBAC 或跨机器集群为首要目标。
-- V1 不允许 Agent 静默修改安全策略、自我提权或删除审计记录。
-- V1 不把 Herdr、Pi、Claude、Codex 或任一 Git 平台写死在核心领域模型中。
+- 首个里程碑不提供云端多租户、团队协作、组织级 RBAC 或跨机器集群。
+- 首个里程碑不要求 AI 执行、多 Runtime、Git push 或完整会话采集。
+- AI 能力不能成为创建、查看、推进和验收普通任务的前置条件。
+- 优化模块不得静默修改用户偏好、项目需求、安全策略、Prompt 或代码。
+- 核心领域模型不写死 Herdr、Pi、Claude、Codex 或任一 Git 平台。

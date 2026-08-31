@@ -2,64 +2,68 @@
 
 ## 1. 产品定义
 
-Agent Steward 是一个本地优先的个人 AI Agent 控制平面。它负责协调：
+Agent Steward 是一个本地优先的个人任务管理器。它的产品价值按以下顺序建立：
 
-- 任务和批次；
-- AI 会话、运行实例和上下文恢复；
-- Registry Main、Task Owner 和子代理角色；
-- Assignment、报告、事件和验收证据；
-- Repository、Worktree 和 Git 生命周期；
-- Herdr 与宿主原生 subagent；
-- Prompt、流程和 Skill 的持续优化。
+1. 管好任务：收集、分解、排序、分配、推进、解除阻塞、验收和复盘；
+2. 接入 AI：让 AI 与人类共享同一任务、owner、状态、产物和验收流程；
+3. 改进系统：从任务历史中整理需求与偏好，并提出流程、Prompt 和 Skill 优化候选。
 
-它不是一个新的 AI 模型，也不是单纯的待办列表或终端复用器。
+它不是一个以 Agent 编排为前提的控制台，也不是只记录标题和截止日期的待办清单。即使完全关闭 AI，它仍应是一套可独立使用的任务管理工具。
 
-## 2. 目标用户
+## 2. 核心用户与场景
 
-V1 面向：
+V1 首先面向管理个人开发项目的用户：
 
-- 在本机使用一个或多个 AI Coding Agent 的个人开发者；
-- 需要跨会话恢复复杂任务的用户；
-- 同时使用 Herdr 和宿主原生 subagent 的用户；
-- 希望逐步授权 AI 执行 commit、merge 或 push，同时保留可验证门禁的用户；
-- 希望利用本地历史会话优化 Prompt、流程和 Skill 的用户。
+- 快速把想法、问题和承诺收进 Inbox；
+- 将任务归入项目，明确优先级、依赖、owner、验收标准和唯一下一步；
+- 在 TUI 中快速操作，在 GUI 中浏览全局、关系和历史；
+- 从 Blocked、Review 和逾期任务中找出真正需要处理的事项；
+- 后续把适合的任务交给 AI，同时保留人工验收和完整证据；
+- 长期积累项目需求和个人偏好，但避免未经确认的自动推断污染正式规则。
 
 ## 3. 产品形态
 
 ```text
-Human ── stewardctl / steward-ui ──┐
-                                   ├── taskd
-AI ──── steward-mcp / stewardctl ──┘
+Human ── TUI / GUI / CLI ── Command · Query · Event ── taskd ── SQLite
+                                                     │
+AI ───── MCP / Runtime Adapter ──────────────────────┤  第二阶段
+                                                     │
+Optimization Steward ◀──── Task Event History ───────┘  第三阶段
 ```
 
-- `taskd`：唯一可信核心和运行时写入者。
-- `stewardctl`：CLI，不因被人类调用就自动拥有管理员权限。
-- `steward-mcp`：向 AI 暴露结构化工具，仍由服务端校验权限。
-- Runtime Adapter：连接 Herdr、Pi、Claude、Codex 等宿主。
+- `taskd`：任务状态、业务规则、查询、事件和持久化的唯一权威。
+- `steward-tui`：键盘优先的捕获、筛选和推进界面。
+- `steward-gui`：面向全局视图、依赖关系、时间线和审查的桌面界面。
+- `stewardctl`：面向脚本和自动化的命令接口。
+- `steward-mcp` / Runtime Adapter：第二阶段把 AI 接入现有任务系统。
+- Optimization Steward：第三阶段在任务循环外生成待确认的改进候选。
 
-## 4. 差异化价值
+## 4. 角色边界
 
-与普通 Task Manager 相比：
+- **Human Director**：决定目标、优先级和最终验收。
+- **Task Manager**：只负责管理任务池，进行分流、排序、分配、跟踪和升级阻塞。
+- **Task Owner**：对一个具体任务的推进、下一步和交付负责。
+- **Worker**：执行具体工作，可以是人、AI 或自动化。
+- **Context Steward**：循环外整理需求、偏好和优化候选，不直接改变任务结论。
 
-- 会话、Assignment、Git 计划和证据是一等实体；
-- 能区分任务完成、Agent 完成和 Git 集成完成；
-- 能把用户批准绑定到具体计划和事实快照；
-- 能基于长期本地历史发现重复流程和 Prompt 问题。
+Task Manager 不应同时承担“亲自完成所有任务”的职责；Task Owner 也不能凭执行者的完成声明跳过 Review。
 
-与普通 Agent Orchestrator 相比：
+## 5. 差异化价值
 
-- 强调用户所有权和渐进授权；
-- 强调本地数据、审计和可恢复性；
-- 同时服务 Herdr 与原生 subagent；
-- 不把 `completed` 事件直接当作业务验收完成。
+- **Actor-neutral**：同一 Task 可以由人、AI 或自动化拥有和执行。
+- **双界面同状态**：TUI 与 GUI 不是两套产品，任何一端的变更都会通过事件同步。
+- **事件化历史**：状态、owner、阻塞、验收和产物变化都有可恢复的时间线。
+- **执行与验收分离**：Worker 完成意味着进入 Review，不等于任务已经 Done。
+- **渐进式 AI**：AI 是增强层，不侵入任务管理核心，也不制造第二套状态真相。
+- **候选式学习**：需求、偏好和 Prompt 优化先提供证据与差异，再由用户确认。
 
-## 5. 产品原则
+## 6. 产品原则
 
-1. **Local-first**：无云端依赖也能完整工作。
-2. **User-owned**：用户决定数据、Git 和优化权限。
-3. **Fail-closed**：身份、范围或前置事实不明确时拒绝写入。
-4. **Single authority**：运行时只有一个权威数据库。
-5. **Evidence over claims**：事实和证据优先于 Agent 自述。
-6. **Progressive trust**：权限可从 deny/ask 逐步提升。
-7. **Runtime neutral**：核心不依赖单一 Agent 宿主。
-8. **Proposal before mutation**：高风险操作和自身优化先形成候选。
+1. **Task first**：先把任务闭环做好，再增加 AI 自治。
+2. **Local-first**：无云端或 AI 依赖也能完整工作。
+3. **Single authority**：SQLite 是运行时唯一权威。
+4. **One core, many clients**：TUI、GUI、CLI 和 MCP 共享业务规则。
+5. **Explicit ownership**：每个活跃任务都有明确 owner 和下一步。
+6. **Evidence before done**：验收依据优先于执行者自述。
+7. **Progressive trust**：AI 和高风险操作逐步授权。
+8. **Proposal before mutation**：需求、偏好和系统优化未经确认不生效。
