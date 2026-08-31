@@ -17,6 +17,10 @@
 10. [自身优化与 Skill 生成](10-self-optimization.md)
 11. [V1 实施路线](11-roadmap.md)
 12. [待决策事项](12-open-decisions.md)
+13. [产品架构图](13-product-architecture.md)
+14. [核心业务流程图](14-core-workflow.md)
+15. [TUI 与 GUI 交互架构图](15-tui-gui-interaction-architecture.md)
+16. [TUI 与 GUI 协同交互流程图](16-tui-gui-interaction-flow.md)
 
 ## 已确认方向
 
