@@ -1,6 +1,6 @@
 # Herdr 与原生 Subagent Runtime
 
-> 阶段说明：Runtime Adapter 属于第二优先级。只有任务内核和 TUI/GUI 日用闭环稳定后，才选择一个 Runtime 做首个垂直切片；多 Runtime 支持不阻塞 `0.1`。
+> 阶段说明：Runtime Adapter 属于 Phase 3。只有 Phase 1 Workspace/Repo Registry 与 Phase 2 Task/Review 日用闭环稳定后，才选择一个 Runtime 做首个垂直切片；多 Runtime 支持不阻塞 `0.1`/`0.2`。
 
 ## 1. 目标
 
@@ -15,13 +15,43 @@
 ## 2. Runtime Adapter 接口
 
 ```typescript
+interface RuntimeOperationContext {
+  operationId: string;
+  idempotencyKey: string;
+  requestHash: string;
+  orderingScope: string;
+  effectSequence: number;
+  attempt: number;
+}
+
 interface AgentRuntime {
   describeCapabilities(): RuntimeCapabilities;
-  spawn(request: SpawnRequest): Promise<RuntimeHandle>;
-  resume(request: ResumeRequest): Promise<RuntimeHandle>;
-  sendPrompt(handle: RuntimeHandle, prompt: PromptArtifact): Promise<void>;
+  spawn(operation: RuntimeOperationContext, request: SpawnRequest): Promise<RuntimeHandle>;
+  resume(operation: RuntimeOperationContext, request: ResumeRequest): Promise<RuntimeHandle>;
+  sendPrompt(
+    operation: RuntimeOperationContext,
+    handle: RuntimeHandle,
+    prompt: PromptArtifact,
+  ): Promise<RuntimeEffectResult>;
+  transitionContext(
+    operation: RuntimeOperationContext,
+    handle: RuntimeHandle,
+    request: ContextTransitionRequest,
+  ): Promise<ContextTransitionResult>;
+  discoverHistory?(
+    handle: RuntimeHandle,
+    request: RuntimeHistoryDiscoveryRequest,
+  ): Promise<RuntimeHistoryPage>;
+  readRuntimeHistoryItem?(
+    handle: RuntimeHandle,
+    request: RuntimeHistoryReadRequest,
+  ): Promise<RuntimeHistoryItem>;
   getStatus(handle: RuntimeHandle): Promise<RuntimeStatus>;
-  close(handle: RuntimeHandle): Promise<void>;
+  close(operation: RuntimeOperationContext, handle: RuntimeHandle): Promise<RuntimeEffectResult>;
+  reconcileOperation(
+    operation: RuntimeOperationContext,
+    knownHandle?: RuntimeHandle,
+  ): Promise<RuntimeOperationReconciliation>;
 }
 ```
 
@@ -38,7 +68,50 @@ canInjectCapability
 canClose
 canLayout
 canNotify
+canObserveContextWindow
+canStartFreshContext
+canCompactWithSummary
+canResumeOpaqueContext
+canDiscoverHistory
+canReadRuntimeHistory
+canReconcileOperation
+supportsProviderIdempotency
 ```
+
+上下文转换能力不能假设所有宿主一致。Adapter 必须明确声明支持 `fresh_window`、`summary_compaction`、`opaque_compaction`、宿主原生策略中的哪些模式；核心不能把任一 Codex、Claude、Pi 或 Herdr 的压缩实现写死为通用语义。
+
+`transitionContext` 是 Runtime context-transition API；不支持请求模式时返回结构化 `RUNTIME_CAPABILITY_UNAVAILABLE`。`discoverHistory` 和 `readRuntimeHistoryItem` 只用于发现或导入宿主历史，Adapter 不成为 Steward 长期 History 的权威。
+
+#### Runtime 外部副作用协议
+
+1. taskd 先持久化 RuntimeOperation、规范化 canonical request、requestHash、idempotency key 和 `prepared` DomainEvent，再调用 Adapter。
+2. Adapter 必须把稳定 operationId 传给支持幂等键/tag/metadata 的宿主；相同 operationId + requestHash 只能代表同一次副作用，不同 requestHash 返回冲突。
+3. 调用前把 operation 标记 dispatching；成功后在 SQLite transaction 中保存 externalOperationId、RuntimeHandle/result 和 succeeded event。超时或响应丢失不能直接证明失败。
+4. 重启或结果未知时调用 reconcileOperation。Adapter 优先按 provider operation ID/tag 查询；也可发现带 operationId 的既有 Session、Invocation 或已接收 Prompt。
+5. 只有宿主明确证明“未执行”时才能用同一 operationId 重试。证明“已执行”则补记成功；无法判断则进入 needs_reconciliation，禁止重新 spawn、resume 或 sendPrompt。同一 orderingScope 的后续冲突操作也必须被 taskd 阻止，不能用新 idempotency key 越过未决 operation。
+
+Runtime conformance tests 必须覆盖宿主成功后 taskd 崩溃、响应丢失、重复请求、同 operationId 不同 requestHash，以及无法 reconcile 的降级路径。声称 canReconcileOperation 的 Adapter 必须通过这些测试；不支持 provider idempotency 的 Adapter 不得把未知结果伪装成可安全重试。
+
+taskd 另外提供与 Runtime Adapter 分离的应用接口：
+
+```typescript
+interface HistoryQueryService {
+  listWindows(query: HistoryWindowQuery): Promise<HistoryWindowPage>;
+  listItems(query: HistoryItemQuery): Promise<HistoryItemPage>;
+  readItem(query: HistoryReadQuery): Promise<HistoryItem>;
+  search(query: HistorySearchQuery): Promise<HistorySearchPage>;
+}
+
+interface WorkingNoteService {
+  list(query: WorkingNoteQuery): Promise<WorkingNotePage>;
+  read(query: WorkingNoteReadQuery): Promise<WorkingNote>;
+  create(command: WorkingNoteCreateCommand): Promise<WorkingNote>;
+  append(command: WorkingNoteAppendCommand): Promise<WorkingNote>;
+  write(command: WorkingNoteWriteCommand): Promise<WorkingNote>;
+}
+```
+
+HistoryQueryService 只查询 taskd 已纳管的本地 History；WorkingNoteService 通过 Command/Query、授权、幂等和版本检查读写本地权威存储。
 
 ## 3. Herdr Adapter
 
@@ -74,13 +147,13 @@ V1 需要选定至少一个具体 Native Host 作为首个实现，并通过相�
 
 ## 5. Manual Adapter
 
-用户或 Agent 可在外部窗口执行 attach：
+用户可在外部窗口执行 attach，可信 Host 也可为 Agent 建立受保护输入通道：
 
 ```bash
-stewardctl session attach --grant <one-time-code>
+stewardctl session attach
 ```
 
-一次性 code 只能接受既有 grant，不能指定新角色。
+命令不得接受包含 secret 的 `--grant <value>`，也不得从 Prompt 或可继承环境变量读取。交互模式从关闭回显的终端 stdin 读取；自动模式只接受受保护本地管道或可信宿主传入的继承句柄。一次性 capability 只能接受既有 grant，不能指定新角色，并绑定 audience、目标 Session/Assignment、TTL 和单次消费 nonce。
 
 ## 6. 状态对齐
 
@@ -103,14 +176,26 @@ created / active / completed / blocked / cancelled / needs_reconciliation
 - Runtime unknown 不自动释放 owner/writer lease；
 - taskd 通过事件、artifact、Git 和 lease 进行 reconciliation。
 
-## 7. Prompt 与报告
+## 7. 上下文窗口与工作记忆
+
+- 一个 Session 可以包含多个 ContextWindow；窗口切换不创建新的 Task，也不改变 Assignment 结论。
+- 手动 reset、自动 token-budget 切换、模型变化和 resume 统一记录持久化 transition operation/event；Adapter 内部实现可以不同。
+- 如果 Runtime 支持切换前通知，taskd 可以请求 WorkingNote/ContextCheckpoint；即使 Agent 未及时写入，taskd 仍记录当前 Task 版本、owner epoch、Artifact 和 Git 引用，并标记 checkpoint 是否完整。
+- 新窗口必须重新读取当前 Task、Assignment、grant、owner epoch 和已确认业务事实，生成新的 ContextBrief；不得盲目恢复旧窗口的完整 Prompt 或过期权限。
+- History 只读接口按 Session/Assignment scope 授权，并限制搜索范围、返回大小和单次读取量。
+- WorkingNote 使用由 taskd 分配的逻辑名称和存储对象，不接受任意文件路径；create 必须带 Assignment、logicalName 和幂等键，并保证同一 Assignment 内 active logicalName 唯一；append/write 必须带幂等键、Note expectedVersion 和 current content Link expectedVersion，正文通过 Artifact publish-before-reference 协议发布。
+- History 和 WorkingNote 只能提供执行证据与工作记忆，不能直接写 Task、ReviewDecision、Requirement、Decision、Preference 或 live Prompt。
+- principal、session、assignment 和 runtime identity 由可信 connection 注入，不能由普通 history/notes tool arguments 覆盖。
+
+## 8. Prompt 与报告
 
 - Prompt 由模板、Task facts 和 Assignment scope 渲染为 PromptInstance。
+- PromptInstance 绑定 ContextWindow 和 ContextBrief 版本。
 - capability 不进入 Prompt 正文。
 - 报告路径/artifact 必须由 Assignment 预先分配。
 - 完成调用要求 idempotency key，并将 report hash 与 Assignment 绑定。
 
-## 8. 适配器测试
+## 9. 适配器测试
 
 每个 Runtime Adapter 必须通过：
 
@@ -121,5 +206,10 @@ created / active / completed / blocked / cancelled / needs_reconciliation
 - completion/blocked；
 - crash/close；
 - resume 或明确返回 unsupported；
+- 支持的 context transition mode 或明确返回 unsupported；
+- 手动与自动窗口切换产生一致的 lifecycle event；
+- model/config/skill/environment 变化后重新生成 ContextBrief；
+- resume 不重复注入 initial context，也不恢复过期 grant/owner epoch；
+- History/WorkingNote scope、幂等、版本冲突和输出边界；
 - duplicate event 幂等；
 - stale grant 拒绝。

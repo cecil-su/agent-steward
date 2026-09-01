@@ -1,6 +1,6 @@
 # 安全与权限模型
 
-> 阶段说明：任务管理 MVP 先落实本地数据、版本冲突和基本身份边界；本文完整威胁模型主要在接入 AI、高风险 Git 操作和外部 Runtime 前成为发布门槛，不阻塞纯任务管理闭环。
+> 阶段说明：Phase 1 的 Workspace/Repo Registry 先落实本地数据、canonical path 防混淆、只读 Git 边界和基本身份；Phase 2 增加 Task/Artifact 权限。完整威胁模型在接入 AI、高风险 Git 操作和外部 Runtime 前成为发布门槛，不阻塞前两层本地闭环。
 
 ## 1. 威胁模型
 
@@ -36,7 +36,7 @@ Untrusted or scoped
 - AI Session
 - Bash
 - MCP Client
-- taskctl Agent Client
+- stewardctl Agent Client
 - Herdr/native subagent
 - repository/web/tool content
 ```
@@ -51,6 +51,13 @@ Untrusted or scoped
 - AI Session
 - Service
 - Runtime Adapter
+
+Principal 是认证与授权身份，Actor 是任务领域中的 owner/worker 身份。taskd 维护受保护、可审计的 Principal–Actor binding，并根据当前认证 connection 派生 acting Actor：
+
+- 普通 Command 不能自行指定或覆盖 actingActorId；
+- `targetActorId` 只能表示被分配、被邀请或被管理的目标 Actor；
+- DomainEvent、Ownership 和审计记录中的操作者由服务端写入；
+- principal、acting actor 与 target actor 必须分别记录和授权，不能因显示名或 Session metadata 相同而视为同一身份。
 
 ### 角色层级
 
@@ -75,7 +82,9 @@ Human/Admin
 {
   "grantId": "uuid",
   "issuerPrincipalId": "...",
-  "subjectSessionId": "...",
+  "subjectPrincipalId": "...",
+  "boundSessionId": "...",
+  "boundInvocationId": "...",
   "role": "writer",
   "taskId": "...",
   "assignmentId": "...",
@@ -91,6 +100,8 @@ Human/Admin
 
 约束：
 
+- RoleGrant 始终授予 Principal；Human、AI Session、Service 和 Runtime Adapter 使用同一 subjectPrincipalId 语义。
+- `boundSessionId` / `boundInvocationId` 可选，用于进一步限制 AI 或 Runtime grant，不能替代 subjectPrincipalId。
 - Agent 只能接受已签发 grant，不能选择更高角色。
 - grant 不可扩权转发；Task Owner 只能在自己的 Task scope 内派发。
 - 所有权转移增加 owner epoch，旧 epoch 立即失效。
@@ -102,6 +113,7 @@ MCP connection、CLI Agent client 和 Runtime Adapter 使用短期 capability。
 
 - 不出现在 Prompt 正文；
 - 不作为普通命令参数写入日志；
+- 不通过可继承环境变量传递；manual attach 只从无回显 stdin、受保护管道、继承句柄或可信本地 UI 读取；
 - 绑定 connection/session/assignment；
 - 可撤销、可过期、可单次消费；
 - 不能由客户端自行构造 role 或 scope。
@@ -124,7 +136,7 @@ MCP connection、CLI Agent client 和 Runtime Adapter 使用短期 capability。
 - 有效期；
 - 使用次数。
 
-简单的 `taskctl approve` 如果 Agent 也能在同一身份下调用，不构成安全批准。
+简单的 `stewardctl approve` 如果 Agent 也能在同一身份下调用，不构成安全批准。
 
 ## 7. 固定安全不变量
 
@@ -133,6 +145,7 @@ MCP connection、CLI Agent client 和 Runtime Adapter 使用短期 capability。
 - 给自己或其他 Agent 提权；
 - 删除或改写审计历史；
 - 绕过 expectedVersion/ownerEpoch；
+- 利用幂等 Receipt 重放绕过当前 grant 或读取已失去权限的 resultRef；
 - 静默降低 Git 或数据保护策略；
 - 将外部内容直接写成用户偏好；
 - 修改安全核心后自行批准和发布。

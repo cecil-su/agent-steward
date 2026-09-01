@@ -1,15 +1,17 @@
 # 核心业务流程图
 
-本流程描述 AI 与学习能力全部启用后的完整闭环，不代表首个版本的实现顺序。第一阶段的纯任务循环见[任务管理流程图](18-task-management-workflow.md)。
+本流程描述 AI 与学习能力全部启用后的完整闭环，不代表首个版本的实现顺序。Phase 1 只实现 Workspace/Repository/Worktree Registry；Phase 2 的任务循环见[任务管理流程图](18-task-management-workflow.md)。
 
 ```mermaid
 flowchart TB
-    Start([创建或打开项目])
+    Start([创建或打开 Workspace])
+    Discover[发现 Repository 与 Worktree]
+    ConfirmRegistry{用户确认纳管范围与 identity}
 
     Import[导入 README、文档和现有代码]
-    Extract[AI 提取项目目标、需求、约束和术语]
-    ConfirmReq{用户确认项目需求}
-    SaveReq[保存已确认需求与项目决策]
+    Extract[AI 提取 Workspace 目标、需求、约束和术语]
+    ConfirmReq{用户确认 Workspace 业务事实}
+    SaveReq[保存已确认事实与决策]
 
     CapturePref[记录用户明确表达的偏好]
     CreateTask[创建或导入任务]
@@ -29,11 +31,14 @@ flowchart TB
     Learn[分析重复纠正、澄清和工作模式]
     Candidate{产生长期需求或偏好候选}
     ConfirmLearning{用户确认候选}
-    UpdateMemory[更新项目需求或用户偏好]
+    UpdateMemory[更新 Workspace 业务事实或用户偏好]
     Complete[完成任务并选择下一任务]
     End([进入下一轮])
 
-    Start --> Import
+    Start --> Discover
+    Discover --> ConfirmRegistry
+    ConfirmRegistry -->|调整| Discover
+    ConfirmRegistry -->|确认，只读注册| Import
     Import --> Extract
     Extract --> ConfirmReq
 

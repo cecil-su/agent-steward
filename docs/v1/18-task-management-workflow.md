@@ -1,6 +1,6 @@
 # 任务管理流程图
 
-本流程只描述任务从收集、整理、执行、阻塞、验收到完成的生命周期，不依赖 AI 才能成立。
+本流程描述 Phase 2 的任务生命周期，假设 Phase 1 已建立 Workspace/Repository/Worktree Registry。任务必须归属 Workspace，但不要求 Project；该流程不依赖 AI 才能成立。
 
 ```mermaid
 flowchart TB
@@ -11,7 +11,7 @@ flowchart TB
     Triage[Task Manager 整理任务]
 
     CompleteInfo{信息是否足够}
-    Refine[补充目标、说明和项目归属]
+    Refine[补充目标、说明和 Workspace/Repo 上下文]
 
     Structure[设置优先级、依赖和父子关系]
     Acceptance[定义验收条件]
@@ -31,13 +31,13 @@ flowchart TB
 
     Result{是否产生可验收结果}
     Continue[更新进度并确定下一步]
-    Review[进入 Review]
-    Check[检查验收条件、产物和记录]
+    Review[创建版本化 ReviewSubmission<br/>进入 Review]
+    Check[按已绑定 Task/criteria/evidence 版本验收]
     Accepted{是否验收通过}
 
-    Rework[记录问题并要求返工]
-    Done[进入 Done]
-    Archive[归档]
+    Rework[原子写 changes_requested Decision<br/>退回 In Progress]
+    Done[原子写 accepted Decision<br/>进入 Done]
+    Archive[设置 archiveState = archived]
     SelectNext[Task Manager 选择下一任务]
     End([进入下一轮])
 
@@ -91,4 +91,6 @@ flowchart TB
 Inbox → Ready → In Progress → Blocked → Review → Done
 ```
 
-`Cancelled` 和 `Archived` 是终止或收纳状态。AI 执行者未来也必须遵循同一 Task 生命周期，不能建立另一套 AI 专用任务状态。
+`Cancelled` 是业务终态。归档是与生命周期正交的收纳属性：它设置 `archiveState=archived` 和 archivedAt，但保留 Done、Cancelled 等原 status；恢复归档后仍从保留的 status 继续。AI 执行者未来也必须遵循同一 Task 生命周期，不能建立另一套 AI 专用任务状态。
+
+每次进入 Review 都使用新的 reviewCycle；submit 为每个 source evidence 创建由 ReviewSubmission 独立持有的 active `review_evidence` Link，并固定 submittedTaskVersion、acceptanceCriteriaHash 和 evidence set。accept/request-changes 同时校验 Task 与 Submission 版本；accept 另外校验 submission-owned Link/version/contentHash，request-changes 可把证据缺失作为返工理由。两者都在同一事务写 Decision 和状态转换；Done 重新打开固定回到 In Progress，历史 accepted Decision 不得用于再次完成任务。

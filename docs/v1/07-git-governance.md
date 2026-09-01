@@ -1,6 +1,6 @@
 # Git 生命周期治理
 
-> 阶段说明：Git 治理是 AI 执行和高级集成能力，不是任务管理 MVP 的前置条件。首版 Task 可以只保存仓库、分支或提交链接，不代替原生 Git 执行写操作。
+> 阶段说明：Phase 1 只通过 Repository/Worktree Registry 读取 identity、Branch、HEAD 和 dirty/missing 状态；不执行 Git 写操作。本文的 Plan → Approve → Execute → Verify 属于高级集成阶段，不是 Registry 或 Task 闭环的前置条件。
 
 ## 1. 目标
 

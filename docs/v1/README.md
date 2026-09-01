@@ -1,12 +1,12 @@
 # Agent Steward V1 设计文档
 
-状态：**任务管理优先的设计基线草案**
+状态：**Workspace / Repository 优先的设计基线草案**
 
-目标：先冻结一个不依赖 AI 也成立的任务管理器，再分阶段接入 AI 执行以及需求、偏好和流程优化能力。
+目标：先冻结 Workspace、Repository 和 Worktree 的本地工作边界，再在该边界上交付不依赖 AI 的任务与验收闭环，之后接入 AI 执行、业务事实、实现认知和优化能力。
 
 ## 建议阅读顺序
 
-先读[产品定位](01-product-positioning.md)、[任务管理器架构图](17-task-manager-architecture.md)和[任务管理流程图](18-task-management-workflow.md)，再读[业务事实工作台架构图](19-business-fact-workbench-architecture.md)和[业务事实与 Git 变更流程图](20-business-fact-and-git-flow.md)，最后读[需求说明](02-requirements.md)、[总体架构](03-architecture.md)、[领域与数据模型](05-domain-model.md)和[V1 实施路线](11-roadmap.md)。第 13–16 篇描述 AI 与优化能力全部启用后的完整产品视图。
+先读[产品定位](01-product-positioning.md)和[V1 实施路线](11-roadmap.md)，确认 Workspace/Repo → Task → AI → Knowledge 的交付顺序；再读[任务管理器架构图](17-task-manager-architecture.md)和[任务管理流程图](18-task-management-workflow.md)，随后读[业务事实工作台架构图](19-business-fact-workbench-architecture.md)和[业务事实与 Git 变更流程图](20-business-fact-and-git-flow.md)，最后读[需求说明](02-requirements.md)、[总体架构](03-architecture.md)和[领域与数据模型](05-domain-model.md)。第 13–16 篇描述全部能力启用后的完整产品视图，不代表首期实现顺序。
 
 ## 文档目录
 
@@ -34,22 +34,22 @@
 ## 已确认方向
 
 - 产品将作为独立的个人工具开发，并计划后续公开到 GitHub。
-- 第一需求是任务管理；首个可用版本不能依赖 AI、MCP 或 Git 自动化才能成立。
-- Task 是共享工作单元；项目、子任务、状态、依赖、owner、下一步、验收和历史是核心能力。
+- 第一交付层是 Workspace + Repository/Worktree Registry；首个可用版本只读识别本地代码现场，不依赖 AI、MCP 或 Git 写操作。
+- Task 是第二交付层的共享工作单元，必须归属 Workspace，并可通过显式 binding 关联零个或多个 Repository/Worktree；不以 Project 作为必经父级。
 - TUI 与 GUI 都是一等客户端，调用同一套 Command、Query 和 Event API，并读取同一权威状态。
 - 人类、AI 和自动化都使用通用 Actor/Owner 模型；Task Manager 只管理任务池，Task Owner 推进具体任务。
-- AI 执行和流程体验属于第二优先级，必须接入同一任务生命周期，不能形成独立的“AI 任务系统”。
-- 需求、用户偏好、流程与 Prompt 优化属于第三优先级，在任务循环外读取历史并生成候选。
+- AI 执行属于第三交付层，必须接入同一任务生命周期，不能形成独立的“AI 任务系统”。
+- BusinessFact、实现快照/映射和优化属于后续交付层；优化只能在任务循环外读取历史并生成候选。
 - SQLite 作为运行时唯一权威数据源。
 - 数据默认保留在本地且不上传遥测；所有任务变化记录为可追溯事件。
-- Workspace 承载跨 Repo、跨 Branch 的业务事实；Git 只提供绑定 Commit 的实现快照和证据。
+- Workspace 从首期起承载 Repository、Worktree、Task 和后续业务事实；Git 首期只提供只读身份与状态，后续才提供绑定 Commit/WorktreeSnapshot 的实现快照和证据。
 - Optimizer 默认只能观察和提出候选，用户确认后才允许应用。
-- AI、高风险 Git 操作和多 Runtime 适配继续保留严格授权设计，但不阻塞任务管理 MVP。
+- AI、高风险 Git 操作和多 Runtime 适配继续保留严格授权设计，但不阻塞 Workspace/Repo Registry 与后续任务闭环。
 
 ## 非目标
 
 - 首个里程碑不提供云端多租户、团队协作、组织级 RBAC 或跨机器集群。
-- 首个里程碑不要求 AI 执行、多 Runtime、Git push 或完整会话采集。
+- 首个里程碑不要求 Task/Review、AI 执行、多 Runtime、Git 写操作、代码扫描或完整会话采集。
 - AI 能力不能成为创建、查看、推进和验收普通任务的前置条件。
 - 优化模块不得静默修改用户偏好、项目需求、安全策略、Prompt 或代码。
 - 核心领域模型不写死 Herdr、Pi、Claude、Codex 或任一 Git 平台。

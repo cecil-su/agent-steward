@@ -1,6 +1,6 @@
 # 产品架构图
 
-本图描述三层完整产品目标：任务管理是中心和第一交付层；AI 上下文与执行是第二层；项目需求、用户偏好和反馈学习是循环外的第三层。纯任务管理器边界见[任务管理器架构图](17-task-manager-architecture.md)。
+本图描述完整产品目标，不代表同时交付：Workspace/Repository Registry 是第一层；Task/Review 是第二层；AI 上下文与执行是第三层；业务事实、实现认知、用户偏好和反馈学习位于后续层。任务边界见[任务管理器架构图](17-task-manager-architecture.md)。
 
 ```mermaid
 flowchart TB
@@ -13,10 +13,11 @@ flowchart TB
     end
 
     subgraph Core[任务与知识核心]
-        PM[项目管理]
+        Workspace[Workspace Registry]
+        Repo[Repository / Worktree Registry]
         RM[需求管理]
         Pref[用户偏好管理]
-        Decision[项目决策记录]
+        Decision[Workspace 决策记录]
         Task[任务管理与状态机]
         Feedback[反馈与纠正]
     end
@@ -51,8 +52,11 @@ flowchart TB
     User --> Access
     Access --> Core
 
-    PM --> RM
-    PM --> Decision
+    Workspace --> Repo
+    Workspace --> RM
+    Workspace --> Decision
+    Workspace --> Task
+    Repo -->|TaskContextBinding| Task
     RM --> Task
     Pref --> Task
     Decision --> Task

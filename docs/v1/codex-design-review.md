@@ -283,3 +283,19 @@ Conformance tests 应加入上述崩溃窗口和重复请求场景，而不只�
 6. 再决定具体技术栈、首个 Native Host 和后续 Git/Optimizer 细节。
 
 前四项是当前真正阻断设计冻结和编码的部分。其余问题可在对应垂直切片开始前关闭。
+
+## 增量审阅记录：版本绑定、备份与同步一致性
+
+状态：**已纳入规范设计，待实现与故障测试验证**
+
+### 高优先级
+
+1. **ReviewDecision 未绑定被验收版本**：增加 ReviewSubmission、reviewCycle、submittedTaskVersion、acceptanceCriteriaHash 和版本化 evidence set；accept/request-changes 同时校验 Task/Submission 版本，并在一个事务写 Decision 与状态转换。Done 重新打开后必须创建新 cycle，旧 Decision 不可复用。
+2. **SQLite 与 Blob 缺少一致性备份协议**：增加 BackupOperation/BackupArtifactPin、短期 write barrier、单一 SQLite 一致性点、Artifact manifest/eventWatermark、online backup、Blob hash 校验和最终完整性 manifest。restore 在隔离根校验 DB/schema/Link → Blob/key envelope 后原子启用。
+
+### 中优先级
+
+3. **Snapshot 与 event cursor 可能跳过事件**：冻结全局 streamPosition；snapshot + eventWatermark 来自同一个 SQLite read transaction，cursor 超出 retention 时返回 CURSOR_EXPIRED。ArtifactBlobPending 改为 internal/audit-only 存储记录，不进入业务 Event Stream。
+4. **幂等 Receipt 可能形成授权旁路**：Receipt 命中只阻止重复副作用；返回历史 payload/resultRef 前必须重新验证当前 connection、grant 和对象读取权限。
+5. **send-prompt 的 Runtime 目标不明确**：V1 约束每个 Assignment 最多一个 starting/active AgentRun，数据库强制唯一；sendPrompt/status/close 解析并校验该 active Run，不能按时间猜测。
+6. **WorktreeSnapshot 可能发生撕裂采集**：发布前比较 startStateToken、evidenceStateToken 和 endStateToken；不一致时有界重试或失败，不得以 partial 发布多个时刻拼接的现场。

@@ -1,6 +1,6 @@
 # TUI 与 GUI 协同交互流程图
 
-本图描述 AI 与优化角色启用后的 TUI/GUI 协同。第一阶段只实现其中的任务创建、同步、推进、阻塞、Review 和验收部分，详见[任务管理流程图](18-task-management-workflow.md)。
+本图描述全部能力启用后的 TUI/GUI 协同。Phase 1 只实现 Workspace onboarding、Repo/Worktree discovery、只读状态和 unlink；Phase 2 才加入任务创建、推进、Review 和验收，详见[任务管理流程图](18-task-management-workflow.md)。
 
 ```mermaid
 sequenceDiagram
@@ -12,6 +12,12 @@ sequenceDiagram
     participant Owner as Task Owner
     participant Agents as Subagents
     participant Steward as Context & Optimization Steward
+
+    User->>TUI: 创建或打开 Workspace
+    TUI->>Core: workspace create/open
+    Core->>Core: 发现并规范化 Repo/Worktree identity
+    Core-->>TUI: 返回 Branch/HEAD/dirty/missing 状态
+    Core-->>GUI: 同步 Workspace/Repo 概览
 
     alt 从 TUI 发起
         User->>TUI: 创建或更新任务
@@ -84,9 +90,10 @@ sequenceDiagram
 
 | 场景 | TUI | GUI |
 |---|---|---|
+| Workspace onboarding、Repo/Worktree 状态 | 快速命令 | 概览与冲突处理 |
 | 快速创建、查询和推进任务 | 主入口 | 支持 |
 | 执行日志和实时状态 | 流式查看 | 聚合查看 |
 | 任务看板和依赖关系 | 简化列表 | 主入口 |
-| 项目需求与偏好维护 | 快速编辑 | 主入口 |
+| Workspace 业务事实与偏好维护 | 快速编辑 | 主入口 |
 | 计划、差异和产物审批 | 可信终端确认 | 可视化主入口 |
 | 优化候选审阅 | 摘要与命令 | 证据、对比和影响分析 |

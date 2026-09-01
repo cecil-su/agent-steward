@@ -1,6 +1,6 @@
 # TUI 与 GUI 交互架构图
 
-TUI 和 GUI 是同一任务核心的两个一等客户端。二者共享命令契约、查询模型、事件流和权限判定，不维护彼此独立的业务状态。本图包含后续 AI/优化入口；第一阶段核心边界见[任务管理器架构图](17-task-manager-architecture.md)。
+TUI 和 GUI 是同一 taskd 的两个一等客户端。二者共享命令契约、查询模型、事件流和权限判定，不维护彼此独立的业务状态。本图包含后续 Task、AI 和优化入口；Phase 1 先交付 Workspace/Repo onboarding 与概览，任务核心边界见[任务管理器架构图](17-task-manager-architecture.md)。
 
 ```mermaid
 flowchart TB
@@ -8,18 +8,19 @@ flowchart TB
 
     subgraph Clients[交互客户端]
         TUI[TUI<br/>快速命令、监控、终端审批]
-        GUI[GUI<br/>任务看板、项目知识、可视化审批]
+        GUI[GUI<br/>Workspace/Repo 概览、任务看板、可视化审批]
         MCP[MCP<br/>AI 结构化调用]
     end
 
     subgraph Interface[统一交互层]
         Command[Command API<br/>创建、分配、推进、确认]
-        Query[Query API<br/>任务、需求、偏好、执行记录]
+        Query[Query API<br/>Workspace/Repo、任务、需求、执行记录]
         Events[Event Stream<br/>进度、阻塞、产物、提案]
         Approval[Approval Service<br/>可信用户确认]
     end
 
-    subgraph Delivery[内层任务交付循环]
+    subgraph Delivery[工作上下文与任务交付]
+        Registry[Workspace / Repo / Worktree Registry]
         Manager[Task Manager<br/>只管理任务池、状态和下一步]
         Owner[Task Owner<br/>管理单个任务和子代理]
         Subagents[Subagents<br/>Scout / Writer / Reviewer / Tester]
@@ -27,7 +28,7 @@ flowchart TB
 
     subgraph Learning[外层学习与优化循环]
         Steward[Context & Optimization Steward]
-        Requirements[项目需求与决策]
+        Requirements[Workspace 业务事实与决策]
         Preferences[用户偏好<br/>确认 / 候选 / 任务级]
         Proposals[Prompt / Workflow / Skill 提案]
         Context[Context Brief Builder]
@@ -61,7 +62,8 @@ flowchart TB
     Events --> GUI
     Events --> MCP
 
-    Taskd --> Manager
+    Taskd --> Registry
+    Registry -->|TaskContextBinding| Manager
     Manager -->|指定 Owner| Owner
     Owner -->|拆分 Assignment| Subagents
     Subagents --> Adapters
