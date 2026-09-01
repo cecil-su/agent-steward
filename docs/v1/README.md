@@ -6,7 +6,7 @@
 
 ## 建议阅读顺序
 
-先读[产品定位](01-product-positioning.md)、[任务管理器架构图](17-task-manager-architecture.md)和[任务管理流程图](18-task-management-workflow.md)，再读[需求说明](02-requirements.md)、[总体架构](03-architecture.md)、[领域与数据模型](05-domain-model.md)和[V1 实施路线](11-roadmap.md)。第 13–16 篇描述 AI 与优化能力全部启用后的完整产品视图。
+先读[产品定位](01-product-positioning.md)、[任务管理器架构图](17-task-manager-architecture.md)和[任务管理流程图](18-task-management-workflow.md)，再读[业务事实工作台架构图](19-business-fact-workbench-architecture.md)和[业务事实与 Git 变更流程图](20-business-fact-and-git-flow.md)，最后读[需求说明](02-requirements.md)、[总体架构](03-architecture.md)、[领域与数据模型](05-domain-model.md)和[V1 实施路线](11-roadmap.md)。第 13–16 篇描述 AI 与优化能力全部启用后的完整产品视图。
 
 ## 文档目录
 
@@ -28,6 +28,8 @@
 16. [TUI 与 GUI 协同交互流程图](16-tui-gui-interaction-flow.md)
 17. [任务管理器架构图](17-task-manager-architecture.md)
 18. [任务管理流程图](18-task-management-workflow.md)
+19. [业务事实工作台架构图](19-business-fact-workbench-architecture.md)
+20. [业务事实与 Git 变更流程图](20-business-fact-and-git-flow.md)
 
 ## 已确认方向
 
@@ -40,6 +42,7 @@
 - 需求、用户偏好、流程与 Prompt 优化属于第三优先级，在任务循环外读取历史并生成候选。
 - SQLite 作为运行时唯一权威数据源。
 - 数据默认保留在本地且不上传遥测；所有任务变化记录为可追溯事件。
+- Workspace 承载跨 Repo、跨 Branch 的业务事实；Git 只提供绑定 Commit 的实现快照和证据。
 - Optimizer 默认只能观察和提出候选，用户确认后才允许应用。
 - AI、高风险 Git 操作和多 Runtime 适配继续保留严格授权设计，但不阻塞任务管理 MVP。
 
