@@ -2,6 +2,15 @@
 
 V0 是 Agent Steward 的历史设计参考，不是当前产品实现依据。当前设计以 [V1 文档](../v1/README.md)为准。原始内容可通过 Git 历史查看；本目录允许为消除内部矛盾、安全歧义和不可实施合同而持续勘误。
 
+## 2026-09-02
+
+- 增加 Rust Cargo workspace 与 `taskctl` V0 可运行参考实现；
+- 实现 Task、Session、Checkpoint、Note、History 和 Session Import 的 SQLite 闭环；
+- 实现本地 Worktree create/status/remove/adopt/detach、安全观察和显式恢复；
+- 增加稳定 JSON envelope、compare-and-swap、数据库权限告警和 `doctor`；
+- 使用临时数据库与临时 Git 仓库增加单元、集成和 CLI 合同测试；
+- 保持 V1 为当前产品设计，V0 实现不提前引入 Daemon、GUI、MCP 或 V1 领域模型。
+
 ## 2026-09-01
 
 - 冻结 Task Create/Patch、状态转换、expected version 和稳定 JSON DTO；

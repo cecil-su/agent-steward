@@ -2,7 +2,26 @@
 
 Agent Steward 是一个本地优先、面向个人开发者的 Workspace 工作管家。它首先建立 Workspace、Repository 和 Worktree 的可靠本地边界；随后在这些真实代码上下文中管理任务、产物与验收；再让人类与 AI 共享同一套执行流程，并逐步沉淀业务事实、实现快照和优化候选。
 
-项目当前处于 **V1 设计阶段**，尚未开始实现。
+项目包含两条清晰分离的演进线：
+
+- `taskctl` V0 已实现为本地优先的 Rust CLI，用于 Task、Session、Checkpoint、History、Session Import 和安全 Worktree 连续性；
+- V1 仍处于设计阶段，描述更完整的 Workspace、Actor、Review、Daemon、TUI/GUI 与 MCP 产品架构。
+
+## V0：taskctl
+
+V0 实现位于 Cargo workspace，默认数据库是操作系统用户应用数据目录下的 `agent-steward/steward.db`。开发与自动化测试应始终使用 `--database` 指定隔离数据库。
+
+```bash
+cargo build --workspace
+cargo test --workspace
+
+cargo run -p taskctl -- \
+  --database /tmp/agent-steward-demo.db \
+  --json --input task.json \
+  task create TASK-1
+```
+
+所有 mutation 使用 `--if-version` compare-and-swap；`--json` 输出稳定 envelope。Worktree 命令仅操作本地现有分支，不提供 `push`、`force`、`clean`、`reset` 或隐式 `stash`。完整合同从 [docs/v0/README.md](docs/v0/README.md) 开始阅读，AI/Agent 的调用约束见 [AGENTS.md](AGENTS.md)。
 
 ## 产品优先级
 

@@ -1,0 +1,21 @@
+[package]
+name = "steward-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+git-adapter = { path = "../git-adapter" }
+hex.workspace = true
+mime_guess.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+steward-core = { path = "../core" }
+storage-sqlite = { path = "../storage-sqlite" }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,6 +1,6 @@
 # Agent Steward V0 文档
 
-> 状态：历史参考、持续勘误，不是原始文档的逐字不可变快照，也不是当前产品实现依据。当前设计请阅读 [V1 文档](../v1/README.md)，V0 修订记录见 [CHANGELOG](CHANGELOG.md)。
+> 状态：历史合同与可运行参考实现、持续勘误，不是当前 V1 产品设计依据。当前产品设计请阅读 [V1 文档](../v1/README.md)，V0 修订记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 项目概览
 
@@ -45,4 +45,4 @@
 - 结构化输入和 `--json` 输出使用已版本化 JSON 合同；
 - 完整会话自动采集由后续 AI Client Hook / Runtime Adapter 提供；
 - 初版不实现 Owner、Assignment、Event、Operation、Approval、Daemon 或 GUI；
-- 本阶段不创建源码或安装依赖，进入实现需要用户另行明确确认。
+- Cargo workspace 中的 `taskctl` 是本合同的可运行参考实现，用于验证 M1–M3 的本地 CLI 闭环；它不提前实现 V1 的 Daemon、TUI/GUI、MCP 或产品领域模型。
