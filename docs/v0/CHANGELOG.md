@@ -20,6 +20,6 @@ V0 是 Agent Steward 的历史设计参考，不是当前产品实现依据。�
 - 将 Session Import 明确为 add/list/remove，增加 SHA-256 去重、逻辑删除和物理擦除边界；
 - 冻结 History change type、最低 payload、错误码和警告码；
 - 明确 claim/resume 只创建全新目标 Session，禁止 self-reference 和历史 Session 重激活，并固定 Session 输出排序；
-- 禁止 `worktree create` 覆盖既有引用，以按 Task advisory lock 串行化外部操作，并用数据库唯一索引阻止多个 Task 登记同一路径；
+- 禁止 `worktree create` 覆盖既有引用，以按 Task advisory lock 串行化外部操作，并在 `BEGIN IMMEDIATE` 写事务内实时扫描 Owner，阻止多个 Task 登记同一路径；
 - 要求 Git 任意退出状态后重观测现场，增加 `GIT_COMMAND_FAILED`，并将无法排除外部变化的结果归入 `PARTIAL_EXTERNAL_STATE`；
 - 增加本地数据库权限以及未来 Daemon 的认证、Origin 和 CSRF 边界。

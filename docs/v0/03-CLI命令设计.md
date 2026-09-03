@@ -99,7 +99,7 @@ taskctl task close <task-id> --if-version <version> --outcome <outcome> [--reaso
 taskctl session list [--task <task-id>]
 taskctl session show <session-id>
 taskctl session attach <task-id> --session <session-id> --if-version <version> [--source <client>] [--external-session <external-id>] [--record-path <path>]
-taskctl session import add <task-id> --session <session-id> --if-version <version> --file <session-file>
+taskctl session import add <task-id> --session <session-id> --if-version <version> --file <session-file> --confirm-sensitive-content-reviewed
 taskctl session import list <session-id> [--json]
 taskctl session import remove <import-id> --if-version <version> [--yes]
 taskctl session close <session-id> --if-version <version>
@@ -109,7 +109,7 @@ taskctl session close <session-id> --if-version <version>
 
 `attach` 创建本地 Session，或者在全部已提供身份字段一致、调用方携带当前 version 时返回 no-op success；no-op 不写 History、不递增 version。提供 `externalSessionId` 时也必须提供非空 `source`，两者组合在外部 ID 非空时全局唯一。`import add` 要求目标 Session 已存在并属于指定 Task，来源使用该 Session 已保存的 `source`，不从文件内容猜测或创建 Session。`close` 设置 `endedAt`；若它是 Task 的当前 Session，则在同一事务中清空 `currentSessionId` 并写入 History，但不改变 Task 状态。
 
-`import add` 只接受可确定大小的普通文件，解析前上限为 16 MiB；拒绝目录、设备、Socket 和 FIFO。实现必须边读取边计算 SHA-256，并在超过上限时停止，不得先把无限输入完整载入内存。数据库无内容级加密，执行前必须给出稳定警告码 `SENSITIVE_CONTENT_CHECK_REQUIRED`。
+`import add` 只接受可确定大小的普通文件，解析前上限为 16 MiB；拒绝目录、设备、Socket 和 FIFO。实现必须使用固定大小缓冲区边读取边计算 SHA-256，并在超过上限时停止，不得先把无限输入完整载入内存。数据库无内容级加密；调用方必须在读取文件和数据库 mutation 前携带 `--confirm-sensitive-content-reviewed`，否则返回 `INVALID_INPUT`，其 `details.field=confirmSensitiveContentReviewed`。成功响应仍返回稳定警告码 `SENSITIVE_CONTENT_CHECK_REQUIRED` 作为安全提示。
 
 相同 `sessionId + sha256` 只保存一份。调用方携带当前 version 重复导入时返回现有 `SessionImportView`、警告 `DUPLICATE_SESSION_IMPORT`，不更新 `sourcePath`、不写 History、不递增 version；携带旧 version 仍先返回 `VERSION_CONFLICT`。`import list` 只返回元数据，不返回 BLOB 内容。
 
@@ -127,7 +127,7 @@ taskctl worktree adopt <task-id> --repo <path> --path <worktree-path> --if-versi
 taskctl worktree detach <task-id> --expected-path <worktree-path> --if-version <version>
 ```
 
-`create` 要求调用方显式提供目标路径。命令取得下述按 Task advisory lock 后，必须重新读取 Task version，并确认 Task 的 Repository 路径、common-dir 身份、Branch 和 Worktree 引用全部为空；任一引用已经存在时，在调用 Git 前返回 `WORKTREE_SAFETY_REFUSED`，不能覆盖或创建第二个未登记 Worktree。Git 调用完成后无论退出状态如何都必须重新观察现场；只有现场证明创建成功，才在数据库事务中以同一 version compare-and-swap，并同时保存实际 Repository 路径、规范化 common-dir 身份、Branch 和 Worktree 引用。`--branch` 表示已经存在的本地分支；V0 不隐式创建分支。目标分支不存在、已被其他 Worktree 占用或 Repository 身份不一致时拒绝。如果未来需要创建分支，另行增加显式 `--new-branch` 和 `--start-point` 合同。
+`create` 要求调用方显式提供目标路径。命令取得下述按 Task advisory lock 后，必须重新读取 Task version，并确认 Task 的 Repository 路径、common-dir 身份、Branch 和 Worktree 引用全部为空；任一引用已经存在时，在调用 Git 前返回 `WORKTREE_SAFETY_REFUSED`，不能覆盖或创建第二个未登记 Worktree。Git 调用完成后无论退出状态如何都必须重新观察现场；只有现场证明创建成功，才在数据库事务中以同一 version compare-and-swap，并同时保存实际 Repository 路径、规范化 common-dir 身份、Branch 和 Worktree 引用。数据库提交后、返回成功前必须再次确认 Worktree 仍存在且身份一致。`--branch` 表示已经存在的本地分支；V0 不隐式创建分支。目标分支不存在、已被其他 Worktree 占用或 Repository 身份不一致时拒绝。如果未来需要创建分支，另行增加显式 `--new-branch` 和 `--start-point` 合同。
 
 Repository、Worktree 和目标父目录必须遵循安全文档中的 `CanonicalPath` 与 `RepositoryIdentity` 合同。数据库路径相等、用户输入字符串相等或单独一次 `resolve()` 都不足以证明是同一现场。
 
@@ -137,21 +137,21 @@ Repository、Worktree 和目标父目录必须遵循安全文档中的 `Canonica
 
 - 创建前检查仓库、目标分支和路径；
 - 创建前拒绝任何已经登记 Repository/Worktree 引用的 Task；
-- 状态命令实时读取 HEAD、dirty、staged 和 untracked；
+- 状态命令实时读取 HEAD、dirty、staged、untracked 和 ignored；
 - dirty Worktree 默认拒绝删除；
 - 不提供隐式 force、clean、reset、stash 或 push；
-- 删除成功后才清除 Task 中的 Worktree 引用。
+- 删除成功后才清除 Task 中的 Worktree 引用，并在数据库提交后再次确认路径和 Git 登记都未出现。
 
 `remove` 在交互终端且未提供 `--yes` 时显示规范化目标路径并要求确认；非交互环境未提供 `--yes` 时直接拒绝，不得等待 Prompt。
 
 Git 与 SQLite 部分完成时使用显式恢复命令：
 
-- `adopt` 仅在 Git 实时证明该规范化路径是指定 Repository 已登记的 Worktree、且 Task 当前没有 Worktree 引用时，保存实际 Repository 路径、common-dir 身份、Branch 和 Worktree 引用；它不创建、不移动也不修改 Worktree；
-- `detach` 仅在 `--expected-path` 与数据库中的规范化路径完全一致，且 Git 与文件系统证明该 Worktree 已不存在时清除陈旧引用；它不删除任何文件；
+- `adopt` 仅在 Git 实时证明该规范化路径是指定 Repository 已登记的 Worktree、且 Task 当前没有 Worktree 引用时，保存实际 Repository 路径、common-dir 身份、Branch 和 Worktree 引用；提交前必须再次复核，提交后返回成功前也必须确认引用仍存在，否则返回 `PARTIAL_EXTERNAL_STATE`；它不创建、不移动也不修改 Worktree；
+- `detach` 仅在 `--expected-path` 与数据库中的规范化路径完全一致，且 Git 与文件系统证明该 Worktree 已不存在时清除陈旧引用；提交前必须再次复核，提交后返回成功前也必须确认引用未被外部 Git 重建，否则返回 `PARTIAL_EXTERNAL_STATE`；它不删除任何文件；
 - 两个命令都必须执行 Task version compare-and-swap、写入 History，并在现场无法证明安全时拒绝；
 - `doctor` 只给出诊断和建议命令，不自动调用 `adopt` 或 `detach`。
 
-每次 `git worktree add/remove` 启动后，无论进程退出码是成功还是失败，都必须重新观察 CanonicalPath、RepositoryIdentity 和 Worktree 登记状态。只有能够证明现场未改变时，非零退出才返回 `GIT_COMMAND_FAILED`。如果现场已经改变而数据库尚未提交，返回 `PARTIAL_EXTERNAL_STATE` 和 `adopt`/`detach` 建议；如果 Git 已经启动且无法证明现场是否改变，同样返回 `PARTIAL_EXTERNAL_STATE`，其中 `gitState="unknown"`，建议命令为 `taskctl doctor`，不能降级为 `PATH_IDENTITY_UNKNOWN` 或普通 Git 错误。
+每次 `git worktree add/remove` 启动后，无论进程退出码是成功还是失败，都必须重新观察 CanonicalPath、RepositoryIdentity 和 Worktree 登记状态。只有能够证明现场未改变时，非零退出才返回 `GIT_COMMAND_FAILED`。如果现场已经改变而数据库尚未提交，返回 `PARTIAL_EXTERNAL_STATE` 和 `adopt`/`detach` 建议；`create` 已创建 Worktree 但 Task 引用仍为空时，必须重新读取 Task 并在建议中携带其当前 version，不能只建议无法发现孤立 Worktree 的 `doctor`。如果 Git 已经启动且无法证明现场是否改变，同样返回 `PARTIAL_EXTERNAL_STATE`，其中 Git 状态为 `unknown`，建议命令为 `taskctl doctor`，不能降级为 `PATH_IDENTITY_UNKNOWN` 或普通 Git 错误。数据库已经提交而后置观察发现不一致时，`databaseState` 必须为 `updated`。
 
 ## 5. History 与诊断
 
@@ -194,9 +194,13 @@ AI 应遵守：
 }
 ```
 
-失败时 `ok=false`、`data=null`，`error` 至少包含 `code`、`message`、`retryable` 和 `details`。可选字段必须显式输出为 `null`，不能因为空而省略；输出消费者必须忽略未来新增字段。输入中的未知字段拒绝，以防拼写错误静默丢失。
+失败时 `ok=false`、`data=null`，`error` 至少包含 `code`、`message`、`retryable` 和 `details`。可选字段必须显式输出为 `null`，不能因为空而省略；输出消费者必须忽略未来新增字段。输入中的未知字段拒绝，以防拼写错误静默丢失。持久化 Checkpoint 或 History JSON 无法解码时返回 `DATABASE_UNAVAILABLE`，不得转换为空数组或 `null`；`resume` 必须在创建新 Session 前完成 Checkpoint 解码。
 
-所有成功的 Task mutation 在 `data.task` 中返回完整 Task，其 `version` 是 mutation 后的新版本。`VERSION_CONFLICT` 的 `details` 返回 `expectedVersion` 和 `currentVersion`。Git 已经改变现场，或 Git 启动后无法证明现场未改变而数据库尚未提交时，返回 `PARTIAL_EXTERNAL_STATE`；`details` 返回规范化 Repository/Worktree 路径、实际或 `unknown` Git 状态和可执行的 `adopt`、`detach` 或 `taskctl doctor` 建议，不得以自然语言作为唯一判定依据。
+所有成功的 Task mutation 在 `data.task` 中返回完整 Task，其 `version` 是 mutation 后的新版本。`VERSION_CONFLICT` 的 `details` 返回 `expectedVersion` 和 `currentVersion`。Git 已经改变现场，或操作期间无法证明 Git 与数据库一致时，返回 `PARTIAL_EXTERNAL_STATE`；`details` 返回规范化 Repository/Worktree 路径、实际或 `unknown` Git 状态、稳定的 `databaseState`（`unchanged`、`updated` 或 `unknown`），以及可执行的 `adopt`、`detach` 或 `taskctl doctor` 建议。为保持 `schemaVersion: 1` 兼容，`recommendedCommand` 保持字符串；新增的 `recommendedArgs` 是不经过 Shell 拼接的参数数组，首项为 `taskctl`，并显式携带 `--database` 和规范化数据库路径；Task ID、Repository 与 Worktree 路径各自占用独立数组元素。
+
+`gitState` 只能承载可判定的现场事实：无法证明现场时（例如后置观察失败）必须稳定输出字符串 `"unknown"`，不得用包含 `phase`/`observationError` 的对象冒充状态；`phase`、`observationError`、`observed` 等过程诊断统一放入可选 `diagnostics` 对象，无诊断时显式输出 `null`。`detach` 建议只在该 Task 的文件系统路径与 Git 登记均已证明不存在时给出；目录缺失但 Git 仍登记该 Worktree 时不得建议 `detach`（它必然被拒绝），应建议 `taskctl doctor` 并在 `diagnostics` 或 doctor issue 中说明需要先清理 Git 登记或恢复目录。
+
+`databaseState=unchanged` 表示本次命令未提交数据库 mutation，`updated` 表示 mutation 已提交，`unknown` 表示提交结果无法确认；该字段不推断其他进程是否同时修改了数据库。
 
 V0 稳定错误码固定为：
 
@@ -213,7 +217,7 @@ V0 稳定错误码固定为：
 | `WORKTREE_SAFETY_REFUSED` | 5 | false | `reason`、`worktreePath` |
 | `PATH_IDENTITY_UNKNOWN` | 5 | false | `inputPath`、`reason` |
 | `GIT_COMMAND_FAILED` | 5 | false | `operation`、`exitStatus`、`stderrSummary` |
-| `PARTIAL_EXTERNAL_STATE` | 6 | false | `repositoryPath`、`worktreePath`、`gitState`、`recommendedCommand` |
+| `PARTIAL_EXTERNAL_STATE` | 6 | false | `repositoryPath`、`worktreePath`、`gitState`、`databaseState`、`diagnostics`（无诊断时为 `null`）、`recommendedCommand: string`、`recommendedArgs: string[]` |
 | `DATABASE_UNAVAILABLE` | 10 | false | `reason` |
 | `INTERNAL` | 10 | false | `diagnosticId` |
 
@@ -228,10 +232,10 @@ V0 DTO 固定如下；这里列出的可选字段也必须以 `null` 输出：
 | `CheckpointView` | `id`、`taskId`、`sessionId`、`summary`、`completed`、`decisions`、`pending`、`nextStep`、`risks`、`gitHead`、`createdAt` |
 | `TaskNoteView` | `id`、`taskId`、`sessionId`、`noteType`、`text`、`createdAt` |
 | `SessionImportView` | `id`、`sessionId`、`sourcePath`、`mediaType`、`sha256`、`sizeBytes`、`importedAt`；不回传 BLOB 内容 |
-| `WorktreeStatus` | `registered`、`repositoryPath`、`repositoryCommonDir`、`path`、`exists`、`branch`、`head`、`staged`、`unstaged`、`untracked`、`observedAt` |
+| `WorktreeStatus` | `registered`、`repositoryPath`、`repositoryCommonDir`、`path`、`exists`、`branch`、`head`、`staged`、`unstaged`、`untracked`、`ignored`、`observedAt` |
 | `HistoryEntry` | `id`、`taskId`、`sequence`、`changeType`、`sessionId`、`occurredAt`、`summary`、`payload` |
 
-`WorktreeStatus.registered/exists` 是布尔值。`repositoryPath`、`repositoryCommonDir`、`path` 和 `branch` 是数据库登记值：`registered=true` 时必须保留并返回，即使文件系统中的 Worktree 已经不存在；`registered=false` 时这些字段为 `null`，`exists=false`。`exists` 和 `observedAt` 来自实时观察；`head`、`staged`、`unstaged`、`untracked` 也是观察值，Worktree 不存在时分别为 `null`，不能伪造空 HEAD 或空数组。Worktree 存在时三个文件数组按 Repository 相对路径字典序排列。只读 `worktree status` 的 Git 观察失败时返回 `GIT_COMMAND_FAILED`；Git mutation 启动后的后置观察无法证明现场未改变时返回 `PARTIAL_EXTERNAL_STATE`，二者都不能返回伪造状态。
+`WorktreeStatus.registered/exists` 是布尔值。`repositoryPath`、`repositoryCommonDir`、`path` 和 `branch` 是数据库登记值：`registered=true` 时必须保留并返回，即使文件系统中的 Worktree 已经不存在；`registered=false` 时这些字段为 `null`，`exists=false`。`exists` 和 `observedAt` 来自实时观察；`head`、`staged`、`unstaged`、`untracked`、`ignored` 也是观察值，Worktree 不存在时分别为 `null`，不能伪造空 HEAD 或空数组。Worktree 存在时四个文件数组按 Repository 相对路径字典序排列。只读 `worktree status` 的 Git 观察失败时返回 `GIT_COMMAND_FAILED`；Git mutation 启动后的后置观察无法证明现场未改变时返回 `PARTIAL_EXTERNAL_STATE`，二者都不能返回伪造状态。
 
 命令的 `data` 映射固定为：
 
@@ -257,5 +261,5 @@ DTO 与 SQLite 字段分离，但字段含义必须一一映射；时间统一�
 - `2`：输入或 Schema 错误；
 - `4`：版本、Session、数据库繁忙、Worktree 操作占用或约束冲突；
 - `5`：Worktree 安全检查、路径身份检查或已证明未改变现场的 Git 执行失败；
-- `6`：Git 已改变现场，或 Git 启动后无法证明现场未改变而数据库未提交，返回 `PARTIAL_EXTERNAL_STATE`；
+- `6`：Git 已改变现场，或操作期间无法证明 Git 与数据库一致，返回 `PARTIAL_EXTERNAL_STATE`；
 - `10`：数据库不可用或内部错误。

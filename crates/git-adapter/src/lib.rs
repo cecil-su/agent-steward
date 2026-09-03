@@ -1,8 +1,12 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+#[cfg(windows)]
+use std::path::Component;
 
 use chrono::{SecondsFormat, Utc};
 use fs2::FileExt;
@@ -32,6 +36,26 @@ pub enum GitError {
 pub struct RepositoryInfo {
     pub repository_path: PathBuf,
     pub common_dir: PathBuf,
+    repository_identity: ExistingPathIdentity,
+    common_dir_identity: ExistingPathIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingPathIdentity {
+    pub canonical_path: PathBuf,
+    object: FileObjectIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPathIdentity {
+    pub canonical_path: PathBuf,
+    existing_ancestor: ExistingPathIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileObjectIdentity {
+    first: u64,
+    second: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -55,18 +79,25 @@ impl GitInvocation {
             .unwrap_or(false)
     }
 
-    pub fn command_error(&self) -> GitError {
+    pub fn exit_status(&self) -> Option<i32> {
+        self.output
+            .as_ref()
+            .ok()
+            .and_then(|output| output.status.code())
+    }
+
+    pub fn diagnostic_summary(&self) -> String {
         match &self.output {
-            Ok(output) => GitError::CommandFailed {
-                operation: self.operation.clone(),
-                exit_status: output.status.code(),
-                summary: summarize_stderr(&output.stderr),
-            },
-            Err(error) => GitError::CommandFailed {
-                operation: self.operation.clone(),
-                exit_status: None,
-                summary: error.to_string(),
-            },
+            Ok(output) => summarize_stderr(&output.stderr),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    pub fn command_error(&self) -> GitError {
+        GitError::CommandFailed {
+            operation: self.operation.clone(),
+            exit_status: self.exit_status(),
+            summary: self.diagnostic_summary(),
         }
     }
 }
@@ -93,11 +124,11 @@ pub fn acquire_worktree_lock(
             .join("locks"),
     };
     fs::create_dir_all(&lock_root)?;
-    set_private_dir(&lock_root)?;
+    steward_core::set_private_dir(&lock_root)?;
     let database = if database_path.exists() {
         canonicalize_existing(database_path)?
     } else {
-        absolute_clean(database_path)?
+        canonicalize_target(database_path)?
     };
     let mut hash = Sha256::new();
     hash.update(database.as_os_str().as_encoded_bytes());
@@ -109,56 +140,70 @@ pub fn acquire_worktree_lock(
         .truncate(false)
         .read(true)
         .write(true)
-        .open(path)?;
+        .open(&path)?;
+    steward_core::set_private_file(&path)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(WorktreeLock { file }),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            Err(GitError::OperationBusy)
-        }
+        Err(error) if is_lock_contention(&error) => Err(GitError::OperationBusy),
         Err(error) => Err(GitError::Io(error)),
     }
 }
 
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // LockFileEx reports these raw Win32 errors instead of WouldBlock.
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        matches!(
+            error.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+        )
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 pub fn absolute_clean(path: &Path) -> Result<PathBuf, GitError> {
-    let absolute = if path.is_absolute() {
+    Ok(if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
-    };
-    let mut cleaned = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::Prefix(prefix) => cleaned.push(prefix.as_os_str()),
-            Component::RootDir => cleaned.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !cleaned.pop() {
-                    return Err(GitError::PathIdentity(format!(
-                        "path escapes filesystem root: {}",
-                        path.display()
-                    )));
-                }
-            }
-            Component::Normal(part) => cleaned.push(part),
-        }
-    }
-    Ok(cleaned)
+    })
 }
 
 pub fn canonicalize_existing(path: &Path) -> Result<PathBuf, GitError> {
-    let absolute = absolute_clean(path)?;
-    fs::canonicalize(&absolute)
-        .map_err(|error| GitError::PathIdentity(format!("{}: {error}", absolute.display())))
+    Ok(identify_existing(path)?.canonical_path)
 }
 
 pub fn canonicalize_target(path: &Path) -> Result<PathBuf, GitError> {
+    Ok(identify_target(path)?.canonical_path)
+}
+
+pub fn identify_existing(path: &Path) -> Result<ExistingPathIdentity, GitError> {
     let absolute = absolute_clean(path)?;
-    if absolute.exists() {
-        return canonicalize_existing(&absolute);
-    }
+    require_unicode_path(&absolute)?;
+    let canonical_path = fs::canonicalize(&absolute)
+        .map_err(|error| GitError::PathIdentity(format!("{}: {error}", absolute.display())))?;
+    require_unicode_path(&canonical_path)?;
+    let object = file_object_identity(&canonical_path)?;
+    Ok(ExistingPathIdentity {
+        canonical_path,
+        object,
+    })
+}
+
+pub fn identify_target(path: &Path) -> Result<TargetPathIdentity, GitError> {
+    let absolute = absolute_clean(path)?;
+    require_unicode_path(&absolute)?;
     let mut ancestor = absolute.as_path();
     let mut suffix = Vec::new();
-    while !ancestor.exists() {
+    while !ancestor.try_exists().map_err(|error| {
+        GitError::PathIdentity(format!("cannot inspect {}: {error}", ancestor.display()))
+    })? {
         let name = ancestor.file_name().ok_or_else(|| {
             GitError::PathIdentity(format!("no existing ancestor for {}", absolute.display()))
         })?;
@@ -170,32 +215,205 @@ pub fn canonicalize_target(path: &Path) -> Result<PathBuf, GitError> {
             GitError::PathIdentity(format!("no existing ancestor for {}", absolute.display()))
         })?;
     }
-    let mut result = fs::canonicalize(ancestor)?;
+    let existing_ancestor = identify_existing(ancestor)?;
+    let mut canonical_path = existing_ancestor.canonical_path.clone();
     for component in suffix.into_iter().rev() {
-        result.push(component);
+        canonical_path.push(component);
     }
-    Ok(result)
+    require_unicode_path(&canonical_path)?;
+    Ok(TargetPathIdentity {
+        canonical_path,
+        existing_ancestor,
+    })
+}
+
+pub fn worktree_path_key(path: &Path) -> Result<String, GitError> {
+    steward_core::filesystem_path_key(path).map_err(|error| {
+        GitError::PathIdentity(format!(
+            "cannot determine path comparison key for {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+pub fn paths_equivalent(left: &Path, right: &Path) -> Result<bool, GitError> {
+    let left_target = canonicalize_target(left)?;
+    let right_target = canonicalize_target(right)?;
+    if left_target == right_target {
+        return Ok(true);
+    }
+    let left_exists = left.try_exists().map_err(|error| {
+        GitError::PathIdentity(format!("cannot inspect {}: {error}", left.display()))
+    })?;
+    let right_exists = right.try_exists().map_err(|error| {
+        GitError::PathIdentity(format!("cannot inspect {}: {error}", right.display()))
+    })?;
+    if left_exists && right_exists {
+        return Ok(identify_existing(left)? == identify_existing(right)?);
+    }
+    steward_core::filesystem_paths_equal(left, right).map_err(|error| {
+        GitError::PathIdentity(format!("cannot compare filesystem paths safely: {error}"))
+    })
+}
+
+fn require_unicode_path(path: &Path) -> Result<(), GitError> {
+    if path.to_str().is_some() {
+        Ok(())
+    } else {
+        Err(GitError::PathIdentity(format!(
+            "path is not valid UTF-8 and cannot be represented by the V0 contract: {}",
+            path.display()
+        )))
+    }
+}
+
+pub fn verify_target_identity(identity: &TargetPathIdentity) -> Result<(), GitError> {
+    let current = identify_target(&identity.canonical_path)?;
+    verify_same_identity("target path", identity, &current)
+}
+
+pub fn verify_repository_identity(info: &RepositoryInfo) -> Result<(), GitError> {
+    let repository = identify_existing(&info.repository_path)?;
+    verify_same_identity("repository", &info.repository_identity, &repository)?;
+    let common_dir = identify_existing(&info.common_dir)?;
+    verify_same_identity(
+        "Git common directory",
+        &info.common_dir_identity,
+        &common_dir,
+    )?;
+    let current_common_dir =
+        resolve_common_dir_identity(&info.repository_path, "repository identity verification")?;
+    verify_same_identity(
+        "repository Git common directory association",
+        &info.common_dir_identity,
+        &current_common_dir,
+    )
+}
+
+fn verify_same_identity<T: PartialEq>(
+    label: &str,
+    expected: &T,
+    current: &T,
+) -> Result<(), GitError> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(GitError::PathIdentity(format!(
+            "{label} changed after it was checked"
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn file_object_identity(path: &Path) -> Result<FileObjectIdentity, GitError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path).map_err(|error| {
+        GitError::PathIdentity(format!("cannot inspect {}: {error}", path.display()))
+    })?;
+    Ok(FileObjectIdentity {
+        first: metadata.dev(),
+        second: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn file_object_identity(path: &Path) -> Result<FileObjectIdentity, GitError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        OPEN_EXISTING,
+    };
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let error = std::io::Error::last_os_error();
+        return Err(GitError::PathIdentity(format!(
+            "cannot open {} for identity: {error}",
+            path.display()
+        )));
+    }
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let succeeded = unsafe { GetFileInformationByHandle(handle, &mut information) } != 0;
+    let result = if succeeded {
+        Ok(FileObjectIdentity {
+            first: u64::from(information.dwVolumeSerialNumber),
+            second: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
+    } else {
+        let error = std::io::Error::last_os_error();
+        Err(GitError::PathIdentity(format!(
+            "cannot read identity for {}: {error}",
+            path.display()
+        )))
+    };
+    unsafe {
+        CloseHandle(handle);
+    }
+    result
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_object_identity(path: &Path) -> Result<FileObjectIdentity, GitError> {
+    Err(GitError::PathIdentity(format!(
+        "file object identity is unsupported on this platform: {}",
+        path.display()
+    )))
 }
 
 pub fn repository_info(repo: &Path) -> Result<RepositoryInfo, GitError> {
-    let repository_path = canonicalize_existing(repo)?;
-    let output = git_output(
-        &repository_path,
-        ["rev-parse", "--git-common-dir"],
-        "repository identity",
+    let repository_identity = identify_existing(repo)?;
+    let repository_path = repository_identity.canonical_path.clone();
+    verify_same_identity(
+        "repository",
+        &repository_identity,
+        &identify_existing(&repository_path)?,
     )?;
-    let raw = string_output(&output.stdout);
+    let common_dir_identity = resolve_common_dir_identity(&repository_path, "repository identity")?;
+    let common_dir = common_dir_identity.canonical_path.clone();
+    Ok(RepositoryInfo {
+        repository_path,
+        common_dir,
+        repository_identity,
+        common_dir_identity,
+    })
+}
+
+fn resolve_common_dir_identity(
+    repository_path: &Path,
+    operation: &str,
+) -> Result<ExistingPathIdentity, GitError> {
+    let output = git_output(
+        repository_path,
+        ["rev-parse", "--git-common-dir"],
+        operation,
+    )?;
+    let raw = string_output(&output.stdout)?;
     let common = PathBuf::from(raw.trim());
     let common = if common.is_absolute() {
         common
     } else {
         repository_path.join(common)
     };
-    let common_dir = canonicalize_existing(&common)?;
-    Ok(RepositoryInfo {
-        repository_path,
-        common_dir,
-    })
+    identify_existing(&common)
 }
 
 pub fn local_branch_exists(repo: &Path, branch: &str) -> Result<bool, GitError> {
@@ -203,9 +421,7 @@ pub fn local_branch_exists(repo: &Path, branch: &str) -> Result<bool, GitError> 
         return Err(GitError::SafetyRefused("invalid local branch name".into()));
     }
     let ref_name = format!("refs/heads/{branch}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let output = git_command(repo)
         .args(["show-ref", "--verify", "--quiet"])
         .arg(ref_name)
         .output()?;
@@ -224,7 +440,9 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<ObservedWorktree>, GitError> {
         if field.is_empty() {
             continue;
         }
-        let text = String::from_utf8_lossy(field);
+        let text = std::str::from_utf8(field).map_err(|_| {
+            GitError::PathIdentity("Git reported a non-UTF-8 worktree entry".into())
+        })?;
         if let Some(path) = text.strip_prefix("worktree ") {
             if let Some(item) = current.take() {
                 result.push(item);
@@ -252,6 +470,24 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<ObservedWorktree>, GitError> {
 
 pub fn find_worktree(repo: &Path, path: &Path) -> Result<Option<ObservedWorktree>, GitError> {
     let target = canonicalize_target(path)?;
+    let worktrees = list_worktrees(repo)?;
+    if let Some(item) = worktrees.iter().find(|item| item.path == target) {
+        return Ok(Some(item.clone()));
+    }
+    let target_key = worktree_path_key(&target)?;
+    for item in worktrees {
+        if worktree_path_key(&item.path)? == target_key {
+            return Ok(Some(item));
+        }
+    }
+    Ok(None)
+}
+
+pub fn find_worktree_registration(
+    repo: &Path,
+    path: &Path,
+) -> Result<Option<ObservedWorktree>, GitError> {
+    let target = canonicalize_target(path)?;
     Ok(list_worktrees(repo)?
         .into_iter()
         .find(|item| item.path == target))
@@ -260,11 +496,9 @@ pub fn find_worktree(repo: &Path, path: &Path) -> Result<Option<ObservedWorktree
 pub fn invoke_worktree_add(repo: &Path, path: &Path, branch: &str) -> GitInvocation {
     GitInvocation {
         operation: "worktree.add".into(),
-        output: Command::new("git")
-            .arg("-C")
-            .arg(repo)
+        output: git_command(repo)
             .args(["worktree", "add"])
-            .arg(path)
+            .arg(git_path_argument(path).as_ref())
             .arg(branch)
             .output(),
     }
@@ -273,11 +507,9 @@ pub fn invoke_worktree_add(repo: &Path, path: &Path, branch: &str) -> GitInvocat
 pub fn invoke_worktree_remove(repo: &Path, path: &Path) -> GitInvocation {
     GitInvocation {
         operation: "worktree.remove".into(),
-        output: Command::new("git")
-            .arg("-C")
-            .arg(repo)
+        output: git_command(repo)
             .args(["worktree", "remove"])
-            .arg(path)
+            .arg(git_path_argument(path).as_ref())
             .output(),
     }
 }
@@ -302,10 +534,29 @@ pub fn observe_status(
             staged: None,
             unstaged: None,
             untracked: None,
+            ignored: None,
             observed_at,
         });
     }
     let canonical = canonicalize_existing(target)?;
+    let root_output = git_output(
+        &canonical,
+        ["rev-parse", "--show-toplevel"],
+        "worktree identity",
+    )?;
+    let actual_root = canonicalize_existing(Path::new(string_output(&root_output.stdout)?.trim()))
+        .map_err(|error| GitError::CommandFailed {
+            operation: "worktree identity".into(),
+            exit_status: None,
+            summary: error.to_string(),
+        })?;
+    if actual_root != canonical {
+        return Err(GitError::CommandFailed {
+            operation: "worktree identity".into(),
+            exit_status: None,
+            summary: "the live path is not the root of the registered worktree".into(),
+        });
+    }
     let actual_repository =
         repository_info(&canonical).map_err(|error| GitError::CommandFailed {
             operation: "worktree identity".into(),
@@ -342,22 +593,34 @@ pub fn observe_status(
     }
     let output = git_output(
         &canonical,
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored",
+        ],
         "worktree status",
     )?;
     let head_output = git_output(&canonical, ["rev-parse", "HEAD"], "worktree head")?;
     let mut staged = BTreeSet::new();
     let mut unstaged = BTreeSet::new();
     let mut untracked = BTreeSet::new();
-    for entry in output.stdout.split(|byte| *byte == 0) {
+    let mut ignored = BTreeSet::new();
+    let mut entries = output.stdout.split(|byte| *byte == 0);
+    while let Some(entry) = entries.next() {
         if entry.len() < 4 {
             continue;
         }
         let x = entry[0] as char;
         let y = entry[1] as char;
-        let file = String::from_utf8_lossy(&entry[3..]).into_owned();
+        let file = std::str::from_utf8(&entry[3..])
+            .map_err(|_| GitError::PathIdentity("Git reported a non-UTF-8 status path".into()))?
+            .to_owned();
         if x == '?' && y == '?' {
             untracked.insert(file);
+        } else if x == '!' && y == '!' {
+            ignored.insert(file);
         } else {
             if x != ' ' {
                 staged.insert(file.clone());
@@ -365,6 +628,11 @@ pub fn observe_status(
             if y != ' ' {
                 unstaged.insert(file);
             }
+        }
+        if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            // In porcelain v1 -z, rename/copy entries contain a second NUL-delimited
+            // source path. It has no XY prefix and is not a separate status entry.
+            let _ = entries.next();
         }
     }
     Ok(WorktreeStatus {
@@ -374,10 +642,11 @@ pub fn observe_status(
         path: Some(path.to_owned()),
         exists: true,
         branch: Some(registered_branch.to_owned()),
-        head: Some(string_output(&head_output.stdout).trim().to_owned()),
+        head: Some(string_output(&head_output.stdout)?.trim().to_owned()),
         staged: Some(staged.into_iter().collect()),
         unstaged: Some(unstaged.into_iter().collect()),
         untracked: Some(untracked.into_iter().collect()),
+        ignored: Some(ignored.into_iter().collect()),
         observed_at,
     })
 }
@@ -394,6 +663,7 @@ pub fn empty_worktree_status() -> WorktreeStatus {
         staged: None,
         unstaged: None,
         untracked: None,
+        ignored: None,
         observed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
     }
 }
@@ -403,7 +673,7 @@ fn git_output<const N: usize>(
     args: [&str; N],
     operation: &str,
 ) -> Result<Output, GitError> {
-    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
+    let output = git_command(cwd).args(args).output()?;
     if output.status.success() {
         Ok(output)
     } else {
@@ -415,8 +685,45 @@ fn git_output<const N: usize>(
     }
 }
 
-fn string_output(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+fn git_command(repo: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(git_path_argument(repo).as_ref());
+    command
+}
+
+#[cfg(windows)]
+fn git_path_argument(path: &Path) -> Cow<'_, Path> {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Cow::Borrowed(path);
+    };
+    match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => {
+            let mut simplified = PathBuf::from(format!("{}:", drive as char));
+            simplified.extend(components);
+            Cow::Owned(simplified)
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            let mut simplified = PathBuf::from(r"\\");
+            simplified.push(server);
+            simplified.push(share);
+            simplified.extend(components);
+            Cow::Owned(simplified)
+        }
+        _ => Cow::Borrowed(path),
+    }
+}
+
+#[cfg(not(windows))]
+fn git_path_argument(path: &Path) -> Cow<'_, Path> {
+    Cow::Borrowed(path)
+}
+
+fn string_output(bytes: &[u8]) -> Result<&str, GitError> {
+    std::str::from_utf8(bytes)
+        .map_err(|_| GitError::PathIdentity("Git reported non-UTF-8 path data".into()))
 }
 
 fn summarize_stderr(bytes: &[u8]) -> String {
@@ -428,29 +735,146 @@ fn summarize_stderr(bytes: &[u8]) -> String {
         .to_owned()
 }
 
-#[cfg(unix)]
-fn set_private_dir(path: &Path) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn set_private_dir(_path: &Path) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"repository-\xff".to_vec()));
+        fs::create_dir(&existing).unwrap();
+        assert!(matches!(
+            identify_existing(&existing),
+            Err(GitError::PathIdentity(_))
+        ));
+        let target = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"worktree-\xff".to_vec()));
+        assert!(matches!(
+            identify_target(&target),
+            Err(GitError::PathIdentity(_))
+        ));
+        assert!(matches!(
+            worktree_path_key(&target),
+            Err(GitError::PathIdentity(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_utf8_git_path_output() {
+        assert!(matches!(
+            string_output(b"worktree /tmp/path-\xff"),
+            Err(GitError::PathIdentity(_))
+        ));
+    }
+
     #[test]
     fn canonicalizes_nonexistent_target_from_existing_parent() {
         let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("a")).unwrap();
         let target = temp.path().join("a/../b/worktree");
         let canonical = canonicalize_target(&target).unwrap();
         assert_eq!(
             canonical,
             fs::canonicalize(temp.path()).unwrap().join("b/worktree")
+        );
+    }
+
+    #[test]
+    fn exact_missing_unicode_paths_do_not_require_a_comparison_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        git_output(&repository, ["init", "-b", "main"], "test setup").unwrap();
+        let missing = temp.path().join("工作树");
+
+        assert!(paths_equivalent(&missing, &missing).unwrap());
+        assert!(
+            find_worktree_registration(&repository, &missing)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn detects_replaced_target_ancestor_by_file_object_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path().join("ancestor");
+        fs::create_dir(&ancestor).unwrap();
+        let identity = identify_target(&ancestor.join("worktree")).unwrap();
+
+        fs::remove_dir(&ancestor).unwrap();
+        fs::create_dir(&ancestor).unwrap();
+
+        assert!(matches!(
+            verify_target_identity(&identity),
+            Err(GitError::PathIdentity(_))
+        ));
+    }
+
+    #[test]
+    fn detects_replaced_repository_by_file_object_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        git_output(&repository, ["init", "-b", "main"], "test setup").unwrap();
+        let info = repository_info(&repository).unwrap();
+
+        fs::remove_dir_all(&repository).unwrap();
+        fs::create_dir(&repository).unwrap();
+        git_output(&repository, ["init", "-b", "main"], "test setup").unwrap();
+
+        assert!(matches!(
+            verify_repository_identity(&info),
+            Err(GitError::PathIdentity(_))
+        ));
+    }
+
+    #[test]
+    fn detects_changed_repository_common_dir_association() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        let other_repository = temp.path().join("other-repository");
+        let first_common = temp.path().join("first-common");
+        let second_common = temp.path().join("second-common");
+        for (worktree, common) in [
+            (&repository, &first_common),
+            (&other_repository, &second_common),
+        ] {
+            let output = Command::new("git")
+                .arg("init")
+                .arg("--separate-git-dir")
+                .arg(git_path_argument(common).as_ref())
+                .arg(git_path_argument(worktree).as_ref())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                summarize_stderr(&output.stderr)
+            );
+        }
+        let info = repository_info(&repository).unwrap();
+
+        fs::write(
+            repository.join(".git"),
+            format!("gitdir: {}\n", second_common.display()),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            verify_repository_identity(&info),
+            Err(GitError::PathIdentity(_))
+        ));
+        assert_ne!(
+            repository_info(&repository).unwrap().common_dir,
+            info.common_dir
         );
     }
 
@@ -463,6 +887,19 @@ mod tests {
             acquire_worktree_lock(&database, "T-1", Some(temp.path())),
             Err(GitError::OperationBusy)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn converts_verbatim_paths_only_for_git_arguments() {
+        assert_eq!(
+            git_path_argument(Path::new(r"\\?\C:\repo\worktree")).as_ref(),
+            Path::new(r"C:\repo\worktree")
+        );
+        assert_eq!(
+            git_path_argument(Path::new(r"\\?\UNC\server\share\repo")).as_ref(),
+            Path::new(r"\\server\share\repo")
+        );
     }
 
     #[cfg(unix)]
@@ -478,6 +915,25 @@ mod tests {
         assert_eq!(
             canonicalize_target(&alias.join("worktree")).unwrap(),
             canonicalize_target(&real.join("worktree")).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_parent_component_after_following_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("base");
+        let other = temp.path().join("other");
+        fs::create_dir(&base).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::create_dir(other.join("child")).unwrap();
+        symlink(other.join("child"), base.join("link")).unwrap();
+
+        assert_eq!(
+            canonicalize_target(&base.join("link/../worktree")).unwrap(),
+            fs::canonicalize(&other).unwrap().join("worktree")
         );
     }
 }

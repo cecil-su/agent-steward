@@ -47,9 +47,9 @@ impl Service {
             json!({"title": title}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        let task = load_task(&connection, id)?;
-        Ok(Outcome::new(json!({"task": task})))
+        Ok(Outcome::new(json!({"task": response_task})))
     }
 
     pub fn task_show(&self, id: &str) -> AppResult<Outcome> {
@@ -186,8 +186,9 @@ impl Service {
             json!({"changedFields": changed}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": load_task(&connection, id)?})))
+        Ok(Outcome::new(json!({"task": response_task})))
     }
 
     pub fn task_note(
@@ -228,16 +229,17 @@ impl Service {
             json!({"noteId": note_id, "noteType": note_type}),
             &timestamp,
         )?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        let note = connection
+        let response_task = load_task(&tx, id)?;
+        let response_note = tx
             .query_row(
                 "SELECT id,task_id,session_id,note_type,text,created_at FROM task_notes WHERE id=?1",
                 [note_id],
                 note_from_row,
             )
             .map_err(AppError::from_sqlite)?;
+        tx.commit().map_err(AppError::from_sqlite)?;
         Ok(Outcome::new(
-            json!({"task": load_task(&connection, id)?, "note": note}),
+            json!({"task": response_task, "note": response_note}),
         ))
     }
 
@@ -279,8 +281,9 @@ impl Service {
             json!({"reason": reason, "recovery": recovery}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": load_task(&connection, id)?})))
+        Ok(Outcome::new(json!({"task": response_task})))
     }
 
     pub fn task_unblock(&self, id: &str, expected: i64, next_step: &str) -> AppResult<Outcome> {
@@ -314,8 +317,9 @@ impl Service {
             json!({"nextStep": next_step}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": load_task(&connection, id)?})))
+        Ok(Outcome::new(json!({"task": response_task})))
     }
 
     pub fn task_close(
@@ -386,8 +390,9 @@ impl Service {
             json!({"outcome": outcome, "reason": reason, "closedSessionId": task.current_session_id}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": load_task(&connection, id)?})))
+        Ok(Outcome::new(json!({"task": response_task})))
     }
 
     pub fn task_claim(
@@ -407,6 +412,11 @@ impl Service {
         check_version(&task, expected)?;
         if task.status == TaskStatus::Closed {
             return Err(AppError::constraint("task.claim.closed"));
+        }
+        if matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+            && task.current_session_id.is_none()
+        {
+            return Err(AppError::session(None, session_id));
         }
         let existing = tx
             .query_row(
@@ -467,8 +477,9 @@ impl Service {
             json!({"sessionId": session_id, "previousSessionId": previous, "takeOver": take_over}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": load_task(&connection, id)?})))
+        Ok(Outcome::new(json!({"task": response_task})))
     }
 
     pub fn task_checkpoint(
@@ -563,8 +574,8 @@ impl Service {
             json!({"checkpointId": checkpoint_id, "sessionId": session_id, "gitHead": git_head}),
             &timestamp,
         )?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        let checkpoint = connection
+        let response_task = load_task(&tx, id)?;
+        let response_checkpoint = tx
             .query_row(
                 "SELECT id,task_id,session_id,summary,completed_json,decisions_json,pending_json,
                         next_step,risks_json,git_head,created_at FROM checkpoints WHERE id=?1",
@@ -572,9 +583,11 @@ impl Service {
                 checkpoint_from_row,
             )
             .map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(
-            json!({"task": load_task(&connection, id)?, "checkpoint": checkpoint}),
-        ))
+        tx.commit().map_err(AppError::from_sqlite)?;
+        Ok(Outcome::new(json!({
+            "task": response_task,
+            "checkpoint": response_checkpoint,
+        })))
     }
 }
 

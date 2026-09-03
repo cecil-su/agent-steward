@@ -1,11 +1,11 @@
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use steward_core::TaskStatus;
+use steward_core::{SessionImportView, TaskStatus};
 use storage_sqlite::now;
 use uuid::Uuid;
 
@@ -13,9 +13,10 @@ use crate::db::{
     bump_task, check_version, checkpoint_from_row, history_from_row, import_from_row,
     insert_history, load_session, load_task, session_from_row,
 };
-use crate::{AppError, AppResult, Outcome, Service, warning};
+use crate::{AppError, AppResult, Outcome, RecoveryCommand, Service, warning};
 
 const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
+const IMPORT_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 impl Service {
     pub fn session_show(&self, id: &str) -> AppResult<Outcome> {
@@ -183,10 +184,12 @@ impl Service {
             json!({"sessionId": session_id, "source": source, "externalSessionId": external_session_id}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, task_id)?;
+        let response_session = load_session(&tx, session_id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         let mut outcome = Outcome::new(json!({
-            "task": load_task(&connection, task_id)?,
-            "session": load_session(&connection, session_id)?,
+            "task": response_task,
+            "session": response_session,
         }));
         if missing {
             outcome.warnings.push(warning(
@@ -235,10 +238,12 @@ impl Service {
             json!({"sessionId": session_id, "wasCurrent": was_current}),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, &session.task_id)?;
+        let response_session = load_session(&tx, session_id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         Ok(Outcome::new(json!({
-            "task": load_task(&connection, &session.task_id)?,
-            "session": load_session(&connection, session_id)?,
+            "task": response_task,
+            "session": response_session,
         })))
     }
 
@@ -253,6 +258,7 @@ impl Service {
         let initial = self.connection()?;
         let initial_task = load_task(&initial, task_id)?;
         check_version(&initial_task, expected)?;
+        let _ = load_latest_checkpoint(&initial, &initial_task)?;
         let worktree_status = if initial_task.worktree_path.is_some() {
             Some(self.worktree_status(task_id)?.data["worktreeStatus"].clone())
         } else {
@@ -330,26 +336,15 @@ impl Service {
             }),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, task_id)?;
+        let response_checkpoint = load_latest_checkpoint(&tx, &response_task)?;
+        let response_sessions = list_sessions_for_task(&tx, task_id)?;
+        let next_step = response_task.next_step.clone();
         tx.commit().map_err(AppError::from_sqlite)?;
-        let task = load_task(&connection, task_id)?;
-        let sessions = list_sessions_for_task(&connection, task_id)?;
-        let checkpoint = match task.latest_checkpoint_id.as_deref() {
-            Some(id) => connection
-                .query_row(
-                    "SELECT id,task_id,session_id,summary,completed_json,decisions_json,pending_json,
-                            next_step,risks_json,git_head,created_at FROM checkpoints WHERE id=?1",
-                    [id],
-                    checkpoint_from_row,
-                )
-                .optional()
-                .map_err(AppError::from_sqlite)?,
-            None => None,
-        };
-        let next_step = task.next_step.clone();
         Ok(Outcome::new(json!({
-            "task": task,
-            "checkpoint": checkpoint,
-            "sessions": sessions,
+            "task": response_task,
+            "checkpoint": response_checkpoint,
+            "sessions": response_sessions,
             "worktreeStatus": worktree_status,
             "nextStep": next_step,
         })))
@@ -361,10 +356,25 @@ impl Service {
         session_id: &str,
         expected: i64,
         file_path: &Path,
+        sensitive_content_reviewed: bool,
     ) -> AppResult<Outcome> {
+        if !sensitive_content_reviewed {
+            return Err(AppError::invalid(
+                "confirmSensitiveContentReviewed",
+                "sensitive content review must be confirmed before importing",
+            ));
+        }
         let canonical = git_adapter::canonicalize_existing(file_path)
             .map_err(|error| AppError::from_git(error, file_path.to_str()))?;
-        let mut file = File::open(&canonical).map_err(|error| {
+        let path_metadata = fs::metadata(&canonical)
+            .map_err(|error| AppError::invalid("file", error.to_string()))?;
+        if !path_metadata.file_type().is_file() {
+            return Err(AppError::invalid("file", "must be a regular file"));
+        }
+        if path_metadata.len() > MAX_IMPORT_BYTES {
+            return Err(AppError::invalid("file", "file exceeds the 16 MiB limit"));
+        }
+        let mut file = open_import_file(&canonical).map_err(|error| {
             AppError::invalid("file", format!("cannot open import file: {error}"))
         })?;
         let metadata = file
@@ -377,14 +387,22 @@ impl Service {
             return Err(AppError::invalid("file", "file exceeds the 16 MiB limit"));
         }
         let mut content = Vec::with_capacity(metadata.len() as usize);
-        file.by_ref()
-            .take(MAX_IMPORT_BYTES + 1)
-            .read_to_end(&mut content)
-            .map_err(|error| AppError::invalid("file", error.to_string()))?;
-        if content.len() as u64 > MAX_IMPORT_BYTES {
-            return Err(AppError::invalid("file", "file exceeds the 16 MiB limit"));
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; IMPORT_READ_BUFFER_BYTES];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| AppError::invalid("file", error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            if content.len() as u64 + read as u64 > MAX_IMPORT_BYTES {
+                return Err(AppError::invalid("file", "file exceeds the 16 MiB limit"));
+            }
+            hasher.update(&buffer[..read]);
+            content.extend_from_slice(&buffer[..read]);
         }
-        let sha256 = hex::encode(Sha256::digest(&content));
+        let sha256 = hex::encode(hasher.finalize());
         let media_type = mime_guess::from_path(&canonical)
             .first_raw()
             .map(ToOwned::to_owned);
@@ -409,13 +427,17 @@ impl Service {
             .optional()
             .map_err(AppError::from_sqlite)?;
         if let Some(existing) = duplicate {
-            return Ok(
-                Outcome::new(json!({"task": task, "import": existing})).with_warning(warning(
+            return Ok(Outcome::new(json!({"task": task, "import": existing}))
+                .with_warning(warning(
                     "DUPLICATE_SESSION_IMPORT",
                     "identical content is already stored for this session",
                     json!({"sessionId": session_id, "sha256": sha256}),
-                )),
-            );
+                ))
+                .with_warning(warning(
+                    "SENSITIVE_CONTENT_CHECK_REQUIRED",
+                    "verify that imported content does not contain credentials or secrets",
+                    json!({"sourcePath": canonical.to_string_lossy()}),
+                )));
         }
         let import_id = Uuid::new_v4().to_string();
         tx.execute(
@@ -447,8 +469,8 @@ impl Service {
             }),
             &timestamp,
         )?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        let imported = connection
+        let response_task = load_task(&tx, task_id)?;
+        let response_import = tx
             .query_row(
                 "SELECT id,session_id,source_path,media_type,sha256,length(content),imported_at
                  FROM session_imports WHERE id=?1",
@@ -456,13 +478,15 @@ impl Service {
                 import_from_row,
             )
             .map_err(AppError::from_sqlite)?;
+        tx.commit().map_err(AppError::from_sqlite)?;
         Ok(
-            Outcome::new(json!({"task": load_task(&connection, task_id)?, "import": imported}))
-                .with_warning(warning(
+            Outcome::new(json!({"task": response_task, "import": response_import})).with_warning(
+                warning(
                     "SENSITIVE_CONTENT_CHECK_REQUIRED",
                     "verify that imported content does not contain credentials or secrets",
                     json!({"sourcePath": canonical.to_string_lossy()}),
-                )),
+                ),
+            ),
         )
     }
 
@@ -481,6 +505,20 @@ impl Service {
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::from_sqlite)?;
         Ok(Outcome::new(json!({"imports": imports})))
+    }
+
+    pub fn session_import_metadata(&self, import_id: &str) -> AppResult<SessionImportView> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT id,session_id,source_path,media_type,sha256,length(content),imported_at
+                 FROM session_imports WHERE id=?1",
+                [import_id],
+                import_from_row,
+            )
+            .optional()
+            .map_err(AppError::from_sqlite)?
+            .ok_or_else(|| AppError::not_found("SessionImport", import_id))
     }
 
     pub fn session_import_remove(&self, import_id: &str, expected: i64) -> AppResult<Outcome> {
@@ -522,12 +560,13 @@ impl Service {
             }),
             &timestamp,
         )?;
+        let response_task = load_task(&tx, &session.task_id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         let checkpoint_busy: i64 = connection
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
             .unwrap_or(1);
         let mut outcome = Outcome::new(json!({
-            "task": load_task(&connection, &session.task_id)?,
+            "task": response_task,
             "import": imported,
         }));
         if checkpoint_busy != 0 {
@@ -635,31 +674,134 @@ impl Service {
                         (repository, common, branch, path)
                     }
                     _ => {
+                        let RecoveryCommand { command, args } = self.recovery_command(["doctor"]);
                         issues.push(json!({
                             "taskId":task.id,
                             "reason":"incomplete database references",
-                            "recommendedCommand":"inspect the database constraints"
+                            "recommendedCommand":command,
+                            "recommendedArgs":args,
                         }));
                         continue;
                     }
                 };
                 match git_adapter::observe_status(repository, common, path, branch) {
                     Ok(status) if status.exists => {}
-                    Ok(status) => issues.push(json!({
-                        "taskId":task.id,
-                        "reason":"registered worktree is absent",
-                        "observed":status,
-                        "recommendedCommand":format!(
-                            "taskctl worktree detach {} --expected-path {} --if-version {}",
-                            task.id, path, task.version
-                        )
-                    })),
-                    Err(error) => issues.push(json!({
-                        "taskId":task.id,
-                        "reason":error.to_string(),
-                        "worktreePath":path,
-                        "recommendedCommand":"verify the repository and worktree paths, then rerun taskctl doctor"
-                    })),
+                    Ok(status) => {
+                        let repository_info = match git_adapter::repository_info(Path::new(
+                            repository,
+                        )) {
+                            Ok(info) if info.common_dir.to_string_lossy() == common => info,
+                            Ok(_) => {
+                                let RecoveryCommand { command, args } =
+                                    self.recovery_command(["doctor"]);
+                                issues.push(json!({
+                                    "taskId":task.id,
+                                    "reason":"repository identity no longer matches the registered common directory",
+                                    "observed":status,
+                                    "registeredByGit":null,
+                                    "recommendedCommand":command,
+                                    "recommendedArgs":args,
+                                }));
+                                continue;
+                            }
+                            Err(error) => {
+                                let RecoveryCommand { command, args } =
+                                    self.recovery_command(["doctor"]);
+                                issues.push(json!({
+                                    "taskId":task.id,
+                                    "reason":"registered repository identity could not be verified",
+                                    "observed":status,
+                                    "registeredByGit":null,
+                                    "observationError":error.to_string(),
+                                    "recommendedCommand":command,
+                                    "recommendedArgs":args,
+                                }));
+                                continue;
+                            }
+                        };
+                        let registered_by_git = match git_adapter::find_worktree_registration(
+                            &repository_info.repository_path,
+                            Path::new(path),
+                        ) {
+                            Ok(found) => Some(found.is_some()),
+                            Err(error) => {
+                                let RecoveryCommand { command, args } =
+                                    self.recovery_command(["doctor"]);
+                                issues.push(json!({
+                                        "taskId":task.id,
+                                        "reason":"registered worktree registration could not be verified",
+                                        "observed":status,
+                                        "registeredByGit":null,
+                                        "observationError":error.to_string(),
+                                        "recommendedCommand":command,
+                                        "recommendedArgs":args,
+                                    }));
+                                None
+                            }
+                        };
+                        if registered_by_git.is_none() {
+                            continue;
+                        }
+                        if let Err(error) =
+                            git_adapter::verify_repository_identity(&repository_info)
+                        {
+                            let RecoveryCommand { command, args } =
+                                self.recovery_command(["doctor"]);
+                            issues.push(json!({
+                                "taskId":task.id,
+                                "reason":"registered repository identity could not be verified",
+                                "observed":status,
+                                "registeredByGit":null,
+                                "observationError":error.to_string(),
+                                "recommendedCommand":command,
+                                "recommendedArgs":args,
+                            }));
+                            continue;
+                        }
+                        let (reason, recovery, message) = if registered_by_git == Some(true) {
+                            (
+                                "registered worktree is absent but Git still registers it",
+                                self.recovery_command(["doctor"]),
+                                Some(
+                                    "prune the stale Git registration or restore the directory before detaching",
+                                ),
+                            )
+                        } else {
+                            (
+                                "registered worktree is absent",
+                                self.recovery_command(vec![
+                                    "worktree".to_owned(),
+                                    "detach".to_owned(),
+                                    task.id.clone(),
+                                    "--expected-path".to_owned(),
+                                    path.to_owned(),
+                                    "--if-version".to_owned(),
+                                    task.version.to_string(),
+                                ]),
+                                None,
+                            )
+                        };
+                        let RecoveryCommand { command, args } = recovery;
+                        issues.push(json!({
+                            "taskId":task.id,
+                            "reason":reason,
+                            "observed":status,
+                            "registeredByGit":registered_by_git,
+                            "recoveryNote":message,
+                            "recommendedCommand":command,
+                            "recommendedArgs":args,
+                        }));
+                    }
+                    Err(error) => {
+                        let RecoveryCommand { command, args } = self.recovery_command(["doctor"]);
+                        issues.push(json!({
+                            "taskId":task.id,
+                            "reason":error.to_string(),
+                            "worktreePath":path,
+                            "recommendedCommand":command,
+                            "recommendedArgs":args,
+                        }));
+                    }
                 }
             }
             checks.push(json!({
@@ -670,6 +812,17 @@ impl Service {
         }
         Ok(Outcome::new(json!({"checks": checks})))
     }
+}
+
+fn open_import_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path)
 }
 
 fn list_sessions_for_task(
@@ -687,4 +840,23 @@ fn list_sessions_for_task(
         .map_err(AppError::from_sqlite)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(AppError::from_sqlite)
+}
+
+fn load_latest_checkpoint(
+    connection: &rusqlite::Connection,
+    task: &steward_core::TaskView,
+) -> AppResult<Option<steward_core::CheckpointView>> {
+    task.latest_checkpoint_id
+        .as_deref()
+        .map(|id| {
+            connection
+                .query_row(
+                    "SELECT id,task_id,session_id,summary,completed_json,decisions_json,pending_json,
+                            next_step,risks_json,git_head,created_at FROM checkpoints WHERE id=?1",
+                    [id],
+                    checkpoint_from_row,
+                )
+                .map_err(AppError::from_sqlite)
+        })
+        .transpose()
 }

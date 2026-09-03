@@ -306,6 +306,7 @@ dependencies = [
  "steward-core",
  "tempfile",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]
@@ -605,6 +606,7 @@ dependencies = [
  "chrono",
  "git-adapter",
  "hex",
+ "libc",
  "mime_guess",
  "rusqlite",
  "serde",
@@ -622,6 +624,8 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
+ "windows-sys",
 ]
 
 [[package]]
@@ -630,6 +634,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "rusqlite",
+ "steward-core",
  "tempfile",
  "thiserror",
 ]

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 rusqlite.workspace = true
+steward-core = { path = "../core" }
 thiserror.workspace = true
 
 [dev-dependencies]

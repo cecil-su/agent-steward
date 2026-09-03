@@ -156,13 +156,13 @@ V0 手工 `session import add` 还必须限制为不超过 16 MiB 的普通文�
 taskctl session list [--task <task-id>]
 taskctl session show <session-id>
 taskctl session attach <task-id> --session <session-id> --if-version <version> [--source <client>] [--external-session <external-id>] [--record-path <path>]
-taskctl session import add <task-id> --session <session-id> --if-version <version> --file <session-file>
+taskctl session import add <task-id> --session <session-id> --if-version <version> --file <session-file> --confirm-sensitive-content-reviewed
 taskctl session import list <session-id> [--json]
 taskctl session import remove <import-id> --if-version <version> [--yes]
 taskctl session close <session-id> --if-version <version>
 ```
 
-`task claim` 可以在同一 SQLite 事务中创建缺失的本地 Session；已存在的 ID 仅在它是该 Task 尚未结束的当前 Session 时允许 no-op，不能重新激活历史 Session。`task resume` 和 `task claim --take-over` 使用尚不存在且不同于来源的新 Session ID，在同一事务中创建 Session 并更新 Task。`session attach` 显式保存可选外部 Session ID；`session import add` 要求指定的本地 Session 已存在并属于同一 Task，来源读取该 Session 的 `source`，再保存用户明确提供的文件内容和哈希；`session attach --record-path` 对已存在文件保存规范化绝对路径，对不存在文件保存展开后的绝对弱引用。
+`task claim` 可以在同一 SQLite 事务中创建缺失的本地 Session；已存在的 ID 仅在它是该 Task 尚未结束的当前 Session 时允许 no-op，不能重新激活历史 Session。`task resume` 和 `task claim --take-over` 使用尚不存在且不同于来源的新 Session ID，在同一事务中创建 Session 并更新 Task。`session attach` 显式保存可选外部 Session ID；`session import add` 要求调用方先携带 `--confirm-sensitive-content-reviewed`，并要求指定的本地 Session 已存在且属于同一 Task，来源读取该 Session 的 `source`，再保存用户明确提供的文件内容和哈希；`session attach --record-path` 对已存在文件保存规范化绝对路径，对不存在文件保存展开后的绝对弱引用。
 
 `session import list` 只返回 Import ID、Session ID、路径、媒体类型、SHA-256、大小和导入时间，不返回内容。`session import remove` 使用 Task expected version 删除 BLOB 并写入不含原文的 History；它保证 V0 查询层面的逻辑删除，不承诺外部备份、文件系统快照或存储介质上的取证级物理擦除。
 

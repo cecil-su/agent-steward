@@ -42,9 +42,10 @@ cargo run -p taskctl -- \
 - 所有 aggregate 状态变化写入统一 DomainEvent；TaskEvent 是其中的任务事件族。
 - 需求、偏好、流程和 Prompt 优化只生成候选，未经用户确认不进入正式配置。
 
-## V1 文档
+## 设计文档
 
-从 [docs/v1/README.md](docs/v1/README.md) 开始阅读。
+- [V1 当前设计](docs/v1/README.md)
+- [V0 历史设计（Task Control Plane）](docs/v0/README.md)
 
 ## 暂定组件名
 

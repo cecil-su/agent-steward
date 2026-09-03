@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OptionalExtension, Row, Transaction};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use steward_core::{
     CheckpointView, HistoryEntry, SessionImportView, SessionView, TaskNoteView, TaskStatus,
@@ -96,11 +97,11 @@ pub(crate) fn checkpoint_from_row(row: &Row<'_>) -> rusqlite::Result<CheckpointV
         task_id: row.get(1)?,
         session_id: row.get(2)?,
         summary: row.get(3)?,
-        completed: serde_json::from_str(&completed).unwrap_or_default(),
-        decisions: serde_json::from_str(&decisions).unwrap_or_default(),
-        pending: serde_json::from_str(&pending).unwrap_or_default(),
+        completed: json_from_column(4, "checkpoints.completed_json", &completed)?,
+        decisions: json_from_column(5, "checkpoints.decisions_json", &decisions)?,
+        pending: json_from_column(6, "checkpoints.pending_json", &pending)?,
         next_step: row.get(7)?,
-        risks: serde_json::from_str(&risks).unwrap_or_default(),
+        risks: json_from_column(8, "checkpoints.risks_json", &risks)?,
         git_head: row.get(9)?,
         created_at: row.get(10)?,
     })
@@ -139,7 +140,26 @@ pub(crate) fn history_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryEntry> 
         session_id: row.get(4)?,
         occurred_at: row.get(5)?,
         summary: row.get(6)?,
-        payload: payload.and_then(|value| serde_json::from_str(&value).ok()),
+        payload: payload
+            .map(|value| json_from_column(7, "history.payload_json", &value))
+            .transpose()?,
+    })
+}
+
+fn json_from_column<T: DeserializeOwned>(
+    column: usize,
+    name: &str,
+    value: &str,
+) -> rusqlite::Result<T> {
+    serde_json::from_str(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid JSON in {name}: {error}"),
+            )),
+        )
     })
 }
 

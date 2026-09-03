@@ -26,6 +26,29 @@ pub struct AppError {
     pub exit_code: i32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryCommand {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PartialDatabaseState {
+    Unchanged,
+    Updated,
+    Unknown,
+}
+
+impl PartialDatabaseState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Updated => "updated",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl std::fmt::Display for AppError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}: {}", self.body.code, self.body.message)
@@ -113,21 +136,43 @@ impl AppError {
         )
     }
 
-    pub fn partial(
+    pub(crate) fn partial(
         repository_path: Option<&str>,
         worktree_path: Option<&str>,
         git_state: Value,
-        recommended_command: &str,
+        database_state: PartialDatabaseState,
+        recovery: RecoveryCommand,
+    ) -> Self {
+        Self::partial_with_diagnostics(
+            repository_path,
+            worktree_path,
+            git_state,
+            database_state,
+            recovery,
+            Value::Null,
+        )
+    }
+
+    pub(crate) fn partial_with_diagnostics(
+        repository_path: Option<&str>,
+        worktree_path: Option<&str>,
+        git_state: Value,
+        database_state: PartialDatabaseState,
+        recovery: RecoveryCommand,
+        diagnostics: Value,
     ) -> Self {
         Self::new(
             "PARTIAL_EXTERNAL_STATE",
-            "Git may have changed but the database was not updated",
+            "Git and database state require reconciliation",
             false,
             json!({
                 "repositoryPath": repository_path,
                 "worktreePath": worktree_path,
                 "gitState": git_state,
-                "recommendedCommand": recommended_command,
+                "databaseState": database_state.as_str(),
+                "diagnostics": diagnostics,
+                "recommendedCommand": recovery.command,
+                "recommendedArgs": recovery.args,
             }),
             6,
         )
@@ -160,6 +205,19 @@ impl AppError {
     }
 
     pub fn from_sqlite(error: rusqlite::Error) -> Self {
+        if let rusqlite::Error::FromSqlConversionFailure(column, data_type, reason) = &error {
+            return Self::new(
+                "DATABASE_UNAVAILABLE",
+                "stored database data is invalid",
+                false,
+                json!({
+                    "reason": reason.to_string(),
+                    "columnIndex": column,
+                    "sqliteType": format!("{data_type:?}"),
+                }),
+                10,
+            );
+        }
         if let rusqlite::Error::SqliteFailure(failure, message) = &error {
             if matches!(
                 failure.code,
@@ -280,9 +338,47 @@ impl Service {
         &self.database_path
     }
 
+    pub(crate) fn recovery_command<I, S>(&self, arguments: I) -> RecoveryCommand
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let database = storage_sqlite::canonical_database_path(&self.database_path)
+            .unwrap_or_else(|_| self.database_path.clone());
+        let mut command = vec![
+            "taskctl".to_owned(),
+            "--database".to_owned(),
+            database.to_string_lossy().into_owned(),
+        ];
+        command.extend(arguments.into_iter().map(Into::into));
+        RecoveryCommand {
+            command: render_recovery_command(&command),
+            args: command,
+        }
+    }
+
     fn connection(&self) -> AppResult<rusqlite::Connection> {
         storage_sqlite::open_database(&self.database_path).map_err(AppError::from_storage)
     }
+}
+
+#[cfg(windows)]
+fn render_recovery_command(arguments: &[String]) -> String {
+    let quoted = arguments
+        .iter()
+        .map(|argument| format!("'{}'", argument.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("& {quoted}")
+}
+
+#[cfg(not(windows))]
+fn render_recovery_command(arguments: &[String]) -> String {
+    arguments
+        .iter()
+        .map(|argument| format!("'{}'", argument.replace('\'', "'\"'\"'")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn warning(code: &str, message: &str, details: Value) -> Warning {
@@ -290,5 +386,61 @@ pub fn warning(code: &str, message: &str, details: Value) -> Warning {
         code: code.to_owned(),
         message: message.to_owned(),
         details,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_error_reports_database_state_without_changing_command_type() {
+        let error = AppError::partial(
+            Some("repository"),
+            Some("worktree"),
+            json!("unknown"),
+            PartialDatabaseState::Updated,
+            RecoveryCommand {
+                command: "taskctl doctor".to_owned(),
+                args: vec!["taskctl".to_owned(), "doctor".to_owned()],
+            },
+        );
+
+        assert_eq!(
+            error.body.message,
+            "Git and database state require reconciliation"
+        );
+        assert_eq!(error.body.details["databaseState"], "updated");
+        assert_eq!(error.body.details["recommendedCommand"], "taskctl doctor");
+        assert_eq!(
+            error.body.details["recommendedArgs"],
+            json!(["taskctl", "doctor"])
+        );
+        assert!(error.body.details["diagnostics"].is_null());
+    }
+
+    #[test]
+    fn unprovable_git_state_is_unknown_with_diagnostics_in_a_separate_field() {
+        let error = AppError::partial_with_diagnostics(
+            Some("repository"),
+            Some("worktree"),
+            json!("unknown"),
+            PartialDatabaseState::Updated,
+            RecoveryCommand {
+                command: "taskctl doctor".to_owned(),
+                args: vec!["taskctl".to_owned(), "doctor".to_owned()],
+            },
+            json!({"phase": "afterDatabaseCommit", "observationError": "boom"}),
+        );
+
+        assert_eq!(error.body.details["gitState"], "unknown");
+        assert_eq!(
+            error.body.details["diagnostics"],
+            json!({"phase": "afterDatabaseCommit", "observationError": "boom"})
+        );
+        assert!(
+            error.body.details["gitState"].is_string(),
+            "gitState must stay a stable string when the Git state cannot be proven"
+        );
     }
 }
