@@ -286,6 +286,8 @@ fn json_parse_errors_and_doctor_keep_the_envelope_contract() {
     assert!(invalid["data"].is_null());
     assert!(invalid["warnings"].as_array().unwrap().is_empty());
     assert_eq!(invalid["error"]["code"], "INVALID_INPUT");
+    assert_eq!(invalid["error"]["details"]["field"], "arguments");
+    assert!(invalid["error"]["details"]["reason"].is_string());
 
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("steward.db");

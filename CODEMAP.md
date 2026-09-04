@@ -48,7 +48,7 @@ flowchart LR
 | Worktree 用例 | [`crates/application/src/worktrees.rs`](crates/application/src/worktrees.rs) | Worktree status/create/remove/adopt/detach，以及 Git 与 SQLite 的部分完成处理 |
 | SQL 映射 | [`crates/application/src/db.rs`](crates/application/src/db.rs) | 常用查询、row 到 DTO 的转换、version 检查、Task version 递增和 History 插入 |
 | 核心合同 | [`crates/core/src/lib.rs`](crates/core/src/lib.rs) | Task 状态、输入/输出 DTO、共享校验、按路径分量使用文件系统实际比较语义生成路径键、默认数据目录和跨平台私有权限工具 |
-| SQLite 基础设施 | [`crates/storage-sqlite/src/lib.rs`](crates/storage-sqlite/src/lib.rs) | 数据库打开、busy timeout、外键、WAL、Schema v5 Migration、非权威 Worktree 路径键和数据库路径规范化 |
+| SQLite 基础设施 | [`crates/storage-sqlite/src/lib.rs`](crates/storage-sqlite/src/lib.rs) | 数据库打开、busy timeout、外键、WAL、Schema v6 Migration、非权威 Worktree 路径键和数据库路径规范化 |
 | Git 基础设施 | [`crates/git-adapter/src/lib.rs`](crates/git-adapter/src/lib.rs) | CanonicalPath、含实时 common-dir 关联复核的 Repository identity、任务级 advisory lock、Worktree 命令和实时状态 |
 
 ### 实际持久化边界

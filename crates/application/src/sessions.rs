@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use steward_core::{SessionImportView, TaskStatus};
@@ -123,9 +123,8 @@ impl Service {
         };
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, task_id)?;
         check_version(&task, expected)?;
         if task.status == TaskStatus::Closed {
@@ -204,9 +203,8 @@ impl Service {
     pub fn session_close(&self, session_id: &str, expected: i64) -> AppResult<Outcome> {
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let session = load_session(&tx, session_id)?;
         let task = load_task(&tx, &session.task_id)?;
         check_version(&task, expected)?;
@@ -267,9 +265,8 @@ impl Service {
         drop(initial);
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, task_id)?;
         check_version(&task, expected)?;
         if !matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked) {
@@ -408,9 +405,8 @@ impl Service {
             .map(ToOwned::to_owned);
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, task_id)?;
         check_version(&task, expected)?;
         let session = load_session(&tx, session_id)?;
@@ -526,9 +522,8 @@ impl Service {
         connection
             .pragma_update(None, "secure_delete", "ON")
             .map_err(AppError::from_sqlite)?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let imported = tx
             .query_row(
                 "SELECT id,session_id,source_path,media_type,sha256,length(content),imported_at

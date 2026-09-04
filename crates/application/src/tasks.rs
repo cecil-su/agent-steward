@@ -1,4 +1,4 @@
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value, json};
 use steward_core::{
     CheckpointInput, TaskCreateInput, TaskStatus, require_non_empty, validate_string_array,
@@ -27,9 +27,8 @@ impl Service {
         };
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         tx.execute(
             "INSERT INTO tasks(
                 id,title,status,version,goal,scope,acceptance_criteria,next_step,
@@ -118,9 +117,8 @@ impl Service {
             }
         }
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let mut task = load_task(&tx, id)?;
         check_version(&task, expected)?;
         ensure_mutable(&task)?;
@@ -207,9 +205,8 @@ impl Service {
         let text = required("text", text)?;
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, id)?;
         check_version(&task, expected)?;
         ensure_mutable(&task)?;
@@ -254,9 +251,8 @@ impl Service {
         let recovery = required("recovery", recovery)?;
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, id)?;
         check_version(&task, expected)?;
         if task.status != TaskStatus::InProgress {
@@ -290,9 +286,8 @@ impl Service {
         let next_step = required("nextStep", next_step)?;
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, id)?;
         check_version(&task, expected)?;
         if task.status != TaskStatus::Blocked {
@@ -347,9 +342,8 @@ impl Service {
         }
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, id)?;
         check_version(&task, expected)?;
         if task.status == TaskStatus::Closed {
@@ -405,9 +399,8 @@ impl Service {
         required("session", session_id)?;
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, id)?;
         check_version(&task, expected)?;
         if task.status == TaskStatus::Closed {
@@ -515,9 +508,8 @@ impl Service {
         let checkpoint_id = Uuid::new_v4().to_string();
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, id)?;
         check_version(&task, expected)?;
         if !matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)

@@ -125,7 +125,7 @@ pub fn acquire_worktree_lock(
     };
     fs::create_dir_all(&lock_root)?;
     steward_core::set_private_dir(&lock_root)?;
-    let database = if database_path.exists() {
+    let database = if path_exists(database_path)? {
         canonicalize_existing(database_path)?
     } else {
         canonicalize_target(database_path)?
@@ -236,18 +236,20 @@ pub fn worktree_path_key(path: &Path) -> Result<String, GitError> {
     })
 }
 
+pub fn path_exists(path: &Path) -> Result<bool, GitError> {
+    path.try_exists().map_err(|error| {
+        GitError::PathIdentity(format!("cannot inspect {}: {error}", path.display()))
+    })
+}
+
 pub fn paths_equivalent(left: &Path, right: &Path) -> Result<bool, GitError> {
     let left_target = canonicalize_target(left)?;
     let right_target = canonicalize_target(right)?;
     if left_target == right_target {
         return Ok(true);
     }
-    let left_exists = left.try_exists().map_err(|error| {
-        GitError::PathIdentity(format!("cannot inspect {}: {error}", left.display()))
-    })?;
-    let right_exists = right.try_exists().map_err(|error| {
-        GitError::PathIdentity(format!("cannot inspect {}: {error}", right.display()))
-    })?;
+    let left_exists = path_exists(left)?;
+    let right_exists = path_exists(right)?;
     if left_exists && right_exists {
         return Ok(identify_existing(left)? == identify_existing(right)?);
     }
@@ -522,7 +524,7 @@ pub fn observe_status(
 ) -> Result<WorktreeStatus, GitError> {
     let observed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let target = Path::new(path);
-    if !target.exists() {
+    if !path_exists(target)? {
         return Ok(WorktreeStatus {
             registered: true,
             repository_path: Some(repository_path.to_owned()),

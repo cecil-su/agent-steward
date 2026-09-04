@@ -7,7 +7,7 @@ use rusqlite::params;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-pub const MAX_SCHEMA_VERSION: i64 = 5;
+pub const MAX_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -38,7 +38,7 @@ pub fn open_database(path: &Path) -> Result<Connection, StorageError> {
         }
     });
     if let Some(parent) = parent
-        && !parent.exists()
+        && !parent.try_exists()?
     {
         fs::create_dir_all(parent)?;
         parent_created = true;
@@ -68,13 +68,16 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-pub fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
-    let current = schema_version(connection)?;
-    ensure_supported_schema(current)?;
-    if current == MAX_SCHEMA_VERSION {
-        return Ok(());
-    }
+pub fn write_transaction(connection: &mut Connection) -> Result<Transaction<'_>, StorageError> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_supported_schema(schema_version(&tx)?)?;
+    Ok(tx)
+}
 
+pub fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
+    // Always join SQLite's writer serialization before accepting the schema.
+    // Otherwise a concurrent newer migration can be invisible to the initial
+    // read and commit immediately after an older binary returns from here.
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -127,6 +130,13 @@ pub fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
                 "replace persistent path-key uniqueness with transactional live owner validation",
                 now(),
             ),
+        )?;
+    }
+    if current < 6 {
+        tx.execute_batch(MIGRATION_6)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, description, applied_at) VALUES (6, ?1, ?2)",
+            ("require a source for external session identifiers", now()),
         )?;
     }
     tx.commit()?;
@@ -184,7 +194,7 @@ fn ensure_supported_schema(current: i64) -> Result<(), StorageError> {
 }
 
 pub fn canonical_database_path(path: &Path) -> Result<PathBuf, StorageError> {
-    if path.exists() {
+    if path.try_exists()? {
         Ok(fs::canonicalize(path)?)
     } else {
         let absolute = if path.is_absolute() {
@@ -254,7 +264,7 @@ CREATE TABLE sessions (
     started_at TEXT NOT NULL,
     ended_at TEXT NULL,
     UNIQUE(id, task_id),
-    CHECK(external_session_id IS NULL OR length(trim(source)) > 0),
+    CHECK(external_session_id IS NULL OR (source IS NOT NULL AND length(trim(source)) > 0)),
     CHECK(continued_from IS NULL OR continued_from != id),
     FOREIGN KEY(continued_from, task_id) REFERENCES sessions(id, task_id)
 );
@@ -425,6 +435,28 @@ const MIGRATION_5: &str = r#"
 DROP INDEX IF EXISTS idx_tasks_worktree_unique;
 "#;
 
+const MIGRATION_6: &str = r#"
+CREATE TRIGGER sessions_external_source_insert
+BEFORE INSERT ON sessions
+WHEN NEW.external_session_id IS NOT NULL
+    AND (NEW.source IS NULL OR length(trim(NEW.source)) = 0)
+BEGIN
+    SELECT RAISE(ABORT, 'external session identifier requires a non-blank source');
+END;
+
+CREATE TRIGGER sessions_external_source_update
+BEFORE UPDATE OF source, external_session_id ON sessions
+WHEN NEW.external_session_id IS NOT NULL
+    AND (NEW.source IS NULL OR length(trim(NEW.source)) = 0)
+BEGIN
+    SELECT RAISE(ABORT, 'external session identifier requires a non-blank source');
+END;
+
+-- Validate every legacy row before recording version 6. If an invalid row was
+-- admitted by SQLite's NULL CHECK semantics, the migration stays uncommitted.
+UPDATE sessions SET source = source;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,8 +498,9 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_check_does_not_wait_for_a_writer() {
-        use std::time::{Duration, Instant};
+    fn current_schema_is_rechecked_after_a_concurrent_newer_migration() {
+        use std::sync::mpsc;
+        use std::time::Duration;
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("current-schema.sqlite");
@@ -486,16 +519,59 @@ mod tests {
 
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let mut reader = Connection::open(&path).unwrap();
-        reader.busy_timeout(Duration::from_millis(100)).unwrap();
+        writer
+            .execute(
+                "INSERT INTO schema_migrations VALUES (?1, 'newer', 'now')",
+                [MAX_SCHEMA_VERSION + 1],
+            )
+            .unwrap();
 
-        let started = Instant::now();
-        migrate(&mut reader).unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "a current schema must be checked without acquiring the writer lock"
-        );
-        writer.execute_batch("ROLLBACK").unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut connection = Connection::open(reader_path).unwrap();
+            connection.busy_timeout(Duration::from_secs(5)).unwrap();
+            started_tx.send(()).unwrap();
+            migrate(&mut connection)
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        writer.execute_batch("COMMIT").unwrap();
+
+        assert!(matches!(
+            reader.join().unwrap(),
+            Err(StorageError::UnsupportedSchema {
+                database_version,
+                max_supported_version,
+            }) if database_version == MAX_SCHEMA_VERSION + 1
+                && max_supported_version == MAX_SCHEMA_VERSION
+        ));
+    }
+
+    #[test]
+    fn write_transaction_rechecks_schema_after_a_later_upgrade() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("later-upgrade.sqlite");
+        let mut older_connection = Connection::open(&path).unwrap();
+        migrate(&mut older_connection).unwrap();
+        let newer_connection = Connection::open(&path).unwrap();
+        newer_connection
+            .execute(
+                "INSERT INTO schema_migrations(version, description, applied_at)
+                 VALUES (?1, 'newer', 'now')",
+                [MAX_SCHEMA_VERSION + 1],
+            )
+            .unwrap();
+        drop(newer_connection);
+
+        assert!(matches!(
+            write_transaction(&mut older_connection),
+            Err(StorageError::UnsupportedSchema {
+                database_version,
+                max_supported_version,
+            }) if database_version == MAX_SCHEMA_VERSION + 1
+                && max_supported_version == MAX_SCHEMA_VERSION
+        ));
     }
 
     #[test]
@@ -556,6 +632,66 @@ mod tests {
     }
 
     #[test]
+    fn sessions_require_a_source_for_external_identifiers() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO tasks(id,title,status,version,goal,scope,acceptance_criteria,created_at,updated_at)
+                 VALUES ('T','T','open',1,'G','S','A','now','now')",
+                [],
+            )
+            .unwrap();
+
+        for statement in [
+            "INSERT INTO sessions(id,task_id,source,external_session_id,started_at)
+             VALUES ('S-NULL','T',NULL,'external-1','now')",
+            "INSERT INTO sessions(id,task_id,source,external_session_id,started_at)
+             VALUES ('S-BLANK','T',' ','external-2','now')",
+        ] {
+            assert!(connection.execute(statement, []).is_err(), "{statement}");
+        }
+        connection
+            .execute(
+                "INSERT INTO sessions(id,task_id,source,external_session_id,started_at)
+                 VALUES ('S-VALID','T','pi','external-3','now')",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_six_rejects_invalid_legacy_sessions() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations VALUES (5,'legacy','now');
+                CREATE TABLE sessions (
+                    source TEXT NULL,
+                    external_session_id TEXT NULL
+                );
+                INSERT INTO sessions VALUES (NULL,'external-1');",
+            )
+            .unwrap();
+
+        assert!(migrate(&mut connection).is_err());
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 5);
+    }
+
+    #[test]
     fn migration_two_rejects_invalid_legacy_task_rows() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
@@ -611,7 +747,11 @@ mod tests {
                 );
                 INSERT INTO tasks VALUES ('T','open',NULL,NULL,NULL,NULL,NULL,NULL);
                 CREATE UNIQUE INDEX idx_tasks_worktree_unique
-                    ON tasks(worktree_path) WHERE worktree_path IS NOT NULL;",
+                    ON tasks(worktree_path) WHERE worktree_path IS NOT NULL;
+                CREATE TABLE sessions (
+                    source TEXT NULL,
+                    external_session_id TEXT NULL
+                );",
             )
             .unwrap();
 
@@ -718,7 +858,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, MAX_SCHEMA_VERSION);
         let snapshots = connection
             .prepare("SELECT worktree_path_key FROM tasks ORDER BY id")
             .unwrap()
@@ -798,7 +938,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, MAX_SCHEMA_VERSION);
         assert_eq!(key, "legacy-key");
         connection
             .execute(
@@ -823,7 +963,11 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
         connection
-            .execute("DELETE FROM schema_migrations WHERE version=5", [])
+            .execute_batch(
+                "DELETE FROM schema_migrations WHERE version >= 5;
+                 DROP TRIGGER sessions_external_source_insert;
+                 DROP TRIGGER sessions_external_source_update;",
+            )
             .unwrap();
         connection
             .execute_batch(
@@ -854,7 +998,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, MAX_SCHEMA_VERSION);
         connection
             .execute(
                 "UPDATE tasks SET worktree_path_key='legacy-upper' WHERE id='T2'",

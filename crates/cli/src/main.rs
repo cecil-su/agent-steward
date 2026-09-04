@@ -252,7 +252,7 @@ fn main() -> ExitCode {
                     "INVALID_INPUT",
                     "command-line arguments are invalid",
                     false,
-                    json!({"reason": error.to_string()}),
+                    json!({"field": "arguments", "reason": error.to_string()}),
                     2,
                 ),
                 json_requested,
@@ -582,8 +582,10 @@ fn insecure_database_file_warning(path: &Path) -> Option<Warning> {
     use std::os::unix::fs::PermissionsExt;
 
     for file in database_storage_files(path) {
-        if !file.exists() {
-            continue;
+        match file.try_exists() {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => return Some(permission_check_warning(&file, error.to_string())),
         }
         match fs::metadata(&file) {
             Ok(metadata) => {
@@ -635,8 +637,10 @@ fn database_permission_warning(path: &Path, custom_database: bool) -> Option<War
 #[cfg(windows)]
 fn insecure_database_file_warning(path: &Path) -> Option<Warning> {
     for file in database_storage_files(path) {
-        if !file.exists() {
-            continue;
+        match file.try_exists() {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => return Some(permission_check_warning(&file, error.to_string())),
         }
         match steward_core::private_acl_is_protected(&file) {
             Ok(true) => {}

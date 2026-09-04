@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::params;
 use serde_json::{Value, json};
 use storage_sqlite::now;
 
@@ -79,7 +79,8 @@ impl Service {
                 path.to_str(),
             ));
         }
-        if target.exists()
+        if git_adapter::path_exists(&target)
+            .map_err(|error| AppError::from_git(error, path.to_str()))?
             || git_adapter::find_worktree(&repo_info.repository_path, &target)
                 .map_err(|error| AppError::from_git(error, path.to_str()))?
                 .is_some()
@@ -96,15 +97,14 @@ impl Service {
         let invocation =
             git_adapter::invoke_worktree_add(&repo_info.repository_path, &target, branch);
         let observed = git_adapter::find_worktree(&repo_info.repository_path, &target);
-        let created = match observed {
-            Ok(Some(item))
-                if target.exists()
-                    && item.path == target
-                    && item.branch.as_deref() == Some(branch) =>
+        let target_exists = git_adapter::path_exists(&target);
+        let created = match (observed, target_exists) {
+            (Ok(Some(item)), Ok(true))
+                if item.path == target && item.branch.as_deref() == Some(branch) =>
             {
                 item
             }
-            Ok(None) if !target.exists() => {
+            (Ok(None), Ok(false)) => {
                 if !invocation.succeeded()
                     && git_adapter::verify_repository_identity(&repo_info).is_ok()
                     && git_adapter::verify_target_identity(&target_identity).is_ok()
@@ -123,17 +123,17 @@ impl Service {
                     git_invocation_diagnostics(&invocation),
                 ));
             }
-            Ok(other) => {
+            (Ok(other), Ok(path_exists)) => {
                 return Err(AppError::partial_with_diagnostics(
                     repo_info.repository_path.to_str(),
                     target.to_str(),
-                    observed_git_state(other.as_ref(), target.exists()),
+                    observed_git_state(other.as_ref(), path_exists),
                     PartialDatabaseState::Unchanged,
                     self.recovery_command(["doctor"]),
                     git_invocation_diagnostics(&invocation),
                 ));
             }
-            Err(error) => {
+            (observed, path_exists) => {
                 return Err(AppError::partial_with_diagnostics(
                     repo_info.repository_path.to_str(),
                     target.to_str(),
@@ -141,7 +141,7 @@ impl Service {
                     PartialDatabaseState::Unchanged,
                     self.recovery_command(["doctor"]),
                     json!({
-                        "observationError": error.to_string(),
+                        "observationError": post_git_observation_error(&observed, &path_exists),
                         "gitInvocation": git_invocation_diagnostics(&invocation),
                     }),
                 ));
@@ -199,24 +199,29 @@ impl Service {
         }
         drop(connection);
         let timestamp = now();
-        let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| {
-                AppError::partial(
-                    repo_info.repository_path.to_str(),
-                    target.to_str(),
-                    json!({"created": true, "branch": branch}),
-                    PartialDatabaseState::Unchanged,
-                    adopt_recovery_for_created_worktree(
-                        self,
-                        task_id,
-                        &repo_info.repository_path,
-                        &repo_info.common_dir,
-                        &target,
-                    ),
-                )
-            })?;
+        let mut connection = self.connection().map_err(|error| {
+            created_worktree_database_failure(
+                self,
+                task_id,
+                &repo_info.repository_path,
+                &created,
+                expected,
+                "databaseReconnect",
+                json!(error.body),
+            )
+        })?;
+        let tx = storage_sqlite::write_transaction(&mut connection).map_err(|error| {
+            let error = AppError::from_storage(error);
+            created_worktree_database_failure(
+                self,
+                task_id,
+                &repo_info.repository_path,
+                &created,
+                expected,
+                "databaseTransaction",
+                json!(error.body),
+            )
+        })?;
         let current = load_task(&tx, task_id).map_err(|_| {
             AppError::partial(
                 repo_info.repository_path.to_str(),
@@ -486,13 +491,22 @@ impl Service {
             .map_err(|error| AppError::from_git(error, Some(path)))?;
         let invocation = git_adapter::invoke_worktree_remove(&info.repository_path, target);
         let listed = git_adapter::find_worktree_registration(Path::new(repo), target);
-        match listed {
-            Ok(None) if !target.exists() => {}
-            Ok(Some(item)) if target.exists() => {
-                let unchanged = git_adapter::verify_repository_identity(&info).is_ok()
-                    && git_adapter::verify_target_identity(&target_identity).is_ok()
-                    && item.branch.as_deref() == Some(branch)
-                    && item.head == status.head;
+        let target_exists = git_adapter::path_exists(target);
+        match (listed, target_exists) {
+            (Ok(None), Ok(false)) => {}
+            (Ok(Some(item)), Ok(true)) => {
+                let post_failure_status = if invocation.succeeded() {
+                    None
+                } else {
+                    Some(git_adapter::observe_status(repo, common, path, branch))
+                };
+                let unchanged = post_failure_status.as_ref().is_some_and(|result| {
+                    result.as_ref().is_ok_and(|after| {
+                        git_adapter::verify_repository_identity(&info).is_ok()
+                            && git_adapter::verify_target_identity(&target_identity).is_ok()
+                            && worktree_status_state_eq(&status, after)
+                    })
+                });
                 if !invocation.succeeded() && unchanged {
                     return Err(AppError::from_git(invocation.command_error(), Some(path)));
                 }
@@ -502,20 +516,20 @@ impl Service {
                     observed_git_state(Some(&item), true),
                     PartialDatabaseState::Unchanged,
                     self.recovery_command(["doctor"]),
-                    git_invocation_diagnostics(&invocation),
+                    removal_failure_diagnostics(&invocation, post_failure_status.as_ref()),
                 ));
             }
-            Ok(other) => {
+            (Ok(other), Ok(path_exists)) => {
                 return Err(AppError::partial_with_diagnostics(
                     Some(repo),
                     Some(path),
-                    observed_git_state(other.as_ref(), target.exists()),
+                    observed_git_state(other.as_ref(), path_exists),
                     PartialDatabaseState::Unchanged,
                     self.recovery_command(["doctor"]),
                     git_invocation_diagnostics(&invocation),
                 ));
             }
-            Err(error) => {
+            (listed, path_exists) => {
                 return Err(AppError::partial_with_diagnostics(
                     Some(repo),
                     Some(path),
@@ -523,7 +537,7 @@ impl Service {
                     PartialDatabaseState::Unchanged,
                     self.recovery_command(["doctor"]),
                     json!({
-                        "observationError": error.to_string(),
+                        "observationError": post_git_observation_error(&listed, &path_exists),
                         "gitInvocation": git_invocation_diagnostics(&invocation),
                     }),
                 ));
@@ -545,18 +559,29 @@ impl Service {
         }
         drop(connection);
         let timestamp = now();
-        let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| {
-                AppError::partial(
-                    Some(repo),
-                    Some(path),
-                    json!({"removed": true}),
-                    PartialDatabaseState::Unchanged,
-                    self.recovery_command(["doctor"]),
-                )
-            })?;
+        let mut connection = self.connection().map_err(|error| {
+            removed_worktree_database_failure(
+                self,
+                task_id,
+                Path::new(repo),
+                Path::new(path),
+                expected,
+                "databaseReconnect",
+                json!(error.body),
+            )
+        })?;
+        let tx = storage_sqlite::write_transaction(&mut connection).map_err(|error| {
+            let error = AppError::from_storage(error);
+            removed_worktree_database_failure(
+                self,
+                task_id,
+                Path::new(repo),
+                Path::new(path),
+                expected,
+                "databaseTransaction",
+                json!(error.body),
+            )
+        })?;
         let current = load_task(&tx, task_id).map_err(|_| {
             AppError::partial(
                 Some(repo),
@@ -637,7 +662,17 @@ impl Service {
                     json!({"phase": "afterDatabaseCommit", "observationError": error.to_string()}),
                 )
             })?;
-        if target.exists() || listed_after_commit.is_some() {
+        let target_exists = git_adapter::path_exists(target).map_err(|error| {
+            AppError::partial_with_diagnostics(
+                Some(repo),
+                Some(path),
+                json!("unknown"),
+                PartialDatabaseState::Updated,
+                self.recovery_command(["doctor"]),
+                json!({"phase": "afterDatabaseCommit", "observationError": error.to_string()}),
+            )
+        })?;
+        if target_exists || listed_after_commit.is_some() {
             let recommendation = validated_adopt_recovery(
                 self,
                 task_id,
@@ -650,7 +685,7 @@ impl Service {
                 Some(repo),
                 Some(path),
                 json!({
-                    "pathExists": target.exists(),
+                    "pathExists": target_exists,
                     "registeredByGit": listed_after_commit.is_some(),
                 }),
                 PartialDatabaseState::Updated,
@@ -748,9 +783,8 @@ impl Service {
         }
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let current = load_task(&tx, task_id)?;
         check_version(&current, expected)?;
         if current.worktree_path.is_some()
@@ -919,7 +953,9 @@ impl Service {
                 expected_canonical.to_str(),
             ));
         }
-        if registered_canonical.exists() {
+        if git_adapter::path_exists(&registered_canonical)
+            .map_err(|error| AppError::from_git(error, Some(registered_path)))?
+        {
             return Err(AppError::worktree_safety(
                 "worktree path still exists",
                 registered_canonical.to_str(),
@@ -949,12 +985,23 @@ impl Service {
                     json!({"phase": "beforeDatabaseCommit", "observationError": error.to_string()}),
                 )
             })?;
-        if registered_canonical.exists() || listed_before_commit.is_some() {
+        let path_exists_before_commit =
+            git_adapter::path_exists(&registered_canonical).map_err(|error| {
+                AppError::partial_with_diagnostics(
+                    Some(repo),
+                    Some(registered_path),
+                    json!("unknown"),
+                    PartialDatabaseState::Unchanged,
+                    self.recovery_command(["doctor"]),
+                    json!({"phase": "beforeDatabaseCommit", "observationError": error.to_string()}),
+                )
+            })?;
+        if path_exists_before_commit || listed_before_commit.is_some() {
             return Err(AppError::partial_with_diagnostics(
                 Some(repo),
                 Some(registered_path),
                 json!({
-                    "pathExists": registered_canonical.exists(),
+                    "pathExists": path_exists_before_commit,
                     "registeredByGit": listed_before_commit.is_some(),
                 }),
                 PartialDatabaseState::Unchanged,
@@ -967,9 +1014,8 @@ impl Service {
         }
         let timestamp = now();
         let mut connection = self.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AppError::from_sqlite)?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let current = load_task(&tx, task_id)?;
         check_version(&current, expected)?;
         if current.worktree_path.as_deref() != Some(registered_path) {
@@ -1022,7 +1068,18 @@ impl Service {
                     json!({"phase": "afterDatabaseCommit", "observationError": error.to_string()}),
                 )
             })?;
-        if registered_canonical.exists() || listed_after_commit.is_some() {
+        let path_exists_after_commit =
+            git_adapter::path_exists(&registered_canonical).map_err(|error| {
+                AppError::partial_with_diagnostics(
+                    Some(repo),
+                    Some(registered_path),
+                    json!("unknown"),
+                    PartialDatabaseState::Updated,
+                    self.recovery_command(["doctor"]),
+                    json!({"phase": "afterDatabaseCommit", "observationError": error.to_string()}),
+                )
+            })?;
+        if path_exists_after_commit || listed_after_commit.is_some() {
             let recommendation = validated_adopt_recovery(
                 self,
                 task_id,
@@ -1035,7 +1092,7 @@ impl Service {
                 Some(repo),
                 Some(registered_path),
                 json!({
-                    "pathExists": registered_canonical.exists(),
+                    "pathExists": path_exists_after_commit,
                     "registeredByGit": listed_after_commit.is_some(),
                 }),
                 PartialDatabaseState::Updated,
@@ -1092,6 +1149,87 @@ fn worktree_payload(info: &git_adapter::RepositoryInfo, target: &Path, branch: &
         "worktreePath": target.to_string_lossy(),
         "branch": branch,
     })
+}
+
+fn created_worktree_database_failure(
+    service: &Service,
+    task_id: &str,
+    repository: &Path,
+    created: &git_adapter::ObservedWorktree,
+    expected: i64,
+    phase: &str,
+    database_error: Value,
+) -> AppError {
+    AppError::partial_with_diagnostics(
+        repository.to_str(),
+        created.path.to_str(),
+        observed_git_state(Some(created), true),
+        PartialDatabaseState::Unchanged,
+        adopt_recovery_command(service, task_id, repository, &created.path, expected),
+        json!({
+            "phase": phase,
+            "databaseError": database_error,
+        }),
+    )
+}
+
+fn removed_worktree_database_failure(
+    service: &Service,
+    task_id: &str,
+    repository: &Path,
+    worktree: &Path,
+    expected: i64,
+    phase: &str,
+    database_error: Value,
+) -> AppError {
+    AppError::partial_with_diagnostics(
+        repository.to_str(),
+        worktree.to_str(),
+        observed_git_state(None, false),
+        PartialDatabaseState::Unchanged,
+        detach_recovery_command(service, task_id, worktree, expected),
+        json!({
+            "phase": phase,
+            "databaseError": database_error,
+        }),
+    )
+}
+
+fn adopt_recovery_command(
+    service: &Service,
+    task_id: &str,
+    repository: &Path,
+    worktree: &Path,
+    expected: i64,
+) -> RecoveryCommand {
+    service.recovery_command(vec![
+        "worktree".to_owned(),
+        "adopt".to_owned(),
+        task_id.to_owned(),
+        "--repo".to_owned(),
+        repository.to_string_lossy().into_owned(),
+        "--path".to_owned(),
+        worktree.to_string_lossy().into_owned(),
+        "--if-version".to_owned(),
+        expected.to_string(),
+    ])
+}
+
+fn detach_recovery_command(
+    service: &Service,
+    task_id: &str,
+    worktree: &Path,
+    expected: i64,
+) -> RecoveryCommand {
+    service.recovery_command(vec![
+        "worktree".to_owned(),
+        "detach".to_owned(),
+        task_id.to_owned(),
+        "--expected-path".to_owned(),
+        worktree.to_string_lossy().into_owned(),
+        "--if-version".to_owned(),
+        expected.to_string(),
+    ])
 }
 
 fn adopt_recovery_for_created_worktree(
@@ -1195,7 +1333,7 @@ fn validated_adopt_recovery(
     let Some(branch) = listed.and_then(|item| item.branch.as_deref()) else {
         return service.recovery_command(["doctor"]);
     };
-    if !worktree.exists() {
+    if !git_adapter::path_exists(worktree).unwrap_or(false) {
         return service.recovery_command(["doctor"]);
     }
     let Ok(info) = git_adapter::repository_info(repository) else {
@@ -1237,6 +1375,54 @@ fn validated_adopt_recovery(
             task.version.to_string(),
         ]),
         None => service.recovery_command(["doctor"]),
+    }
+}
+
+fn post_git_observation_error(
+    registration: &Result<Option<git_adapter::ObservedWorktree>, git_adapter::GitError>,
+    path_exists: &Result<bool, git_adapter::GitError>,
+) -> String {
+    let mut errors = Vec::new();
+    if let Err(error) = registration {
+        errors.push(format!("Git registration: {error}"));
+    }
+    if let Err(error) = path_exists {
+        errors.push(format!("path metadata: {error}"));
+    }
+    errors.join("; ")
+}
+
+fn worktree_status_state_eq(
+    before: &steward_core::WorktreeStatus,
+    after: &steward_core::WorktreeStatus,
+) -> bool {
+    before.registered == after.registered
+        && before.repository_path == after.repository_path
+        && before.repository_common_dir == after.repository_common_dir
+        && before.path == after.path
+        && before.exists == after.exists
+        && before.branch == after.branch
+        && before.head == after.head
+        && before.staged == after.staged
+        && before.unstaged == after.unstaged
+        && before.untracked == after.untracked
+        && before.ignored == after.ignored
+}
+
+fn removal_failure_diagnostics(
+    invocation: &git_adapter::GitInvocation,
+    status: Option<&Result<steward_core::WorktreeStatus, git_adapter::GitError>>,
+) -> Value {
+    match status {
+        Some(Ok(status)) => json!({
+            "gitInvocation": git_invocation_diagnostics(invocation),
+            "postFailureStatus": status,
+        }),
+        Some(Err(error)) => json!({
+            "gitInvocation": git_invocation_diagnostics(invocation),
+            "postFailureObservationError": error.to_string(),
+        }),
+        None => git_invocation_diagnostics(invocation),
     }
 }
 
@@ -1284,6 +1470,111 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn complete_status_comparison_detects_partial_file_deletion() {
+        let mut before = git_adapter::empty_worktree_status();
+        before.registered = true;
+        before.exists = true;
+        before.head = Some("head".into());
+        before.staged = Some(Vec::new());
+        before.unstaged = Some(Vec::new());
+        before.untracked = Some(Vec::new());
+        before.ignored = Some(Vec::new());
+        let mut after = before.clone();
+        after.observed_at = "later".into();
+        assert!(worktree_status_state_eq(&before, &after));
+
+        after.unstaged = Some(vec!["deleted-file.txt".into()]);
+        assert!(!worktree_status_state_eq(&before, &after));
+    }
+
+    #[test]
+    fn post_git_database_failures_report_partial_state_and_targeted_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = Service::new(temp.path().join("state.sqlite"));
+        let repository = temp.path().join("repository");
+        let worktree = temp.path().join("worktree");
+        let created = git_adapter::ObservedWorktree {
+            path: worktree.clone(),
+            branch: Some("feature".to_owned()),
+            head: Some("0123456789abcdef".to_owned()),
+        };
+        let cause = json!({
+            "code": "UNSUPPORTED_SCHEMA_VERSION",
+            "message": "database schema is newer than this taskctl build",
+            "retryable": false,
+            "details": {"databaseVersion": 99, "maxSupportedVersion": 6},
+        });
+
+        let create_error = created_worktree_database_failure(
+            &service,
+            "TASK RECOVERY",
+            &repository,
+            &created,
+            7,
+            "databaseReconnect",
+            cause.clone(),
+        );
+        assert_eq!(create_error.body.code, "PARTIAL_EXTERNAL_STATE");
+        assert_eq!(
+            create_error.body.details["worktreePath"],
+            worktree.to_string_lossy().as_ref()
+        );
+        assert_eq!(create_error.body.details["gitState"]["pathExists"], true);
+        assert_eq!(
+            create_error.body.details["gitState"]["registeredByGit"],
+            true
+        );
+        assert_eq!(create_error.body.details["databaseState"], "unchanged");
+        assert_eq!(
+            create_error.body.details["diagnostics"]["databaseError"]["code"],
+            "UNSUPPORTED_SCHEMA_VERSION"
+        );
+        assert_eq!(
+            create_error.body.details["diagnostics"]["databaseError"]["details"]["databaseVersion"],
+            99
+        );
+        assert_eq!(create_error.body.details["recommendedArgs"][4], "adopt");
+        assert_eq!(
+            create_error.body.details["recommendedArgs"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap(),
+            "7"
+        );
+
+        let remove_error = removed_worktree_database_failure(
+            &service,
+            "TASK RECOVERY",
+            &repository,
+            &worktree,
+            8,
+            "databaseReconnect",
+            cause,
+        );
+        assert_eq!(remove_error.body.code, "PARTIAL_EXTERNAL_STATE");
+        assert_eq!(
+            remove_error.body.details["worktreePath"],
+            worktree.to_string_lossy().as_ref()
+        );
+        assert_eq!(remove_error.body.details["gitState"]["pathExists"], false);
+        assert_eq!(
+            remove_error.body.details["gitState"]["registeredByGit"],
+            false
+        );
+        assert_eq!(remove_error.body.details["databaseState"], "unchanged");
+        assert_eq!(remove_error.body.details["recommendedArgs"][4], "detach");
+        assert_eq!(
+            remove_error.body.details["recommendedArgs"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap(),
+            "8"
+        );
+    }
+
+    #[test]
     fn owner_lookup_revalidates_live_paths_inside_the_write_transaction() {
         let temp = tempfile::tempdir().unwrap();
         let service = Service::new(temp.path().join("state.sqlite"));
@@ -1312,9 +1603,7 @@ mod tests {
             .unwrap();
 
         let mut connection = service.connection().unwrap();
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
+        let tx = storage_sqlite::write_transaction(&mut connection).unwrap();
         assert_eq!(
             worktree_path_owner(&tx, &worktree).unwrap().as_deref(),
             Some("TASK OWNER")
