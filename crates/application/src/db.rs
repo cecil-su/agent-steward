@@ -8,10 +8,88 @@ use steward_core::{
 
 use crate::{AppError, AppResult};
 
-pub(crate) fn load_task(connection: &Connection, id: &str) -> AppResult<TaskView> {
+pub(crate) fn resolve_task_id(connection: &Connection, reference: &str) -> AppResult<i64> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(AppError::invalid(
+            "taskReference",
+            "must be a numeric id, #id, or non-empty taskKey",
+        ));
+    }
+    if let Some(task_key) = reference.strip_prefix("key:") {
+        if task_key.is_empty() {
+            return Err(AppError::invalid(
+                "taskReference",
+                "key: must be followed by a taskKey",
+            ));
+        }
+        return connection
+            .query_row(
+                "SELECT id FROM tasks WHERE task_key=?1",
+                [task_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from_sqlite)?
+            .ok_or_else(|| AppError::not_found("Task", reference));
+    }
+    let numeric = if let Some(value) = reference.strip_prefix('#') {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(AppError::invalid(
+                "taskReference",
+                "# must be followed by a positive numeric task id",
+            ));
+        }
+        Some(value)
+    } else if reference.bytes().all(|byte| byte.is_ascii_digit()) {
+        Some(reference)
+    } else {
+        None
+    };
+    if let Some(numeric) = numeric {
+        let id = numeric
+            .parse::<i64>()
+            .map_err(|_| AppError::invalid("taskReference", "numeric task id is out of range"))?;
+        if id <= 0 {
+            return Err(AppError::invalid(
+                "taskReference",
+                "numeric task id must be positive",
+            ));
+        }
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from_sqlite)?;
+        return exists
+            .then_some(id)
+            .ok_or_else(|| AppError::not_found("Task", reference));
+    }
     connection
         .query_row(
-            "SELECT id,title,status,version,goal,scope,acceptance_criteria,next_step,
+            "SELECT id FROM tasks WHERE task_key=?1",
+            [reference],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::from_sqlite)?
+        .ok_or_else(|| AppError::not_found("Task", reference))
+}
+
+pub(crate) fn load_task_by_reference(
+    connection: &Connection,
+    reference: &str,
+) -> AppResult<TaskView> {
+    let id = resolve_task_id(connection, reference)?;
+    load_task(connection, id)
+}
+
+pub(crate) fn load_task(connection: &Connection, id: i64) -> AppResult<TaskView> {
+    connection
+        .query_row(
+            "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
                     block_reason,block_recovery,current_session_id,repository_path,
                     repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
                     closure_outcome,closure_reason,closed_at,created_at,updated_at
@@ -21,14 +99,14 @@ pub(crate) fn load_task(connection: &Connection, id: &str) -> AppResult<TaskView
         )
         .optional()
         .map_err(AppError::from_sqlite)?
-        .ok_or_else(|| AppError::not_found("Task", id))
+        .ok_or_else(|| AppError::not_found("Task", &id.to_string()))
 }
 
 pub(crate) fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskView> {
-    let status: String = row.get(2)?;
+    let status: String = row.get(3)?;
     let status = TaskStatus::try_from(status.as_str()).map_err(|message| {
         rusqlite::Error::FromSqlConversionFailure(
-            2,
+            3,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -38,26 +116,27 @@ pub(crate) fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskView> {
     })?;
     Ok(TaskView {
         id: row.get(0)?,
-        title: row.get(1)?,
+        task_key: row.get(1)?,
+        title: row.get(2)?,
         status,
-        version: row.get(3)?,
-        goal: row.get(4)?,
-        scope: row.get(5)?,
-        acceptance_criteria: row.get(6)?,
-        next_step: row.get(7)?,
-        block_reason: row.get(8)?,
-        block_recovery: row.get(9)?,
-        current_session_id: row.get(10)?,
-        repository_path: row.get(11)?,
-        repository_common_dir: row.get(12)?,
-        repository_branch: row.get(13)?,
-        worktree_path: row.get(14)?,
-        latest_checkpoint_id: row.get(15)?,
-        closure_outcome: row.get(16)?,
-        closure_reason: row.get(17)?,
-        closed_at: row.get(18)?,
-        created_at: row.get(19)?,
-        updated_at: row.get(20)?,
+        version: row.get(4)?,
+        goal: row.get(5)?,
+        scope: row.get(6)?,
+        acceptance_criteria: row.get(7)?,
+        next_step: row.get(8)?,
+        block_reason: row.get(9)?,
+        block_recovery: row.get(10)?,
+        current_session_id: row.get(11)?,
+        repository_path: row.get(12)?,
+        repository_common_dir: row.get(13)?,
+        repository_branch: row.get(14)?,
+        worktree_path: row.get(15)?,
+        latest_checkpoint_id: row.get(16)?,
+        closure_outcome: row.get(17)?,
+        closure_reason: row.get(18)?,
+        closed_at: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
     })
 }
 
@@ -173,7 +252,7 @@ pub(crate) fn check_version(task: &TaskView, expected: i64) -> AppResult<()> {
 
 pub(crate) fn bump_task(
     tx: &Transaction<'_>,
-    task_id: &str,
+    task_id: i64,
     expected: i64,
     now: &str,
 ) -> AppResult<()> {
@@ -193,7 +272,7 @@ pub(crate) fn bump_task(
 
 pub(crate) fn insert_history(
     tx: &Transaction<'_>,
-    task_id: &str,
+    task_id: i64,
     change_type: &str,
     session_id: Option<&str>,
     summary: &str,

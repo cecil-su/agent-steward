@@ -53,7 +53,7 @@ GUI 不能把 Session 结束、摘要或测试文本显示成 Task 已验收。
 ## 4. API 草案
 
 ```text
-GET  /api/tasks
+GET  /api/tasks?status=&taskKey=&query=&pageSize=&cursor=&fields=
 GET  /api/tasks/:id
 POST /api/commands/task-create
 POST /api/commands/task-claim
@@ -80,7 +80,7 @@ POST /api/commands/worktree-detach
 GET  /api/doctor
 ```
 
-除 `task-create` 外，每个 Mutation 请求必须携带调用方最近查询得到的 `expectedVersion`，成功后返回完整 Task 和新 version；冲突返回 `VERSION_CONFLICT` 及 expected/current version。API 复用 CLI 文档中的 `schemaVersion=1` envelope 和稳定 code，不依赖自然语言判断。
+Task 列表 Query 与 CLI 使用相同的筛选、游标分页和字段白名单投影合同，默认返回完整 TaskView；GUI 不解析 CLI table/lines 文本。除 `task-create` 外，每个 Mutation 请求必须携带调用方最近查询得到的 `expectedVersion`，成功后返回完整 Task 和新 version；冲突返回 `VERSION_CONFLICT` 及 expected/current version。API 复用 CLI 文档中的 `schemaVersion=2` envelope、整数 Task ID/`taskId` 和稳定 code，不依赖自然语言判断。
 
 ## 5. GUI 前置条件
 

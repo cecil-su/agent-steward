@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
@@ -8,6 +9,18 @@ fn run(arguments: &[&str]) -> Output {
         .args(arguments)
         .output()
         .expect("taskctl should start")
+}
+
+fn run_with_stdin(arguments: &[&str], input: &[u8]) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taskctl"))
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("taskctl should start");
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
 }
 
 fn json_output(output: &Output) -> Value {
@@ -28,7 +41,7 @@ fn json_cli_supports_create_claim_checkpoint_resume_and_conflict() {
     fs::write(
         &task_input,
         serde_json::to_vec(&json!({
-            "title":"CLI contract",
+            "title":"0904｜功能｜CLI contract",
             "goal":"Exercise the public process boundary",
             "scope":"Synthetic temporary database",
             "acceptanceCriteria":"Stable JSON envelopes",
@@ -50,7 +63,7 @@ fn json_cli_supports_create_claim_checkpoint_resume_and_conflict() {
     ]);
     assert!(created.status.success());
     let created = json_output(&created);
-    assert_eq!(created["schemaVersion"], 1);
+    assert_eq!(created["schemaVersion"], 2);
     assert_eq!(created["ok"], true);
     assert_eq!(created["data"]["task"]["version"], 1);
     assert!(created["error"].is_null());
@@ -143,6 +156,355 @@ fn json_cli_supports_create_claim_checkpoint_resume_and_conflict() {
 }
 
 #[test]
+fn json_cli_supports_minimal_create_stdin_and_all_task_references() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("references.db");
+    let database_arg = database.to_str().unwrap();
+
+    let minimal = run(&["--database", database_arg, "--json", "task", "create"]);
+    assert!(minimal.status.success());
+    let minimal = json_output(&minimal);
+    assert_eq!(minimal["data"]["task"]["id"], 1);
+    assert!(minimal["data"]["task"]["taskKey"].is_null());
+    assert!(minimal["data"]["task"]["title"].is_null());
+
+    let full_input = serde_json::to_vec(&json!({
+        "taskKey":"STDIN-KEY",
+        "title":"0904｜功能｜Created from stdin",
+        "goal":"Read a complete JSON document",
+        "scope":"CLI stdin",
+        "acceptanceCriteria":"All references resolve",
+        "nextStep":"Patch by numeric id"
+    }))
+    .unwrap();
+    let created = run_with_stdin(
+        &[
+            "--database",
+            database_arg,
+            "--json",
+            "--input",
+            "-",
+            "task",
+            "create",
+        ],
+        &full_input,
+    );
+    assert!(created.status.success());
+    let created = json_output(&created);
+    assert_eq!(created["schemaVersion"], 2);
+    assert_eq!(created["data"]["task"]["id"], 2);
+    assert_eq!(created["data"]["task"]["taskKey"], "STDIN-KEY");
+
+    let patched = run_with_stdin(
+        &[
+            "--database",
+            database_arg,
+            "--json",
+            "--input",
+            "-",
+            "task",
+            "update",
+            "#2",
+            "--if-version",
+            "1",
+        ],
+        r#"{"title":"0904｜优化｜Patched from stdin","nextStep":null}"#.as_bytes(),
+    );
+    assert!(patched.status.success());
+    assert_eq!(json_output(&patched)["data"]["task"]["version"], 2);
+
+    for reference in ["2", "#2", "STDIN-KEY", "key:STDIN-KEY"] {
+        let shown = run(&[
+            "--database",
+            database_arg,
+            "--json",
+            "task",
+            "show",
+            reference,
+        ]);
+        assert!(
+            shown.status.success(),
+            "reference {reference} should resolve"
+        );
+        assert_eq!(json_output(&shown)["data"]["task"]["id"], 2);
+    }
+
+    let human = run(&["--database", database_arg, "task", "show", "STDIN-KEY"]);
+    assert!(human.status.success());
+    assert_eq!(json_output(&human)["task"]["id"], "#2");
+}
+
+#[test]
+fn cli_retitle_updates_a_closed_task_without_reopening_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("retitle.db");
+    let database_arg = database.to_str().unwrap();
+    let input = serde_json::to_vec(&json!({
+        "taskKey":"RETITLE",
+        "title":"0904｜功能｜Before retitle",
+        "goal":"Correct display metadata",
+        "scope":"Task title only",
+        "acceptanceCriteria":"Closed task remains closed"
+    }))
+    .unwrap();
+    assert!(
+        run_with_stdin(
+            &[
+                "--database",
+                database_arg,
+                "--json",
+                "--input",
+                "-",
+                "task",
+                "create",
+            ],
+            &input,
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(&[
+            "--database",
+            database_arg,
+            "--json",
+            "task",
+            "claim",
+            "#1",
+            "--session",
+            "session-a",
+            "--if-version",
+            "1",
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        run(&[
+            "--database",
+            database_arg,
+            "--json",
+            "task",
+            "close",
+            "#1",
+            "--if-version",
+            "2",
+            "--outcome",
+            "completed",
+        ])
+        .status
+        .success()
+    );
+
+    let retitled = run(&[
+        "--database",
+        database_arg,
+        "--json",
+        "task",
+        "retitle",
+        "#1",
+        "--if-version",
+        "3",
+        "--title",
+        "0904｜文档｜After retitle",
+    ]);
+    assert!(retitled.status.success());
+    let retitled = json_output(&retitled);
+    assert_eq!(
+        retitled["data"]["task"]["title"],
+        "0904｜文档｜After retitle"
+    );
+    assert_eq!(retitled["data"]["task"]["status"], "closed");
+    assert_eq!(retitled["data"]["task"]["version"], 4);
+
+    let history = run(&["--database", database_arg, "--json", "history", "#1"]);
+    assert!(history.status.success());
+    let history = json_output(&history);
+    let last = history["data"]["history"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(last["changeType"], "task.retitled");
+    assert_eq!(
+        last["payload"]["previousTitle"],
+        "0904｜功能｜Before retitle"
+    );
+    assert_eq!(last["payload"]["title"], "0904｜文档｜After retitle");
+}
+
+#[test]
+fn stdin_input_errors_are_stable_and_do_not_panic() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("stdin-errors.db");
+    let database_arg = database.to_str().unwrap();
+    let arguments = [
+        "--database",
+        database_arg,
+        "--json",
+        "--input",
+        "-",
+        "task",
+        "create",
+    ];
+
+    for (input, reason_fragment) in [
+        (Vec::new(), "must not be empty"),
+        (b"{".to_vec(), "EOF while parsing"),
+        (br#"{"unknown":true}"#.to_vec(), "unknown field"),
+        (vec![0xff, 0xfe], "valid UTF-8"),
+    ] {
+        let output = run_with_stdin(&arguments, &input);
+        assert_eq!(output.status.code(), Some(2));
+        let output = json_output(&output);
+        assert_eq!(output["schemaVersion"], 2);
+        assert_eq!(output["error"]["code"], "INVALID_INPUT");
+        assert_eq!(output["error"]["details"]["field"], "input");
+        assert!(
+            output["error"]["details"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains(reason_fragment),
+            "unexpected error: {output}"
+        );
+    }
+}
+
+#[test]
+fn task_list_cli_supports_projection_cursor_and_terminal_formats() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("task-list.db");
+    let database_arg = database.to_str().unwrap();
+    for (key, title) in [
+        ("LIST-A", "0904｜功能｜Terminal A"),
+        ("LIST-B", "0904｜功能｜Terminal B"),
+        ("LIST-C", "0904｜功能｜Terminal C"),
+    ] {
+        let input = serde_json::to_vec(&json!({
+            "title":title,
+            "goal":"Filter and paginate tasks",
+            "scope":"Terminal list output",
+            "acceptanceCriteria":"Output remains readable"
+        }))
+        .unwrap();
+        let created = run_with_stdin(
+            &[
+                "--database",
+                database_arg,
+                "--json",
+                "--input",
+                "-",
+                "task",
+                "create",
+                key,
+            ],
+            &input,
+        );
+        assert!(created.status.success());
+    }
+
+    let first = run(&[
+        "--database",
+        database_arg,
+        "--json",
+        "task",
+        "list",
+        "--query",
+        "Terminal",
+        "--fields",
+        "title",
+        "--page-size",
+        "2",
+    ]);
+    assert!(first.status.success());
+    let first = json_output(&first);
+    assert_eq!(first["data"]["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(first["data"]["tasks"][0].as_object().unwrap().len(), 1);
+    assert_eq!(first["data"]["hasMore"], true);
+    assert_eq!(first["data"]["pageSize"], 2);
+    let cursor = first["data"]["nextCursor"].as_str().unwrap();
+    let second = run(&[
+        "--database",
+        database_arg,
+        "--json",
+        "task",
+        "list",
+        "--query",
+        "Terminal",
+        "--fields",
+        "title",
+        "--page-size",
+        "2",
+        "--cursor",
+        cursor,
+    ]);
+    assert!(second.status.success());
+    let second = json_output(&second);
+    assert_eq!(second["data"]["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(second["data"]["hasMore"], false);
+    assert!(second["data"]["nextCursor"].is_null());
+
+    let table = run(&[
+        "--database",
+        database_arg,
+        "task",
+        "list",
+        "--fields",
+        "id,title",
+    ]);
+    assert!(table.status.success());
+    let table = String::from_utf8(table.stdout).unwrap();
+    assert!(table.contains("ID"));
+    assert!(table.contains("TITLE"));
+    assert!(table.contains("#1"));
+    assert!(table.contains("Showing 3 tasks"));
+    assert!(!table.starts_with('{'));
+    assert!(!table.contains('\u{1b}'));
+
+    let lines = run(&[
+        "--database",
+        database_arg,
+        "task",
+        "list",
+        "--fields",
+        "title",
+        "--format",
+        "lines",
+    ]);
+    assert!(lines.status.success());
+    let lines = String::from_utf8(lines.stdout).unwrap();
+    assert_eq!(lines.lines().count(), 3);
+    assert!(lines.lines().all(|line| line.contains("Terminal")));
+    let null_lines = run(&[
+        "--database",
+        database_arg,
+        "task",
+        "list",
+        "--fields",
+        "nextStep",
+        "--format",
+        "lines",
+    ]);
+    assert!(null_lines.status.success());
+    let null_lines = String::from_utf8(null_lines.stdout).unwrap();
+    assert_eq!(null_lines.lines().collect::<Vec<_>>(), vec!["—"; 3]);
+
+    let unknown = run(&[
+        "--database",
+        database_arg,
+        "--json",
+        "task",
+        "list",
+        "--fields",
+        "unknown",
+    ]);
+    assert_eq!(unknown.status.code(), Some(2));
+    let unknown = json_output(&unknown);
+    assert_eq!(unknown["error"]["code"], "INVALID_INPUT");
+    assert_eq!(unknown["error"]["details"]["field"], "fields");
+}
+
+#[test]
 fn concurrent_first_startup_serializes_migrations() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("concurrent.db");
@@ -177,7 +539,7 @@ fn json_import_requires_sensitive_content_confirmation_before_mutation() {
     fs::write(
         &task_input,
         serde_json::to_vec(&json!({
-            "title":"Import confirmation",
+            "title":"0904｜功能｜Import confirmation",
             "goal":"Require review before persistence",
             "scope":"Session import",
             "acceptanceCriteria":"Unconfirmed content is not stored"
@@ -281,7 +643,7 @@ fn json_parse_errors_and_doctor_keep_the_envelope_contract() {
     let invalid = run(&["--json", "not-a-command"]);
     assert_eq!(invalid.status.code(), Some(2));
     let invalid = json_output(&invalid);
-    assert_eq!(invalid["schemaVersion"], 1);
+    assert_eq!(invalid["schemaVersion"], 2);
     assert_eq!(invalid["ok"], false);
     assert!(invalid["data"].is_null());
     assert!(invalid["warnings"].as_array().unwrap().is_empty());

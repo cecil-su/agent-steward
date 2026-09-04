@@ -5,11 +5,12 @@
 1. 开始工作时运行 `taskctl task show <task-id> --json`，读取当前 `version`；
 2. 使用该版本执行 `task claim` 或 `task resume`，成功后继续携带返回的新版本；
 3. 进度、决策、风险或阻塞发生实质变化时，使用对应命令写入，并从结果取得下一版本；
-4. Git 现场只通过 `taskctl worktree status <task-id> --json` 或 Git 只读命令判断，不把数据库引用当作现场事实；
-5. 会话结束或上下文即将耗尽前保存结构化 Checkpoint；
-6. 遇到 `VERSION_CONFLICT` 时重新读取 Task，不盲目重试旧 Patch；
-7. 不直接编辑 SQLite，不在 Task、Checkpoint、History 或 Session Import 中保存 Token、Cookie、密码、授权头或隐藏推理；
-8. 不因测试通过、会话结束或 AI 自行判断而自动关闭 Task，关闭结果由用户明确决定。
+4. 非空 Task title 使用 `MMDD｜类型｜主题`，日期按 Session Header 时间转换到 `Asia/Shanghai`，类型限于 `功能`、`设计`、`修复`、`优化`、`发布`、`探索`、`文档`、`研究`；已关闭任务只通过 CAS `task retitle` 修正 title；
+5. Git 现场只通过 `taskctl worktree status <task-id> --json` 或 Git 只读命令判断，不把数据库引用当作现场事实；
+6. 会话结束或上下文即将耗尽前保存结构化 Checkpoint；
+7. 遇到 `VERSION_CONFLICT` 时重新读取 Task，不盲目重试旧 Patch；
+8. 不直接编辑 SQLite，不在 Task、Checkpoint、History 或 Session Import 中保存 Token、Cookie、密码、授权头或隐藏推理；
+9. 不因测试通过、会话结束或 AI 自行判断而自动关闭 Task，关闭结果由用户明确决定。
 
 示例（使用隔离数据库）：
 

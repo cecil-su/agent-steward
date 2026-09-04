@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::db::{
     bump_task, check_version, checkpoint_from_row, history_from_row, import_from_row,
-    insert_history, load_session, load_task, session_from_row,
+    insert_history, load_session, load_task, load_task_by_reference, resolve_task_id,
+    session_from_row,
 };
 use crate::{AppError, AppResult, Outcome, RecoveryCommand, Service, warning};
 
@@ -35,8 +36,11 @@ impl Service {
         Ok(outcome)
     }
 
-    pub fn session_list(&self, task_id: Option<&str>) -> AppResult<Outcome> {
+    pub fn session_list(&self, task_reference: Option<&str>) -> AppResult<Outcome> {
         let connection = self.connection()?;
+        let task_id = task_reference
+            .map(|reference| resolve_task_id(&connection, reference))
+            .transpose()?;
         let mut statement = if task_id.is_some() {
             connection
                 .prepare(
@@ -83,7 +87,7 @@ impl Service {
     #[allow(clippy::too_many_arguments)]
     pub fn session_attach(
         &self,
-        task_id: &str,
+        task_reference: &str,
         expected: i64,
         session_id: &str,
         source: Option<&str>,
@@ -125,7 +129,8 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, task_id)?;
+        let task = load_task_by_reference(&tx, task_reference)?;
+        let task_id = task.id;
         check_version(&task, expected)?;
         if task.status == TaskStatus::Closed {
             return Err(AppError::constraint("session.attach.closed_task"));
@@ -206,7 +211,7 @@ impl Service {
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let session = load_session(&tx, session_id)?;
-        let task = load_task(&tx, &session.task_id)?;
+        let task = load_task(&tx, session.task_id)?;
         check_version(&task, expected)?;
         if session.ended_at.is_some() {
             return Ok(Outcome::new(json!({"task": task, "session": session})));
@@ -225,18 +230,18 @@ impl Service {
             )
             .map_err(AppError::from_sqlite)?;
         } else {
-            bump_task(&tx, &session.task_id, expected, &timestamp)?;
+            bump_task(&tx, session.task_id, expected, &timestamp)?;
         }
         insert_history(
             &tx,
-            &session.task_id,
+            session.task_id,
             "session.closed",
             Some(session_id),
             "session closed",
             json!({"sessionId": session_id, "wasCurrent": was_current}),
             &timestamp,
         )?;
-        let response_task = load_task(&tx, &session.task_id)?;
+        let response_task = load_task(&tx, session.task_id)?;
         let response_session = load_session(&tx, session_id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         Ok(Outcome::new(json!({
@@ -247,18 +252,19 @@ impl Service {
 
     pub fn task_resume(
         &self,
-        task_id: &str,
+        task_reference: &str,
         expected: i64,
         new_session_id: &str,
         from_session: Option<&str>,
         take_over: bool,
     ) -> AppResult<Outcome> {
         let initial = self.connection()?;
-        let initial_task = load_task(&initial, task_id)?;
+        let initial_task = load_task_by_reference(&initial, task_reference)?;
+        let task_id = initial_task.id;
         check_version(&initial_task, expected)?;
         let _ = load_latest_checkpoint(&initial, &initial_task)?;
         let worktree_status = if initial_task.worktree_path.is_some() {
-            Some(self.worktree_status(task_id)?.data["worktreeStatus"].clone())
+            Some(self.worktree_status(&task_id.to_string())?.data["worktreeStatus"].clone())
         } else {
             None
         };
@@ -349,7 +355,7 @@ impl Service {
 
     pub fn session_import_add(
         &self,
-        task_id: &str,
+        task_reference: &str,
         session_id: &str,
         expected: i64,
         file_path: &Path,
@@ -407,7 +413,8 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, task_id)?;
+        let task = load_task_by_reference(&tx, task_reference)?;
+        let task_id = task.id;
         check_version(&task, expected)?;
         let session = load_session(&tx, session_id)?;
         if session.task_id != task_id {
@@ -535,15 +542,15 @@ impl Service {
             .map_err(AppError::from_sqlite)?
             .ok_or_else(|| AppError::not_found("SessionImport", import_id))?;
         let session = load_session(&tx, &imported.session_id)?;
-        let task = load_task(&tx, &session.task_id)?;
+        let task = load_task(&tx, session.task_id)?;
         check_version(&task, expected)?;
         tx.execute("DELETE FROM session_imports WHERE id=?1", [import_id])
             .map_err(AppError::from_sqlite)?;
         let timestamp = now();
-        bump_task(&tx, &session.task_id, expected, &timestamp)?;
+        bump_task(&tx, session.task_id, expected, &timestamp)?;
         insert_history(
             &tx,
-            &session.task_id,
+            session.task_id,
             "session.import_removed",
             Some(&session.id),
             "session import removed",
@@ -555,7 +562,7 @@ impl Service {
             }),
             &timestamp,
         )?;
-        let response_task = load_task(&tx, &session.task_id)?;
+        let response_task = load_task(&tx, session.task_id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         let checkpoint_busy: i64 = connection
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
@@ -574,9 +581,9 @@ impl Service {
         Ok(outcome)
     }
 
-    pub fn history(&self, task_id: &str) -> AppResult<Outcome> {
+    pub fn history(&self, task_reference: &str) -> AppResult<Outcome> {
         let connection = self.connection()?;
-        let _ = load_task(&connection, task_id)?;
+        let task_id = resolve_task_id(&connection, task_reference)?;
         let mut statement = connection
             .prepare(
                 "SELECT id,task_id,sequence,change_type,session_id,occurred_at,summary,payload_json
@@ -638,7 +645,7 @@ impl Service {
 
         let mut task_statement = connection
             .prepare(
-                "SELECT id,title,status,version,goal,scope,acceptance_criteria,next_step,
+                "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
                         block_reason,block_recovery,current_session_id,repository_path,
                         repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
                         closure_outcome,closure_reason,closed_at,created_at,updated_at
@@ -767,7 +774,7 @@ impl Service {
                                 self.recovery_command(vec![
                                     "worktree".to_owned(),
                                     "detach".to_owned(),
-                                    task.id.clone(),
+                                    task.id.to_string(),
                                     "--expected-path".to_owned(),
                                     path.to_owned(),
                                     "--if-version".to_owned(),
@@ -822,7 +829,7 @@ fn open_import_file(path: &Path) -> std::io::Result<File> {
 
 fn list_sessions_for_task(
     connection: &rusqlite::Connection,
-    task_id: &str,
+    task_id: i64,
 ) -> AppResult<Vec<steward_core::SessionView>> {
     let mut statement = connection
         .prepare(

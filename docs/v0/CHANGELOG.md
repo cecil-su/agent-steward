@@ -1,6 +1,17 @@
 # V0 修订记录
 
-V0 是 Agent Steward 的历史设计参考，不是当前产品实现依据。当前设计以 [V1 文档](../v1/README.md)为准。原始内容可通过 Git 历史查看；本目录允许为消除内部矛盾、安全歧义和不可实施合同而持续勘误。
+V0 是 Agent Steward 的独立设计合同与 `taskctl` 参考实现依据。它与 V1 以及未来可能出现的 V2 不构成必然的继承、替代或升级关系，各自范围和完成度单独判断。原始内容可通过 Git 历史查看；本目录允许为消除内部矛盾、安全歧义和不可实施合同而持续勘误。
+
+## 2026-09-04
+
+- 将 Task 主键升级为 `INTEGER PRIMARY KEY AUTOINCREMENT`；原字符串 ID 迁移为唯一、可空且只可设置一次的 `taskKey`；
+- 将 Session、Checkpoint、Note、History 的 Task 外键及 JSON `taskId` 改为整数；CLI 同时接受 `12`、`#12` 和 `taskKey` 引用，迁移旧数字 Key 可用 `key:` 显式消歧，人类输出显示 `#id`；
+- 增加无参数最小创建、完整 JSON 创建及受限 JSON Merge Patch；Task 描述允许暂缺，但设置后不能清空，且 `completed` 关闭前必须完整；
+- `--json --input -` 支持从 stdin 安全读取 UTF-8 JSON，并稳定拒绝空输入、非法 UTF-8/JSON 和未知字段；文件输入保持可用；
+- JSON envelope 升级到 `schemaVersion: 2`；
+- Task list 增加 status/taskKey/title-goal-scope 文本筛选、绑定筛选摘要且长度固定的游标分页、字段投影，以及面向终端的 table/lines 输出；
+- 增加原子 schema v7 migration；迁移在 SQLite writer transaction 中持有全部 v6 Task 旧身份锁，检测到仍活跃的 v6 Worktree operation 时拒绝升级；旧 Task 按 `created_at ASC, 原 id ASC` 分配数字 ID，并在同一事务中重建所有关系；旧 History payload 保持原文，迁移前 `task.created` 允许缺少新字段；补充回滚、ID 不复用、CAS、History、Session、Worktree、引用解析和 stdin 合同测试；
+- 新写入的非空 Task title 统一校验 `MMDD｜类型｜主题`，类型限制为八类；增加 CAS `task retitle`，允许只修正 closed Task 的 title，不改变关闭状态或其他字段，并写入 `task.retitled` History。
 
 ## 2026-09-02
 
@@ -9,7 +20,7 @@ V0 是 Agent Steward 的历史设计参考，不是当前产品实现依据。�
 - 实现本地 Worktree create/status/remove/adopt/detach、安全观察和显式恢复；
 - 增加稳定 JSON envelope、compare-and-swap、数据库权限告警和 `doctor`；
 - 使用临时数据库与临时 Git 仓库增加单元、集成和 CLI 合同测试；
-- 保持 V1 为当前产品设计，V0 实现不提前引入 Daemon、GUI、MCP 或 V1 领域模型。
+- 保持 V0 实现边界，不因其它版本方案中的 Daemon、GUI、MCP 或领域模型规划而扩大 V0 范围。
 
 ## 2026-09-01
 

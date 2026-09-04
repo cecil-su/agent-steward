@@ -1,12 +1,12 @@
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::{Value, json};
-use steward_application::{AppError, ErrorBody, Outcome, Service};
+use steward_application::{AppError, ErrorBody, Outcome, Service, TaskListOptions};
 use steward_core::Warning;
 
 #[derive(Debug, Parser)]
@@ -50,17 +50,35 @@ enum TopCommand {
     Doctor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TaskListFormat {
+    Table,
+    Lines,
+}
+
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
     List {
         #[arg(long)]
         status: Option<String>,
+        #[arg(long = "task-key")]
+        task_key: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long = "page-size")]
+        page_size: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        fields: Option<String>,
+        #[arg(long, value_enum, default_value_t = TaskListFormat::Table)]
+        format: TaskListFormat,
     },
     Show {
         task_id: String,
     },
     Create {
-        task_id: String,
+        task_key: Option<String>,
     },
     Claim {
         task_id: String,
@@ -75,6 +93,13 @@ enum TaskCommand {
         task_id: String,
         #[arg(long = "if-version")]
         if_version: i64,
+    },
+    Retitle {
+        task_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+        #[arg(long)]
+        title: String,
     },
     Note {
         task_id: String,
@@ -225,6 +250,8 @@ enum WorktreeCommand {
     },
 }
 
+const JSON_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Envelope {
@@ -285,7 +312,7 @@ fn main() -> ExitCode {
     match result {
         Ok(mut outcome) => {
             outcome.warnings.extend(permission_warnings);
-            render_success(outcome, cli.json)
+            render_success(outcome, &cli)
         }
         Err(error) => render_error(error, cli.json, permission_warnings),
     }
@@ -294,10 +321,41 @@ fn main() -> ExitCode {
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
     match &cli.command {
         TopCommand::Task { command } => match command {
-            TaskCommand::List { status } => service.task_list(status.as_deref()),
+            TaskCommand::List {
+                status,
+                task_key,
+                query,
+                page_size,
+                cursor,
+                fields,
+                format,
+            } => {
+                let fields = parse_task_fields(fields.as_deref())?;
+                if *format == TaskListFormat::Lines && cli.json {
+                    return Err(AppError::invalid(
+                        "format",
+                        "lines cannot be combined with --json",
+                    ));
+                }
+                if *format == TaskListFormat::Lines && fields.len() != 1 {
+                    return Err(AppError::invalid(
+                        "fields",
+                        "--format lines requires exactly one field",
+                    ));
+                }
+                service.task_list_with_options(&TaskListOptions {
+                    status: status.clone(),
+                    task_key: task_key.clone(),
+                    query: query.clone(),
+                    page_size: *page_size,
+                    cursor: cursor.clone(),
+                    fields,
+                })
+            }
             TaskCommand::Show { task_id } => service.task_show(task_id),
-            TaskCommand::Create { task_id } => {
-                service.task_create(task_id, &read_input(cli.input.as_deref())?)
+            TaskCommand::Create { task_key } => {
+                let input = cli.input.as_deref().map(read_input).transpose()?;
+                service.task_create_with_options(task_key.as_deref(), input.as_deref())
             }
             TaskCommand::Claim {
                 task_id,
@@ -308,7 +366,12 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             TaskCommand::Update {
                 task_id,
                 if_version,
-            } => service.task_update(task_id, *if_version, &read_input(cli.input.as_deref())?),
+            } => service.task_update(task_id, *if_version, &required_input(cli.input.as_deref())?),
+            TaskCommand::Retitle {
+                task_id,
+                if_version,
+                title,
+            } => service.task_retitle(task_id, *if_version, title),
             TaskCommand::Note {
                 task_id,
                 if_version,
@@ -334,7 +397,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 task_id,
                 *if_version,
                 session,
-                &read_input(cli.input.as_deref())?,
+                &required_input(cli.input.as_deref())?,
             ),
             TaskCommand::Resume {
                 task_id,
@@ -438,7 +501,10 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                         .ok_or_else(|| {
                             AppError::worktree_safety("task has no registered worktree", None)
                         })?;
-                    confirm(false, &worktree_remove_confirmation(task_id, path))?;
+                    let numeric_id = service.task_show(task_id)?.data["task"]["id"]
+                        .as_i64()
+                        .expect("serialized Task id must be an integer");
+                    confirm(false, &worktree_remove_confirmation(numeric_id, path))?;
                 }
                 service.worktree_remove(task_id, *if_version)
             }
@@ -459,10 +525,48 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
     }
 }
 
-fn read_input(path: Option<&Path>) -> Result<String, AppError> {
-    let path = path.ok_or_else(|| AppError::invalid("input", "--input <file> is required"))?;
-    fs::read_to_string(path)
-        .map_err(|error| AppError::invalid("input", format!("cannot read UTF-8 input: {error}")))
+fn parse_task_fields(value: Option<&str>) -> Result<Vec<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.trim().is_empty() {
+        return Err(AppError::invalid("fields", "must not be empty"));
+    }
+    value
+        .split(',')
+        .map(|field| {
+            let field = field.trim();
+            if field.is_empty() {
+                Err(AppError::invalid("fields", "must not contain empty fields"))
+            } else {
+                Ok(field.to_owned())
+            }
+        })
+        .collect()
+}
+
+fn read_input(path: &Path) -> Result<String, AppError> {
+    let bytes = if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|error| AppError::invalid("input", format!("cannot read stdin: {error}")))?;
+        bytes
+    } else {
+        fs::read(path)
+            .map_err(|error| AppError::invalid("input", format!("cannot read input: {error}")))?
+    };
+    let input = String::from_utf8(bytes)
+        .map_err(|error| AppError::invalid("input", format!("must be valid UTF-8: {error}")))?;
+    if input.trim().is_empty() {
+        return Err(AppError::invalid("input", "must not be empty"));
+    }
+    Ok(input)
+}
+
+fn required_input(path: Option<&Path>) -> Result<String, AppError> {
+    let path = path.ok_or_else(|| AppError::invalid("input", "--input <file|-> is required"))?;
+    read_input(path)
 }
 
 fn session_import_remove_confirmation(imported: &steward_core::SessionImportView) -> String {
@@ -472,8 +576,8 @@ fn session_import_remove_confirmation(imported: &steward_core::SessionImportView
     )
 }
 
-fn worktree_remove_confirmation(task_id: &str, path: &str) -> String {
-    format!("remove registered Worktree\n  Task ID: {task_id}\n  Worktree path: {path}")
+fn worktree_remove_confirmation(task_id: i64, path: &str) -> String {
+    format!("remove registered Worktree\n  Task ID: #{task_id}\n  Worktree path: {path}")
 }
 
 fn confirm(yes: bool, operation: &str) -> Result<(), AppError> {
@@ -502,21 +606,29 @@ fn confirm(yes: bool, operation: &str) -> Result<(), AppError> {
     }
 }
 
-fn render_success(outcome: Outcome, json_output: bool) -> ExitCode {
+fn render_success(outcome: Outcome, cli: &Cli) -> ExitCode {
     let envelope = Envelope {
-        schema_version: 1,
+        schema_version: JSON_SCHEMA_VERSION,
         ok: true,
         data: Some(outcome.data),
         warnings: outcome.warnings,
         error: None,
     };
-    if json_output {
+    if cli.json {
         println!("{}", serde_json::to_string(&envelope).unwrap());
     } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(envelope.data.as_ref().unwrap()).unwrap()
-        );
+        let mut data = envelope.data.clone().unwrap();
+        humanize_task_ids(&mut data);
+        if let TopCommand::Task {
+            command: TaskCommand::List { fields, format, .. },
+        } = &cli.command
+        {
+            let fields = parse_task_fields(fields.as_deref())
+                .expect("Task list fields were validated before rendering");
+            render_task_list(&data, &fields, *format);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&data).unwrap());
+        }
         for warning in &envelope.warnings {
             eprintln!("warning[{}]: {}", warning.code, warning.message);
         }
@@ -524,11 +636,193 @@ fn render_success(outcome: Outcome, json_output: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn render_task_list(data: &Value, selected_fields: &[String], format: TaskListFormat) {
+    let tasks = data["tasks"]
+        .as_array()
+        .expect("Task list data must contain an array");
+    let fields = if selected_fields.is_empty() {
+        vec!["id", "title", "status", "updatedAt"]
+    } else {
+        selected_fields.iter().map(String::as_str).collect()
+    };
+
+    if format == TaskListFormat::Lines {
+        let field = fields[0];
+        for task in tasks {
+            println!("{}", terminal_cell(&task[field]));
+        }
+        if data["hasMore"].as_bool() == Some(true)
+            && let Some(cursor) = data["nextCursor"].as_str()
+        {
+            eprintln!("more results available; next cursor: {cursor}");
+        }
+        return;
+    }
+
+    let headers = fields
+        .iter()
+        .map(|field| task_field_header(field).to_owned())
+        .collect::<Vec<_>>();
+    let rows = tasks
+        .iter()
+        .map(|task| {
+            fields
+                .iter()
+                .map(|field| truncate_table_cell(&terminal_cell(&task[*field]), 60))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let widths = (0..fields.len())
+        .map(|index| {
+            rows.iter()
+                .map(|row| display_width(&row[index]))
+                .chain(std::iter::once(display_width(&headers[index])))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    print_table_row(&headers, &widths);
+    print_table_row(
+        &widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>(),
+        &widths,
+    );
+    for row in &rows {
+        print_table_row(row, &widths);
+    }
+    if rows.is_empty() {
+        println!("(no tasks)");
+    }
+    let suffix = if data["hasMore"].as_bool() == Some(true) {
+        " · more results available"
+    } else {
+        ""
+    };
+    println!("\nShowing {} tasks{suffix}", rows.len());
+    if let Some(cursor) = data["nextCursor"].as_str() {
+        println!("Next cursor: {cursor}");
+    }
+}
+
+fn task_field_header(field: &str) -> &str {
+    match field {
+        "id" => "ID",
+        "taskKey" => "TASK KEY",
+        "title" => "TITLE",
+        "status" => "STATUS",
+        "version" => "VERSION",
+        "goal" => "GOAL",
+        "scope" => "SCOPE",
+        "acceptanceCriteria" => "ACCEPTANCE CRITERIA",
+        "nextStep" => "NEXT STEP",
+        "blockReason" => "BLOCK REASON",
+        "blockRecovery" => "BLOCK RECOVERY",
+        "currentSessionId" => "CURRENT SESSION ID",
+        "repositoryPath" => "REPOSITORY PATH",
+        "repositoryCommonDir" => "REPOSITORY COMMON DIR",
+        "repositoryBranch" => "REPOSITORY BRANCH",
+        "worktreePath" => "WORKTREE PATH",
+        "latestCheckpointId" => "LATEST CHECKPOINT ID",
+        "closureOutcome" => "CLOSURE OUTCOME",
+        "closureReason" => "CLOSURE REASON",
+        "closedAt" => "CLOSED AT",
+        "createdAt" => "CREATED AT",
+        "updatedAt" => "UPDATED AT",
+        _ => field,
+    }
+}
+
+fn terminal_cell(value: &Value) -> String {
+    let value = match value {
+        Value::Null => return "—".to_owned(),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        value => serde_json::to_string(value).expect("JSON value must serialize"),
+    };
+    value
+        .chars()
+        .map(|character| {
+            if matches!(character, '\n' | '\r' | '\t') {
+                ' '
+            } else if character.is_control() {
+                '�'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn display_width(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| if character.is_ascii() { 1 } else { 2 })
+        .sum()
+}
+
+fn truncate_table_cell(value: &str, maximum_width: usize) -> String {
+    if display_width(value) <= maximum_width {
+        return value.to_owned();
+    }
+    let mut truncated = String::new();
+    let mut width = 0;
+    for character in value.chars() {
+        let character_width = if character.is_ascii() { 1 } else { 2 };
+        if width + character_width + 2 > maximum_width {
+            break;
+        }
+        truncated.push(character);
+        width += character_width;
+    }
+    truncated.push('…');
+    truncated
+}
+
+fn print_table_row(cells: &[String], widths: &[usize]) {
+    let line = cells
+        .iter()
+        .zip(widths)
+        .map(|(cell, width)| format!("{cell}{}", " ".repeat(width - display_width(cell))))
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("{}", line.trim_end());
+}
+
+fn humanize_task_ids(value: &mut Value) {
+    match value {
+        Value::Array(values) => values.iter_mut().for_each(humanize_task_ids),
+        Value::Object(map) => {
+            if let Some(id) = map.get("taskId").and_then(Value::as_i64) {
+                map.insert("taskId".to_owned(), Value::String(format!("#{id}")));
+            }
+            if let Some(task) = map.get_mut("task").and_then(Value::as_object_mut)
+                && let Some(id) = task.get("id").and_then(Value::as_i64)
+            {
+                task.insert("id".to_owned(), Value::String(format!("#{id}")));
+            }
+            if let Some(tasks) = map.get_mut("tasks").and_then(Value::as_array_mut) {
+                for task in tasks {
+                    if let Some(task) = task.as_object_mut()
+                        && let Some(id) = task.get("id").and_then(Value::as_i64)
+                    {
+                        task.insert("id".to_owned(), Value::String(format!("#{id}")));
+                    }
+                }
+            }
+            map.values_mut().for_each(humanize_task_ids);
+        }
+        _ => {}
+    }
+}
+
 fn render_error(error: AppError, json_output: bool, warnings: Vec<Warning>) -> ExitCode {
     let exit_code = error.exit_code;
     if json_output {
         let envelope = Envelope {
-            schema_version: 1,
+            schema_version: JSON_SCHEMA_VERSION,
             ok: false,
             data: None,
             warnings,
@@ -537,10 +831,9 @@ fn render_error(error: AppError, json_output: bool, warnings: Vec<Warning>) -> E
         println!("{}", serde_json::to_string(&envelope).unwrap());
     } else {
         eprintln!("error[{}]: {}", error.body.code, error.body.message);
-        eprintln!(
-            "{}",
-            serde_json::to_string_pretty(&error.body.details).unwrap()
-        );
+        let mut details = error.body.details.clone();
+        humanize_task_ids(&mut details);
+        eprintln!("{}", serde_json::to_string_pretty(&details).unwrap());
         for warning in &warnings {
             eprintln!("warning[{}]: {}", warning.code, warning.message);
         }
@@ -717,8 +1010,8 @@ mod tests {
         assert!(import_confirmation.contains("42 bytes"));
 
         let worktree_confirmation =
-            worktree_remove_confirmation("TASK 1", r"C:\workspace with spaces\feature");
-        assert!(worktree_confirmation.contains("TASK 1"));
+            worktree_remove_confirmation(12, r"C:\workspace with spaces\feature");
+        assert!(worktree_confirmation.contains("#12"));
         assert!(worktree_confirmation.contains(r"C:\workspace with spaces\feature"));
     }
 }

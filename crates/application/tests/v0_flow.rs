@@ -4,7 +4,7 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use steward_application::Service;
+use steward_application::{Service, TaskListOptions};
 
 fn service(temp: &tempfile::TempDir) -> Service {
     Service::new(temp.path().join("steward.db")).with_lock_root(temp.path().join("locks"))
@@ -12,6 +12,12 @@ fn service(temp: &tempfile::TempDir) -> Service {
 
 fn version(outcome: &steward_application::Outcome) -> i64 {
     outcome.data["task"]["version"].as_i64().unwrap()
+}
+
+fn task_id(service: &Service, reference: &str) -> i64 {
+    service.task_show(reference).unwrap().data["task"]["id"]
+        .as_i64()
+        .unwrap()
 }
 
 #[test]
@@ -22,7 +28,7 @@ fn task_session_checkpoint_import_and_history_flow() {
         .task_create(
             "TASK-1",
             r#"{
-                "title":"Implement V0",
+                "title":"0904｜功能｜Implement V0",
                 "goal":"Provide a local task continuity CLI",
                 "scope":"V0 workspace",
                 "acceptanceCriteria":"Integration flow passes",
@@ -169,7 +175,7 @@ fn checkpoint_response_is_its_own_transaction_snapshot() {
         .task_create(
             "TASK-SNAPSHOT",
             r#"{
-                "title":"Return the committed mutation snapshot",
+                "title":"0904｜功能｜Return the committed mutation snapshot",
                 "goal":"Keep concurrent command responses version-accurate",
                 "scope":"Checkpoint response construction",
                 "acceptanceCriteria":"Checkpoint returns version 3 while the database advances to 4"
@@ -195,22 +201,23 @@ fn checkpoint_response_is_its_own_transaction_snapshot() {
         checkpoint_service.task_checkpoint("TASK-SNAPSHOT", 2, "session-a", &input)
     });
 
+    let numeric_id = task_id(&service, "TASK-SNAPSHOT");
     let connection = rusqlite::Connection::open(service.database_path()).unwrap();
     connection.busy_timeout(Duration::from_secs(5)).unwrap();
     let started = Instant::now();
     loop {
         let current: i64 = connection
             .query_row(
-                "SELECT version FROM tasks WHERE id='TASK-SNAPSHOT'",
-                [],
+                "SELECT version FROM tasks WHERE id=?1",
+                [numeric_id],
                 |row| row.get(0),
             )
             .unwrap();
         if current == 3 {
             connection
                 .execute(
-                    "UPDATE tasks SET version=4,updated_at='concurrent' WHERE id='TASK-SNAPSHOT' AND version=3",
-                    [],
+                    "UPDATE tasks SET version=4,updated_at='concurrent' WHERE id=?1 AND version=3",
+                    [numeric_id],
                 )
                 .unwrap();
             break;
@@ -231,6 +238,436 @@ fn checkpoint_response_is_its_own_transaction_snapshot() {
 }
 
 #[test]
+fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    let created = service.task_create_minimal().unwrap();
+    assert_eq!(created.data["task"]["id"], 1);
+    assert!(created.data["task"]["taskKey"].is_null());
+    assert!(created.data["task"]["title"].is_null());
+
+    service.task_claim("#1", 1, "session-a", false).unwrap();
+    let completed = service.task_close("#1", 2, "completed", None).unwrap_err();
+    assert_eq!(completed.body.code, "CONSTRAINT_VIOLATION");
+    assert_eq!(
+        completed.body.details["constraint"],
+        "task.close.completed_requires_complete_descriptions"
+    );
+    assert_eq!(service.task_show("1").unwrap().data["task"]["version"], 2);
+
+    let filled = service
+        .task_update(
+            "1",
+            2,
+            r#"{
+                "taskKey":"PATCHABLE",
+                "title":"0904｜功能｜Initial title",
+                "goal":"Initial goal",
+                "scope":"Initial scope",
+                "acceptanceCriteria":"Initial acceptance",
+                "nextStep":"Continue"
+            }"#,
+        )
+        .unwrap();
+    assert_eq!(version(&filled), 3);
+
+    let patched = service
+        .task_update(
+            "PATCHABLE",
+            3,
+            r#"{"title":"0904｜优化｜Patched title","goal":"Patched goal","nextStep":null}"#,
+        )
+        .unwrap();
+    assert_eq!(version(&patched), 4, "one patch increments version once");
+    assert_eq!(patched.data["task"]["title"], "0904｜优化｜Patched title");
+    assert!(patched.data["task"]["nextStep"].is_null());
+
+    let immutable_key = service
+        .task_update("#1", 4, r#"{"taskKey":"OTHER"}"#)
+        .unwrap_err();
+    assert_eq!(immutable_key.body.code, "CONSTRAINT_VIOLATION");
+    assert_eq!(
+        service.task_show("PATCHABLE").unwrap().data["task"]["version"],
+        4
+    );
+
+    let clearing = service
+        .task_update("PATCHABLE", 4, r#"{"title":null}"#)
+        .unwrap_err();
+    assert_eq!(clearing.body.code, "INVALID_INPUT");
+    assert_eq!(clearing.body.details["field"], "title");
+    assert_eq!(
+        service.task_show("PATCHABLE").unwrap().data["task"]["title"],
+        "0904｜优化｜Patched title"
+    );
+    assert_eq!(
+        service.task_show("PATCHABLE").unwrap().data["task"]["version"],
+        4
+    );
+    let closed = service
+        .task_close("PATCHABLE", 4, "completed", None)
+        .unwrap();
+    assert_eq!(version(&closed), 5);
+    let closed_at = closed.data["task"]["closedAt"].clone();
+
+    let ordinary_update = service
+        .task_update("PATCHABLE", 5, r#"{"title":"0904｜文档｜Closed title"}"#)
+        .unwrap_err();
+    assert_eq!(ordinary_update.body.code, "CONSTRAINT_VIOLATION");
+    let retitled = service
+        .task_retitle("PATCHABLE", 5, "0904｜功能｜Retitled closed task")
+        .unwrap();
+    assert_eq!(version(&retitled), 6);
+    assert_eq!(retitled.data["task"]["status"], "closed");
+    assert_eq!(retitled.data["task"]["closedAt"], closed_at);
+    assert_eq!(
+        retitled.data["task"]["title"],
+        "0904｜功能｜Retitled closed task"
+    );
+    let stale_retitle = service
+        .task_retitle("PATCHABLE", 5, "0904｜功能｜Stale title")
+        .unwrap_err();
+    assert_eq!(stale_retitle.body.code, "VERSION_CONFLICT");
+
+    let history = service.history("#1").unwrap();
+    let entries = history.data["history"].as_array().unwrap();
+    let updates = entries
+        .iter()
+        .filter(|entry| entry["changeType"] == "task.updated")
+        .count();
+    assert_eq!(updates, 2);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["changeType"] == "task.retitled")
+            .count(),
+        1
+    );
+    let retitle = entries.last().unwrap();
+    assert_eq!(
+        retitle["payload"]["previousTitle"],
+        "0904｜优化｜Patched title"
+    );
+    assert_eq!(
+        retitle["payload"]["title"],
+        "0904｜功能｜Retitled closed task"
+    );
+    assert!(history.data["history"][0]["payload"]["taskKey"].is_null());
+}
+
+#[test]
+fn task_titles_require_the_display_naming_rule() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+
+    for title in [
+        "Plain title",
+        "0904|功能|ASCII separators",
+        "1301｜功能｜Invalid month",
+        "0230｜功能｜Invalid day",
+        "0904｜测试｜Unknown type",
+        "0904｜功能｜ trailing ",
+    ] {
+        let error = service
+            .task_create("INVALID-TITLE", &format!(r#"{{"title":"{title}"}}"#))
+            .unwrap_err();
+        assert_eq!(
+            error.body.code, "INVALID_INPUT",
+            "unexpected result for {title}"
+        );
+        assert_eq!(error.body.details["field"], "title");
+    }
+
+    let created = service
+        .task_create("VALID-TITLE", r#"{"title":"0229｜研究｜Leap-day title"}"#)
+        .unwrap();
+    assert_eq!(created.data["task"]["title"], "0229｜研究｜Leap-day title");
+    let invalid_update = service
+        .task_update("VALID-TITLE", 1, r#"{"title":"Still plain"}"#)
+        .unwrap_err();
+    assert_eq!(invalid_update.body.code, "INVALID_INPUT");
+    assert_eq!(
+        service.task_show("VALID-TITLE").unwrap().data["task"]["version"],
+        1
+    );
+}
+
+#[test]
+fn numeric_hash_and_task_key_references_cross_task_relations() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    service
+        .task_create(
+            "RELATIONS",
+            r#"{
+                "title":"0904｜功能｜Reference relations",
+                "goal":"Use numeric foreign keys",
+                "scope":"Session, checkpoint, history and worktree status",
+                "acceptanceCriteria":"Every public task reference resolves"
+            }"#,
+        )
+        .unwrap();
+    let claimed = service.task_claim("1", 1, "session-a", false).unwrap();
+    assert_eq!(claimed.data["task"]["id"], 1);
+    let checkpoint = service
+        .task_checkpoint(
+            "#1",
+            2,
+            "session-a",
+            r#"{
+                "summary":"Numeric relation checkpoint",
+                "completed":[],
+                "decisions":[],
+                "pending":[],
+                "nextStep":"Continue",
+                "risks":[]
+            }"#,
+        )
+        .unwrap();
+    assert_eq!(checkpoint.data["checkpoint"]["taskId"], 1);
+    assert_eq!(
+        service.session_list(Some("RELATIONS")).unwrap().data["sessions"][0]["taskId"],
+        1
+    );
+    assert_eq!(
+        service.history("1").unwrap().data["history"][0]["taskId"],
+        1
+    );
+    assert_eq!(
+        service.worktree_status("#1").unwrap().data["worktreeStatus"]["registered"],
+        false
+    );
+}
+
+#[test]
+fn explicit_key_prefix_resolves_legacy_numeric_and_reserved_task_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    for _ in 0..12 {
+        service.task_create_minimal().unwrap();
+    }
+    storage_sqlite::open_database(service.database_path())
+        .unwrap()
+        .execute_batch(
+            "UPDATE tasks SET task_key='12' WHERE id=1;
+             UPDATE tasks SET task_key='#12' WHERE id=2;
+             UPDATE tasks SET task_key='key:12' WHERE id=3;",
+        )
+        .unwrap();
+
+    assert_eq!(service.task_show("12").unwrap().data["task"]["id"], 12);
+    assert_eq!(service.task_show("#12").unwrap().data["task"]["id"], 12);
+    assert_eq!(service.task_show("key:12").unwrap().data["task"]["id"], 1);
+    assert_eq!(service.task_show("key:#12").unwrap().data["task"]["id"], 2);
+    assert_eq!(
+        service.task_show("key:key:12").unwrap().data["task"]["id"],
+        3
+    );
+    let empty = service.task_show("key:").unwrap_err();
+    assert_eq!(empty.body.code, "INVALID_INPUT");
+    assert_eq!(empty.body.details["field"], "taskReference");
+    let reserved = service
+        .task_update("#4", 1, r#"{"taskKey":"key:future"}"#)
+        .unwrap_err();
+    assert_eq!(reserved.body.code, "INVALID_INPUT");
+    assert_eq!(reserved.body.details["field"], "taskKey");
+}
+
+#[test]
+fn task_list_supports_filters_projection_and_stable_cursor_pagination() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    for (index, key) in ["LIST-A", "LIST-B", "LIST-C", "LIST-D", "LIST-E"]
+        .into_iter()
+        .enumerate()
+    {
+        service
+            .task_create(
+                key,
+                &format!(
+                    r#"{{
+                        "title":"0904｜功能｜List item {index}",
+                        "goal":"{}",
+                        "scope":"Pagination test scope",
+                        "acceptanceCriteria":"Every task appears once"
+                    }}"#,
+                    match index {
+                        2 => "needle",
+                        3 => "100% literal",
+                        _ => "other",
+                    }
+                ),
+            )
+            .unwrap();
+    }
+    service.task_claim("LIST-C", 1, "session-c", false).unwrap();
+
+    let exact = service
+        .task_list_with_options(&TaskListOptions {
+            task_key: Some("LIST-B".to_owned()),
+            fields: vec!["id".to_owned(), "taskKey".to_owned()],
+            ..TaskListOptions::default()
+        })
+        .unwrap();
+    assert_eq!(exact.data["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(exact.data["tasks"][0]["taskKey"], "LIST-B");
+    assert_eq!(exact.data["tasks"][0].as_object().unwrap().len(), 2);
+
+    let searched = service
+        .task_list_with_options(&TaskListOptions {
+            query: Some("needle".to_owned()),
+            ..TaskListOptions::default()
+        })
+        .unwrap();
+    assert_eq!(searched.data["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(searched.data["tasks"][0]["taskKey"], "LIST-C");
+    let wildcard = service
+        .task_list_with_options(&TaskListOptions {
+            query: Some("%".to_owned()),
+            ..TaskListOptions::default()
+        })
+        .unwrap();
+    assert_eq!(wildcard.data["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(wildcard.data["tasks"][0]["taskKey"], "LIST-D");
+    let active = service
+        .task_list_with_options(&TaskListOptions {
+            status: Some("in_progress".to_owned()),
+            ..TaskListOptions::default()
+        })
+        .unwrap();
+    assert_eq!(active.data["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(active.data["tasks"][0]["taskKey"], "LIST-C");
+
+    let mut cursor = None;
+    let mut titles = Vec::new();
+    loop {
+        let page = service
+            .task_list_with_options(&TaskListOptions {
+                page_size: Some(2),
+                cursor: cursor.clone(),
+                fields: vec!["title".to_owned()],
+                ..TaskListOptions::default()
+            })
+            .unwrap();
+        assert_eq!(page.data["pageSize"], 2);
+        for task in page.data["tasks"].as_array().unwrap() {
+            assert_eq!(task.as_object().unwrap().len(), 1);
+            titles.push(task["title"].as_str().unwrap().to_owned());
+        }
+        if !page.data["hasMore"].as_bool().unwrap() {
+            break;
+        }
+        cursor = Some(page.data["nextCursor"].as_str().unwrap().to_owned());
+    }
+    titles.sort();
+    titles.dedup();
+    assert_eq!(titles.len(), 5);
+
+    let first = service
+        .task_list_with_options(&TaskListOptions {
+            page_size: Some(1),
+            ..TaskListOptions::default()
+        })
+        .unwrap();
+    let mismatch = service
+        .task_list_with_options(&TaskListOptions {
+            status: Some("open".to_owned()),
+            cursor: Some(first.data["nextCursor"].as_str().unwrap().to_owned()),
+            ..TaskListOptions::default()
+        })
+        .unwrap_err();
+    assert_eq!(mismatch.body.code, "INVALID_INPUT");
+    assert_eq!(mismatch.body.details["field"], "cursor");
+    let malformed = service
+        .task_list_with_options(&TaskListOptions {
+            cursor: Some("not-a-cursor".to_owned()),
+            ..TaskListOptions::default()
+        })
+        .unwrap_err();
+    assert_eq!(malformed.body.details["field"], "cursor");
+    for page_size in [0, 201] {
+        let invalid = service
+            .task_list_with_options(&TaskListOptions {
+                page_size: Some(page_size),
+                ..TaskListOptions::default()
+            })
+            .unwrap_err();
+        assert_eq!(invalid.body.details["field"], "pageSize");
+    }
+}
+
+#[test]
+fn task_list_cursor_size_is_bounded_for_long_filters() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    let query = "x".repeat(2_100);
+    for key in ["LONG-FILTER-A", "LONG-FILTER-B"] {
+        service
+            .task_create(
+                key,
+                &serde_json::to_string(&json!({
+                    "title": format!("0904｜功能｜{key}"),
+                    "goal": query,
+                    "scope": "Cursor size regression",
+                    "acceptanceCriteria": "Every cursor can be consumed"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let first = service
+        .task_list_with_options(&TaskListOptions {
+            query: Some(query.clone()),
+            page_size: Some(1),
+            ..TaskListOptions::default()
+        })
+        .unwrap();
+    assert_eq!(first.data["hasMore"], true);
+    let cursor = first.data["nextCursor"].as_str().unwrap();
+    assert!(cursor.len() <= 4096);
+    let second = service
+        .task_list_with_options(&TaskListOptions {
+            query: Some(query),
+            page_size: Some(1),
+            cursor: Some(cursor.to_owned()),
+            ..TaskListOptions::default()
+        })
+        .unwrap();
+    assert_eq!(second.data["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(second.data["hasMore"], false);
+}
+
+#[test]
+fn concurrent_writers_cannot_bypass_task_cas() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    service.task_create_minimal().unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = ["0904｜功能｜first", "0904｜功能｜second"].map(|title| {
+        let service = service.clone();
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            service.task_update("#1", 1, &format!(r#"{{"title":"{title}"}}"#))
+        })
+    });
+    let results = handles.map(|handle| handle.join().unwrap());
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .filter(|error| error.body.code == "VERSION_CONFLICT")
+            .count(),
+        1
+    );
+    assert_eq!(service.task_show("1").unwrap().data["task"]["version"], 2);
+}
+
+#[test]
 fn active_task_without_current_session_requires_resume() {
     let temp = tempfile::tempdir().unwrap();
     let service = service(&temp);
@@ -238,7 +675,7 @@ fn active_task_without_current_session_requires_resume() {
         .task_create(
             "TASK-RESUME",
             r#"{
-                "title":"Resume continuity",
+                "title":"0904｜功能｜Resume continuity",
                 "goal":"Preserve the previous session relationship",
                 "scope":"Task claim and resume",
                 "acceptanceCriteria":"Claim cannot bypass resume"
@@ -273,7 +710,7 @@ fn invalid_persisted_json_aborts_resume_before_mutation() {
         .task_create(
             "TASK-CORRUPT",
             r#"{
-                "title":"Detect invalid stored JSON",
+                "title":"0904｜修复｜Detect invalid stored JSON",
                 "goal":"Never disguise database damage as empty data",
                 "scope":"Checkpoint and History decoding",
                 "acceptanceCriteria":"Reads fail without mutating the Task"
@@ -299,11 +736,12 @@ fn invalid_persisted_json_aborts_resume_before_mutation() {
         )
         .unwrap();
 
+    let numeric_id = task_id(&service, "TASK-CORRUPT");
     let connection = rusqlite::Connection::open(service.database_path()).unwrap();
     connection
         .execute(
             "UPDATE checkpoints SET completed_json=?1 WHERE task_id=?2",
-            ("not-json", "TASK-CORRUPT"),
+            ("not-json", numeric_id),
         )
         .unwrap();
     drop(connection);
@@ -334,7 +772,7 @@ fn invalid_persisted_json_aborts_resume_before_mutation() {
     connection
         .execute(
             "UPDATE history SET payload_json=?1 WHERE task_id=?2 AND change_type='task.created'",
-            ("not-json", "TASK-CORRUPT"),
+            ("not-json", numeric_id),
         )
         .unwrap();
     drop(connection);
@@ -362,7 +800,7 @@ fn session_import_rejects_fifo_without_waiting_for_a_writer() {
         .task_create(
             "TASK-FIFO",
             r#"{
-                "title":"Reject FIFO import",
+                "title":"0904｜修复｜Reject FIFO import",
                 "goal":"Avoid blocking on special files",
                 "scope":"Session import",
                 "acceptanceCriteria":"FIFO is rejected without a writer"
@@ -410,7 +848,7 @@ fn worktree_create_status_dirty_refusal_and_remove_flow() {
         .task_create(
             "TASK-WT",
             r#"{
-                "title":"Worktree flow",
+                "title":"0904｜功能｜Worktree flow",
                 "goal":"Exercise safe Git operations",
                 "scope":"Synthetic repository",
                 "acceptanceCriteria":"Create and remove worktree"
@@ -488,7 +926,7 @@ fn worktree_create_uses_detected_filesystem_path_ownership() {
                 task_id,
                 &format!(
                     r#"{{
-                        "title":"{task_id}",
+                        "title":"0904｜功能｜{task_id}",
                         "goal":"Protect registered Worktree ownership",
                         "scope":"Synthetic repository",
                         "acceptanceCriteria":"Only one Task owns the path"
@@ -525,11 +963,9 @@ fn worktree_create_uses_detected_filesystem_path_ownership() {
             )
             .unwrap_err();
         assert_eq!(error.body.code, "WORKTREE_SAFETY_REFUSED");
-        assert!(
-            error.body.details["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("TASK-WT-OWNER"))
-        );
+        assert!(error.body.details["reason"].as_str().is_some_and(|reason| {
+            reason.contains(&format!("#{}", task_id(&service, "TASK-WT-OWNER")))
+        }));
         assert!(!attempted_worktree.exists());
     } else {
         fs::create_dir(attempted_worktree.parent().unwrap()).unwrap();
@@ -568,7 +1004,7 @@ fn worktree_create_rejects_a_non_utf8_target_before_git_mutation() {
         .task_create(
             "TASK-WT-NON-UTF8",
             r#"{
-                "title":"Reject non-UTF-8 Worktree",
+                "title":"0904｜修复｜Reject non-UTF-8 Worktree",
                 "goal":"Keep path persistence lossless",
                 "scope":"Synthetic repository",
                 "acceptanceCriteria":"Git is not mutated"
@@ -619,7 +1055,7 @@ fn worktree_create_does_not_commit_a_missing_post_checkout_directory() {
         .task_create(
             "TASK-WT-MISSING",
             r#"{
-                "title":"Missing worktree directory",
+                "title":"0904｜修复｜Missing worktree directory",
                 "goal":"Do not commit an invalid Worktree reference",
                 "scope":"Synthetic repository",
                 "acceptanceCriteria":"Database stays unchanged"
@@ -685,7 +1121,7 @@ fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_remov
                 task_id,
                 &format!(
                     r#"{{
-                        "title":"{task_id}",
+                        "title":"0904｜功能｜{task_id}",
                         "goal":"Keep one live Worktree owner",
                         "scope":"Synthetic repository",
                         "acceptanceCriteria":"Stale comparison keys cannot hide ownership"
@@ -700,9 +1136,8 @@ fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_remov
     storage_sqlite::open_database(service.database_path())
         .unwrap()
         .execute(
-            "UPDATE tasks SET worktree_path_key='stale-key'
-             WHERE id='TASK-WT-UNICODE-OWNER'",
-            [],
+            "UPDATE tasks SET worktree_path_key='stale-key' WHERE id=?1",
+            [task_id(&service, "TASK-WT-UNICODE-OWNER")],
         )
         .unwrap();
 
@@ -711,11 +1146,9 @@ fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_remov
         .unwrap_err();
 
     assert_eq!(error.body.code, "WORKTREE_SAFETY_REFUSED");
-    assert!(
-        error.body.details["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("TASK-WT-UNICODE-OWNER"))
-    );
+    assert!(error.body.details["reason"].as_str().is_some_and(|reason| {
+        reason.contains(&format!("#{}", task_id(&service, "TASK-WT-UNICODE-OWNER")))
+    }));
     let adopter = service.task_show("TASK-WT-UNICODE-ADOPTER").unwrap();
     assert_eq!(adopter.data["task"]["version"], 1);
     assert!(adopter.data["task"]["worktreePath"].is_null());
@@ -737,7 +1170,7 @@ fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_remov
         .as_array()
         .unwrap()
         .iter()
-        .find(|issue| issue["taskId"] == "TASK-WT-UNICODE-OWNER")
+        .find(|issue| issue["taskId"] == task_id(&service, "TASK-WT-UNICODE-OWNER"))
         .unwrap();
     assert_eq!(issue["registeredByGit"], false);
     assert_eq!(
@@ -795,7 +1228,7 @@ fn worktree_adopt_uses_live_owner_result_when_persisted_keys_collide() {
                 task_id,
                 &format!(
                     r#"{{
-                        "title":"{task_id}",
+                        "title":"0904｜功能｜{task_id}",
                         "goal":"Use live Worktree ownership",
                         "scope":"Synthetic repository",
                         "acceptanceCriteria":"A stale diagnostic key cannot reject a distinct Worktree"
@@ -812,7 +1245,7 @@ fn worktree_adopt_uses_live_owner_result_when_persisted_keys_collide() {
         .unwrap()
         .execute(
             "UPDATE tasks SET worktree_path_key=?2 WHERE id=?1",
-            rusqlite::params!["TASK-WT-KEY-OWNER", adopter_key],
+            rusqlite::params![task_id(&service, "TASK-WT-KEY-OWNER"), adopter_key],
         )
         .unwrap();
 
@@ -856,12 +1289,15 @@ fn worktree_adopt_doctor_and_detach_recover_external_state() {
         .task_create(
             task_id,
             r#"{
-                "title":"Recovery flow",
+                "title":"0904｜修复｜Recovery flow",
                 "goal":"Reconcile proven external Git state",
                 "scope":"Synthetic repository",
                 "acceptanceCriteria":"Adopt and detach succeed"
             }"#,
         )
+        .unwrap();
+    let numeric_id = service.task_show(task_id).unwrap().data["task"]["id"]
+        .as_i64()
         .unwrap();
     let adopted = service
         .worktree_adopt(task_id, 1, &repo, &worktree)
@@ -908,7 +1344,7 @@ fn worktree_adopt_doctor_and_detach_recover_external_state() {
             fs::canonicalize(&database).unwrap().to_string_lossy(),
             "worktree",
             "detach",
-            task_id,
+            numeric_id.to_string(),
             "--expected-path",
             registered_path,
             "--if-version",
@@ -967,7 +1403,7 @@ fn doctor_does_not_recommend_detach_while_git_still_registers_the_worktree() {
         .task_create(
             task_id,
             r#"{
-                "title":"Stale registration recovery",
+                "title":"0904｜修复｜Stale registration recovery",
                 "goal":"Never recommend a detach that Git would refuse",
                 "scope":"Synthetic repository",
                 "acceptanceCriteria":"Doctor keeps reporting until Git registration is gone"
@@ -1059,7 +1495,7 @@ fn doctor_does_not_recommend_detach_for_a_different_repository_common_dir() {
         .task_create(
             "TASK-DOCTOR-COMMON-DIR",
             r#"{
-                "title":"Repository identity mismatch",
+                "title":"0904｜修复｜Repository identity mismatch",
                 "goal":"Do not recommend an impossible detach",
                 "scope":"Synthetic repository references",
                 "acceptanceCriteria":"Doctor recommends continued diagnosis"
@@ -1074,7 +1510,7 @@ fn doctor_does_not_recommend_detach_for_a_different_repository_common_dir() {
                 repository_branch='main',worktree_path=?4,worktree_path_key=?5,
                 version=2 WHERE id=?1",
             rusqlite::params![
-                "TASK-DOCTOR-COMMON-DIR",
+                task_id(&service, "TASK-DOCTOR-COMMON-DIR"),
                 current_info.repository_path.to_string_lossy(),
                 registered_info.common_dir.to_string_lossy(),
                 missing_worktree.to_string_lossy(),
@@ -1093,7 +1529,7 @@ fn doctor_does_not_recommend_detach_for_a_different_repository_common_dir() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|issue| issue["taskId"] == "TASK-DOCTOR-COMMON-DIR")
+        .find(|issue| issue["taskId"] == task_id(&service, "TASK-DOCTOR-COMMON-DIR"))
         .unwrap();
     assert_eq!(
         issue["reason"],

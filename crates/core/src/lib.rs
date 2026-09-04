@@ -239,13 +239,14 @@ impl TryFrom<&str> for TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
-    pub id: String,
-    pub title: String,
+    pub id: i64,
+    pub task_key: Option<String>,
+    pub title: Option<String>,
     pub status: TaskStatus,
     pub version: i64,
-    pub goal: String,
-    pub scope: String,
-    pub acceptance_criteria: String,
+    pub goal: Option<String>,
+    pub scope: Option<String>,
+    pub acceptance_criteria: Option<String>,
     pub next_step: Option<String>,
     pub block_reason: Option<String>,
     pub block_recovery: Option<String>,
@@ -266,7 +267,7 @@ pub struct TaskView {
 #[serde(rename_all = "camelCase")]
 pub struct SessionView {
     pub id: String,
-    pub task_id: String,
+    pub task_id: i64,
     pub source: Option<String>,
     pub external_session_id: Option<String>,
     pub continued_from: Option<String>,
@@ -279,7 +280,7 @@ pub struct SessionView {
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointView {
     pub id: String,
-    pub task_id: String,
+    pub task_id: i64,
     pub session_id: String,
     pub summary: String,
     pub completed: Vec<String>,
@@ -295,7 +296,7 @@ pub struct CheckpointView {
 #[serde(rename_all = "camelCase")]
 pub struct TaskNoteView {
     pub id: i64,
-    pub task_id: String,
+    pub task_id: i64,
     pub session_id: Option<String>,
     pub note_type: String,
     pub text: String,
@@ -335,7 +336,7 @@ pub struct WorktreeStatus {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEntry {
     pub id: i64,
-    pub task_id: String,
+    pub task_id: i64,
     pub sequence: i64,
     pub change_type: String,
     pub session_id: Option<String>,
@@ -344,13 +345,19 @@ pub struct HistoryEntry {
     pub payload: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskCreateInput {
-    pub title: String,
-    pub goal: String,
-    pub scope: String,
-    pub acceptance_criteria: String,
+    #[serde(default)]
+    pub task_key: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Option<String>,
     #[serde(default)]
     pub next_step: Option<String>,
 }

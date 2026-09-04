@@ -1,49 +1,82 @@
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter, types::Value as SqlValue};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use steward_core::{
-    CheckpointInput, TaskCreateInput, TaskStatus, require_non_empty, validate_string_array,
+    CheckpointInput, TaskCreateInput, TaskStatus, TaskView, require_non_empty,
+    validate_string_array,
 };
 use storage_sqlite::now;
 use uuid::Uuid;
 
 use crate::db::{
     bump_task, check_version, checkpoint_from_row, insert_history, load_session, load_task,
-    note_from_row, task_from_row,
+    load_task_by_reference, note_from_row, task_from_row,
 };
-use crate::{AppError, AppResult, Outcome, Service};
+use crate::{AppError, AppResult, Outcome, Service, TaskListOptions};
 
 impl Service {
-    pub fn task_create(&self, id: &str, input_json: &str) -> AppResult<Outcome> {
-        require_non_empty("id", id).map_err(|(field, reason)| AppError::invalid(&field, reason))?;
-        let input: TaskCreateInput = serde_json::from_str(input_json)
-            .map_err(|error| AppError::invalid("input", error.to_string()))?;
-        let title = required("title", &input.title)?;
-        let goal = required("goal", &input.goal)?;
-        let scope = required("scope", &input.scope)?;
-        let acceptance = required("acceptanceCriteria", &input.acceptance_criteria)?;
-        let next_step = match input.next_step {
-            Some(value) => Some(required("nextStep", &value)?),
-            None => None,
+    pub fn task_create(&self, task_key: &str, input_json: &str) -> AppResult<Outcome> {
+        self.task_create_with_options(Some(task_key), Some(input_json))
+    }
+
+    pub fn task_create_minimal(&self) -> AppResult<Outcome> {
+        self.task_create_with_options(None, None)
+    }
+
+    pub fn task_create_with_options(
+        &self,
+        task_key: Option<&str>,
+        input_json: Option<&str>,
+    ) -> AppResult<Outcome> {
+        let input = input_json
+            .map(|value| {
+                serde_json::from_str::<TaskCreateInput>(value)
+                    .map_err(|error| AppError::invalid("input", error.to_string()))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let task_key = match (task_key, input.task_key.as_deref()) {
+            (Some(argument), Some(body)) if argument != body => {
+                return Err(AppError::invalid(
+                    "taskKey",
+                    "positional task key and input taskKey must match",
+                ));
+            }
+            (Some(argument), _) => Some(validate_task_key(argument)?),
+            (None, Some(body)) => Some(validate_task_key(body)?),
+            (None, None) => None,
         };
+        let title = input
+            .title
+            .map(|value| validate_task_title(&value))
+            .transpose()?;
+        let goal = optional_description("goal", input.goal)?;
+        let scope = optional_description("scope", input.scope)?;
+        let acceptance = optional_description("acceptanceCriteria", input.acceptance_criteria)?;
+        let next_step = optional_description("nextStep", input.next_step)?;
         let timestamp = now();
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         tx.execute(
             "INSERT INTO tasks(
-                id,title,status,version,goal,scope,acceptance_criteria,next_step,
+                task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
                 created_at,updated_at
              ) VALUES (?1,?2,'open',1,?3,?4,?5,?6,?7,?7)",
-            params![id, title, goal, scope, acceptance, next_step, timestamp],
+            params![
+                task_key, title, goal, scope, acceptance, next_step, timestamp
+            ],
         )
         .map_err(AppError::from_sqlite)?;
+        let id = tx.last_insert_rowid();
         insert_history(
             &tx,
             id,
             "task.created",
             None,
             "task created",
-            json!({"title": title}),
+            json!({"title": title, "taskKey": task_key}),
             &timestamp,
         )?;
         let response_task = load_task(&tx, id)?;
@@ -51,55 +84,138 @@ impl Service {
         Ok(Outcome::new(json!({"task": response_task})))
     }
 
-    pub fn task_show(&self, id: &str) -> AppResult<Outcome> {
+    pub fn task_show(&self, reference: &str) -> AppResult<Outcome> {
         let connection = self.connection()?;
-        let task = load_task(&connection, id)?;
+        let task = load_task_by_reference(&connection, reference)?;
         Ok(Outcome::new(json!({"task": task})))
     }
 
     pub fn task_list(&self, status: Option<&str>) -> AppResult<Outcome> {
-        if let Some(status) = status {
-            TaskStatus::try_from(status).map_err(|reason| AppError::invalid("status", reason))?;
-        }
-        let connection = self.connection()?;
-        let mut statement = if status.is_some() {
-            connection
-                .prepare(
-                    "SELECT id,title,status,version,goal,scope,acceptance_criteria,next_step,
-                            block_reason,block_recovery,current_session_id,repository_path,
-                            repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
-                            closure_outcome,closure_reason,closed_at,created_at,updated_at
-                     FROM tasks WHERE status=?1 ORDER BY updated_at DESC,id ASC",
-                )
-                .map_err(AppError::from_sqlite)?
-        } else {
-            connection
-                .prepare(
-                    "SELECT id,title,status,version,goal,scope,acceptance_criteria,next_step,
-                            block_reason,block_recovery,current_session_id,repository_path,
-                            repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
-                            closure_outcome,closure_reason,closed_at,created_at,updated_at
-                     FROM tasks ORDER BY updated_at DESC,id ASC",
-                )
-                .map_err(AppError::from_sqlite)?
-        };
-        let tasks = if let Some(status) = status {
-            statement
-                .query_map([status], task_from_row)
-                .map_err(AppError::from_sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(AppError::from_sqlite)?
-        } else {
-            statement
-                .query_map([], task_from_row)
-                .map_err(AppError::from_sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(AppError::from_sqlite)?
-        };
-        Ok(Outcome::new(json!({"tasks": tasks})))
+        self.task_list_with_options(&TaskListOptions {
+            status: status.map(ToOwned::to_owned),
+            ..TaskListOptions::default()
+        })
     }
 
-    pub fn task_update(&self, id: &str, expected: i64, input_json: &str) -> AppResult<Outcome> {
+    pub fn task_list_with_options(&self, options: &TaskListOptions) -> AppResult<Outcome> {
+        let status = options
+            .status
+            .as_deref()
+            .map(|value| {
+                TaskStatus::try_from(value)
+                    .map(|status| status.as_str().to_owned())
+                    .map_err(|reason| AppError::invalid("status", reason))
+            })
+            .transpose()?;
+        let task_key = options
+            .task_key
+            .as_deref()
+            .map(|value| required("taskKey", value))
+            .transpose()?;
+        let query = options
+            .query
+            .as_deref()
+            .map(|value| required("query", value))
+            .transpose()?;
+        let fields = validate_list_fields(&options.fields)?;
+        let filter_digest =
+            task_list_filter_digest(status.as_deref(), task_key.as_deref(), query.as_deref());
+        let page_size = options.page_size.unwrap_or(DEFAULT_TASK_PAGE_SIZE);
+        if !(1..=MAX_TASK_PAGE_SIZE).contains(&page_size) {
+            return Err(AppError::invalid(
+                "pageSize",
+                format!("must be between 1 and {MAX_TASK_PAGE_SIZE}"),
+            ));
+        }
+        let cursor = options
+            .cursor
+            .as_deref()
+            .map(decode_task_cursor)
+            .transpose()?;
+        if let Some(cursor) = &cursor
+            && cursor.filter_digest != filter_digest
+        {
+            return Err(AppError::invalid(
+                "cursor",
+                "does not match the current filters",
+            ));
+        }
+
+        let mut sql = String::from(
+            "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
+                    block_reason,block_recovery,current_session_id,repository_path,
+                    repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
+                    closure_outcome,closure_reason,closed_at,created_at,updated_at
+             FROM tasks",
+        );
+        let mut conditions = Vec::new();
+        let mut values = Vec::<SqlValue>::new();
+        if let Some(status) = &status {
+            conditions.push("status=?");
+            values.push(SqlValue::Text(status.clone()));
+        }
+        if let Some(task_key) = &task_key {
+            conditions.push("task_key=?");
+            values.push(SqlValue::Text(task_key.clone()));
+        }
+        if let Some(query) = &query {
+            conditions.push(
+                "(title LIKE ? ESCAPE '\\' OR goal LIKE ? ESCAPE '\\' OR scope LIKE ? ESCAPE '\\')",
+            );
+            let pattern = escaped_like_pattern(query);
+            values.extend((0..3).map(|_| SqlValue::Text(pattern.clone())));
+        }
+        if let Some(cursor) = &cursor {
+            conditions.push("(updated_at < ? OR (updated_at = ? AND id > ?))");
+            values.push(SqlValue::Text(cursor.updated_at.clone()));
+            values.push(SqlValue::Text(cursor.updated_at.clone()));
+            values.push(SqlValue::Integer(cursor.id));
+        }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql.push_str(" ORDER BY updated_at DESC,id ASC LIMIT ?");
+        values.push(SqlValue::Integer(i64::from(page_size) + 1));
+
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(&sql).map_err(AppError::from_sqlite)?;
+        let mut tasks = statement
+            .query_map(params_from_iter(values.iter()), task_from_row)
+            .map_err(AppError::from_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from_sqlite)?;
+        let has_more = tasks.len() > page_size as usize;
+        if has_more {
+            tasks.truncate(page_size as usize);
+        }
+        let next_cursor = if has_more {
+            tasks.last().map(|task| {
+                encode_task_cursor(&TaskListCursor {
+                    version: 1,
+                    updated_at: task.updated_at.clone(),
+                    id: task.id,
+                    filter_digest: filter_digest.clone(),
+                })
+            })
+        } else {
+            None
+        };
+        let tasks = project_tasks(tasks, &fields);
+        Ok(Outcome::new(json!({
+            "tasks": tasks,
+            "nextCursor": next_cursor,
+            "hasMore": has_more,
+            "pageSize": page_size,
+        })))
+    }
+
+    pub fn task_update(
+        &self,
+        reference: &str,
+        expected: i64,
+        input_json: &str,
+    ) -> AppResult<Outcome> {
         let patch: Value = serde_json::from_str(input_json)
             .map_err(|error| AppError::invalid("input", error.to_string()))?;
         let patch = patch
@@ -111,7 +227,7 @@ impl Service {
         for key in patch.keys() {
             if !matches!(
                 key.as_str(),
-                "title" | "goal" | "scope" | "acceptanceCriteria" | "nextStep"
+                "taskKey" | "title" | "goal" | "scope" | "acceptanceCriteria" | "nextStep"
             ) {
                 return Err(AppError::invalid(key, "unknown patch field"));
             }
@@ -119,14 +235,31 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let mut task = load_task(&tx, id)?;
+        let mut task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
         ensure_mutable(&task)?;
         let mut changed = Vec::new();
-        apply_required_patch(patch, "title", &mut task.title, &mut changed)?;
-        apply_required_patch(patch, "goal", &mut task.goal, &mut changed)?;
-        apply_required_patch(patch, "scope", &mut task.scope, &mut changed)?;
-        apply_required_patch(
+        if let Some(value) = patch.get("taskKey") {
+            let value = value
+                .as_str()
+                .ok_or_else(|| AppError::invalid("taskKey", "must be a non-null string"))?;
+            let value = validate_task_key(value)?;
+            match task.task_key.as_deref() {
+                Some(existing) if existing != value => {
+                    return Err(AppError::constraint("tasks.task_key.immutable"));
+                }
+                Some(_) => {}
+                None => {
+                    task.task_key = Some(value.to_owned());
+                    changed.push("taskKey".to_owned());
+                }
+            }
+        }
+        apply_title_patch(patch, &mut task.title, &mut changed)?;
+        apply_description_patch(patch, "goal", &mut task.goal, &mut changed)?;
+        apply_description_patch(patch, "scope", &mut task.scope, &mut changed)?;
+        apply_description_patch(
             patch,
             "acceptanceCriteria",
             &mut task.acceptance_criteria,
@@ -158,11 +291,12 @@ impl Service {
         let timestamp = now();
         let count = tx
             .execute(
-                "UPDATE tasks SET title=?3,goal=?4,scope=?5,acceptance_criteria=?6,next_step=?7,
-                    version=version+1,updated_at=?8 WHERE id=?1 AND version=?2",
+                "UPDATE tasks SET task_key=?3,title=?4,goal=?5,scope=?6,acceptance_criteria=?7,
+                    next_step=?8,version=version+1,updated_at=?9 WHERE id=?1 AND version=?2",
                 params![
                     id,
                     expected,
+                    task.task_key,
                     task.title,
                     task.goal,
                     task.scope,
@@ -189,9 +323,45 @@ impl Service {
         Ok(Outcome::new(json!({"task": response_task})))
     }
 
+    pub fn task_retitle(&self, reference: &str, expected: i64, title: &str) -> AppResult<Outcome> {
+        let title = validate_task_title(title)?;
+        let timestamp = now();
+        let mut connection = self.connection()?;
+        let tx =
+            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
+        check_version(&task, expected)?;
+        if task.title.as_deref() == Some(title.as_str()) {
+            return Err(AppError::invalid("title", "does not change the task title"));
+        }
+        let count = tx
+            .execute(
+                "UPDATE tasks SET title=?3,version=version+1,updated_at=?4
+                 WHERE id=?1 AND version=?2",
+                params![id, expected, title, timestamp],
+            )
+            .map_err(AppError::from_sqlite)?;
+        if count != 1 {
+            return Err(AppError::version(expected, load_task(&tx, id)?.version));
+        }
+        insert_history(
+            &tx,
+            id,
+            "task.retitled",
+            task.current_session_id.as_deref(),
+            "task title changed",
+            json!({"previousTitle": task.title, "title": title}),
+            &timestamp,
+        )?;
+        let response_task = load_task(&tx, id)?;
+        tx.commit().map_err(AppError::from_sqlite)?;
+        Ok(Outcome::new(json!({"task": response_task})))
+    }
+
     pub fn task_note(
         &self,
-        id: &str,
+        reference: &str,
         expected: i64,
         note_type: &str,
         text: &str,
@@ -207,7 +377,8 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, id)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
         ensure_mutable(&task)?;
         tx.execute(
@@ -242,7 +413,7 @@ impl Service {
 
     pub fn task_block(
         &self,
-        id: &str,
+        reference: &str,
         expected: i64,
         reason: &str,
         recovery: &str,
@@ -253,7 +424,8 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, id)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
         if task.status != TaskStatus::InProgress {
             return Err(AppError::constraint("task.block.requires_in_progress"));
@@ -282,13 +454,19 @@ impl Service {
         Ok(Outcome::new(json!({"task": response_task})))
     }
 
-    pub fn task_unblock(&self, id: &str, expected: i64, next_step: &str) -> AppResult<Outcome> {
+    pub fn task_unblock(
+        &self,
+        reference: &str,
+        expected: i64,
+        next_step: &str,
+    ) -> AppResult<Outcome> {
         let next_step = required("nextStep", next_step)?;
         let timestamp = now();
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, id)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
         if task.status != TaskStatus::Blocked {
             return Err(AppError::constraint("task.unblock.requires_blocked"));
@@ -319,7 +497,7 @@ impl Service {
 
     pub fn task_close(
         &self,
-        id: &str,
+        reference: &str,
         expected: i64,
         outcome: &str,
         reason: Option<&str>,
@@ -344,7 +522,8 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, id)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
         if task.status == TaskStatus::Closed {
             return Err(AppError::constraint("task.close.already_closed"));
@@ -356,6 +535,16 @@ impl Service {
         };
         if !valid {
             return Err(AppError::constraint("task.close.invalid_transition"));
+        }
+        if outcome == "completed"
+            && (task.title.is_none()
+                || task.goal.is_none()
+                || task.scope.is_none()
+                || task.acceptance_criteria.is_none())
+        {
+            return Err(AppError::constraint(
+                "task.close.completed_requires_complete_descriptions",
+            ));
         }
         if let Some(session_id) = task.current_session_id.as_deref() {
             tx.execute(
@@ -391,7 +580,7 @@ impl Service {
 
     pub fn task_claim(
         &self,
-        id: &str,
+        reference: &str,
         expected: i64,
         session_id: &str,
         take_over: bool,
@@ -401,7 +590,8 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, id)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
         if task.status == TaskStatus::Closed {
             return Err(AppError::constraint("task.claim.closed"));
@@ -477,7 +667,7 @@ impl Service {
 
     pub fn task_checkpoint(
         &self,
-        id: &str,
+        reference: &str,
         expected: i64,
         session_id: &str,
         input_json: &str,
@@ -495,10 +685,11 @@ impl Service {
         validate_string_array("risks", &input.risks)
             .map_err(|(field, reason)| AppError::invalid(&field, reason))?;
         let initial = self.connection()?;
-        let task = load_task(&initial, id)?;
+        let task = load_task_by_reference(&initial, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
         let git_head = if task.worktree_path.is_some() {
-            self.worktree_status(id)?.data["worktreeStatus"]["head"]
+            self.worktree_status(&id.to_string())?.data["worktreeStatus"]["head"]
                 .as_str()
                 .map(ToOwned::to_owned)
         } else {
@@ -583,8 +774,208 @@ impl Service {
     }
 }
 
+const DEFAULT_TASK_PAGE_SIZE: u32 = 50;
+const MAX_TASK_PAGE_SIZE: u32 = 200;
+const TASK_LIST_FIELDS: [&str; 22] = [
+    "id",
+    "taskKey",
+    "title",
+    "status",
+    "version",
+    "goal",
+    "scope",
+    "acceptanceCriteria",
+    "nextStep",
+    "blockReason",
+    "blockRecovery",
+    "currentSessionId",
+    "repositoryPath",
+    "repositoryCommonDir",
+    "repositoryBranch",
+    "worktreePath",
+    "latestCheckpointId",
+    "closureOutcome",
+    "closureReason",
+    "closedAt",
+    "createdAt",
+    "updatedAt",
+];
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TaskListCursor {
+    version: u8,
+    updated_at: String,
+    id: i64,
+    filter_digest: String,
+}
+
+fn validate_list_fields(fields: &[String]) -> AppResult<Vec<String>> {
+    let mut normalized = Vec::with_capacity(fields.len());
+    for field in fields {
+        if !TASK_LIST_FIELDS.contains(&field.as_str()) {
+            return Err(AppError::invalid(
+                "fields",
+                format!("unknown Task field: {field}"),
+            ));
+        }
+        if normalized.contains(field) {
+            return Err(AppError::invalid(
+                "fields",
+                format!("duplicate Task field: {field}"),
+            ));
+        }
+        normalized.push(field.clone());
+    }
+    Ok(normalized)
+}
+
+fn escaped_like_pattern(query: &str) -> String {
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
+fn task_list_filter_digest(
+    status: Option<&str>,
+    task_key: Option<&str>,
+    query: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    for value in [status, task_key, query] {
+        match value {
+            Some(value) => {
+                hasher.update([1]);
+                hasher.update((value.len() as u64).to_be_bytes());
+                hasher.update(value.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn encode_task_cursor(cursor: &TaskListCursor) -> String {
+    hex::encode(serde_json::to_vec(cursor).expect("Task list cursor must serialize"))
+}
+
+fn decode_task_cursor(value: &str) -> AppResult<TaskListCursor> {
+    let invalid = || AppError::invalid("cursor", "must be a cursor returned by task list");
+    if value.is_empty() || value.len() > 4096 {
+        return Err(invalid());
+    }
+    let bytes = hex::decode(value).map_err(|_| invalid())?;
+    let cursor: TaskListCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if cursor.version != 1
+        || cursor.id <= 0
+        || chrono::DateTime::parse_from_rfc3339(&cursor.updated_at).is_err()
+    {
+        return Err(invalid());
+    }
+    Ok(cursor)
+}
+
+fn project_tasks(tasks: Vec<TaskView>, fields: &[String]) -> Vec<Value> {
+    tasks
+        .into_iter()
+        .map(|task| {
+            let task = serde_json::to_value(task).expect("TaskView must serialize");
+            if fields.is_empty() {
+                return task;
+            }
+            let task = task
+                .as_object()
+                .expect("TaskView must serialize as an object");
+            let projected = fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.clone(),
+                        task.get(field)
+                            .expect("validated Task field must be serialized")
+                            .clone(),
+                    )
+                })
+                .collect();
+            Value::Object(projected)
+        })
+        .collect()
+}
+
 fn required(field: &str, value: &str) -> AppResult<String> {
     require_non_empty(field, value).map_err(|(field, reason)| AppError::invalid(&field, reason))
+}
+
+fn optional_description(field: &str, value: Option<String>) -> AppResult<Option<String>> {
+    value.map(|value| required(field, &value)).transpose()
+}
+
+fn validate_task_key(value: &str) -> AppResult<String> {
+    let value = required("taskKey", value)?;
+    let numeric = value.bytes().all(|byte| byte.is_ascii_digit());
+    let displayed_numeric = value.strip_prefix('#').is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if numeric || displayed_numeric || value.starts_with("key:") {
+        return Err(AppError::invalid(
+            "taskKey",
+            "must not use numeric task reference syntax or the reserved key: prefix",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_task_title(value: &str) -> AppResult<String> {
+    const TASK_TYPES: [&str; 8] = [
+        "功能", "设计", "修复", "优化", "发布", "探索", "文档", "研究",
+    ];
+
+    let value = required("title", value)?;
+    let parts = value.split('｜').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(AppError::invalid(
+            "title",
+            "must use MMDD｜类型｜主题 with exactly two full-width separators",
+        ));
+    }
+    let date = parts[0];
+    if date.len() != 4 || !date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(AppError::invalid("title", "MMDD must contain four digits"));
+    }
+    let month = date[..2].parse::<u8>().expect("validated ASCII digits");
+    let day = date[2..].parse::<u8>().expect("validated ASCII digits");
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 29,
+        _ => 0,
+    };
+    if day == 0 || day > maximum_day {
+        return Err(AppError::invalid(
+            "title",
+            "MMDD must be a valid month and day",
+        ));
+    }
+    if !TASK_TYPES.contains(&parts[1]) {
+        return Err(AppError::invalid(
+            "title",
+            "类型 must be 功能、设计、修复、优化、发布、探索、文档 or 研究",
+        ));
+    }
+    if parts[2].is_empty() || parts[2].trim() != parts[2] {
+        return Err(AppError::invalid(
+            "title",
+            "主题 must be non-empty without surrounding whitespace",
+        ));
+    }
+    Ok(value)
 }
 
 fn ensure_mutable(task: &steward_core::TaskView) -> AppResult<()> {
@@ -595,18 +986,49 @@ fn ensure_mutable(task: &steward_core::TaskView) -> AppResult<()> {
     }
 }
 
-fn apply_required_patch(
+fn apply_title_patch(
+    patch: &Map<String, Value>,
+    destination: &mut Option<String>,
+    changed: &mut Vec<String>,
+) -> AppResult<()> {
+    if let Some(value) = patch.get("title") {
+        if value.is_null() {
+            if destination.is_some() {
+                return Err(AppError::invalid("title", "cannot be cleared once set"));
+            }
+            return Ok(());
+        }
+        let value = Some(validate_task_title(value.as_str().ok_or_else(|| {
+            AppError::invalid("title", "must be a string or null")
+        })?)?);
+        if destination != &value {
+            *destination = value;
+            changed.push("title".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn apply_description_patch(
     patch: &Map<String, Value>,
     field: &str,
-    destination: &mut String,
+    destination: &mut Option<String>,
     changed: &mut Vec<String>,
 ) -> AppResult<()> {
     if let Some(value) = patch.get(field) {
-        let value = value
-            .as_str()
-            .ok_or_else(|| AppError::invalid(field, "must be a non-null string"))?;
-        let value = required(field, value)?;
-        if *destination != value {
+        if value.is_null() {
+            if destination.is_some() {
+                return Err(AppError::invalid(field, "cannot be cleared once set"));
+            }
+            return Ok(());
+        }
+        let value = Some(required(
+            field,
+            value
+                .as_str()
+                .ok_or_else(|| AppError::invalid(field, "must be a string or null"))?,
+        )?);
+        if destination != &value {
             *destination = value;
             changed.push(field.to_owned());
         }

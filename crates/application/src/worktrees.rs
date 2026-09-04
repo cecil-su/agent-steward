@@ -4,13 +4,15 @@ use rusqlite::params;
 use serde_json::{Value, json};
 use storage_sqlite::now;
 
-use crate::db::{check_version, insert_history, load_task};
+use crate::db::{
+    check_version, insert_history, load_task, load_task_by_reference, resolve_task_id,
+};
 use crate::{AppError, AppResult, Outcome, PartialDatabaseState, RecoveryCommand, Service};
 
 impl Service {
-    pub fn worktree_status(&self, task_id: &str) -> AppResult<Outcome> {
+    pub fn worktree_status(&self, task_reference: &str) -> AppResult<Outcome> {
         let connection = self.connection()?;
-        let task = load_task(&connection, task_id)?;
+        let task = load_task_by_reference(&connection, task_reference)?;
         let status = match (
             task.repository_path.as_deref(),
             task.repository_common_dir.as_deref(),
@@ -33,15 +35,18 @@ impl Service {
 
     pub fn worktree_create(
         &self,
-        task_id: &str,
+        task_reference: &str,
         expected: i64,
         repo: &Path,
         branch: &str,
         path: &Path,
     ) -> AppResult<Outcome> {
+        let lookup = self.connection()?;
+        let task_id = resolve_task_id(&lookup, task_reference)?;
+        drop(lookup);
         let _lock = git_adapter::acquire_worktree_lock(
             &self.database_path,
-            task_id,
+            &task_id.to_string(),
             self.lock_root_override.as_deref(),
         )
         .map_err(|error| lock_error(error, task_id, "create"))?;
@@ -65,7 +70,7 @@ impl Service {
             .map_err(|error| AppError::from_git(error, target.to_str()))?;
         if let Some(owner) = worktree_path_owner(&connection, &target)? {
             return Err(AppError::worktree_safety(
-                format!("worktree path is already registered by task {owner}"),
+                format!("worktree path is already registered by task #{owner}"),
                 target.to_str(),
             ));
         }
@@ -422,10 +427,13 @@ impl Service {
         ))
     }
 
-    pub fn worktree_remove(&self, task_id: &str, expected: i64) -> AppResult<Outcome> {
+    pub fn worktree_remove(&self, task_reference: &str, expected: i64) -> AppResult<Outcome> {
+        let lookup = self.connection()?;
+        let task_id = resolve_task_id(&lookup, task_reference)?;
+        drop(lookup);
         let _lock = git_adapter::acquire_worktree_lock(
             &self.database_path,
-            task_id,
+            &task_id.to_string(),
             self.lock_root_override.as_deref(),
         )
         .map_err(|error| lock_error(error, task_id, "remove"))?;
@@ -704,14 +712,17 @@ impl Service {
 
     pub fn worktree_adopt(
         &self,
-        task_id: &str,
+        task_reference: &str,
         expected: i64,
         repo: &Path,
         path: &Path,
     ) -> AppResult<Outcome> {
+        let lookup = self.connection()?;
+        let task_id = resolve_task_id(&lookup, task_reference)?;
+        drop(lookup);
         let _lock = git_adapter::acquire_worktree_lock(
             &self.database_path,
-            task_id,
+            &task_id.to_string(),
             self.lock_root_override.as_deref(),
         )
         .map_err(|error| lock_error(error, task_id, "adopt"))?;
@@ -748,7 +759,7 @@ impl Service {
         }
         if let Some(owner) = worktree_path_owner(&connection, &target)? {
             return Err(AppError::worktree_safety(
-                format!("worktree path is already registered by task {owner}"),
+                format!("worktree path is already registered by task #{owner}"),
                 target.to_str(),
             ));
         }
@@ -801,7 +812,7 @@ impl Service {
             .map_err(|error| AppError::from_git(error, target.to_str()))?;
         if let Some(owner) = worktree_path_owner(&tx, &target)? {
             return Err(AppError::worktree_safety(
-                format!("worktree path is already registered by task {owner}"),
+                format!("worktree path is already registered by task #{owner}"),
                 target.to_str(),
             ));
         }
@@ -919,13 +930,16 @@ impl Service {
 
     pub fn worktree_detach(
         &self,
-        task_id: &str,
+        task_reference: &str,
         expected: i64,
         expected_path: &Path,
     ) -> AppResult<Outcome> {
+        let lookup = self.connection()?;
+        let task_id = resolve_task_id(&lookup, task_reference)?;
+        drop(lookup);
         let _lock = git_adapter::acquire_worktree_lock(
             &self.database_path,
-            task_id,
+            &task_id.to_string(),
             self.lock_root_override.as_deref(),
         )
         .map_err(|error| lock_error(error, task_id, "detach"))?;
@@ -1110,7 +1124,7 @@ impl Service {
     }
 }
 
-fn lock_error(error: git_adapter::GitError, task_id: &str, operation: &str) -> AppError {
+fn lock_error(error: git_adapter::GitError, task_id: i64, operation: &str) -> AppError {
     if matches!(error, git_adapter::GitError::OperationBusy) {
         AppError::new(
             "WORKTREE_OPERATION_BUSY",
@@ -1153,7 +1167,7 @@ fn worktree_payload(info: &git_adapter::RepositoryInfo, target: &Path, branch: &
 
 fn created_worktree_database_failure(
     service: &Service,
-    task_id: &str,
+    task_id: i64,
     repository: &Path,
     created: &git_adapter::ObservedWorktree,
     expected: i64,
@@ -1175,7 +1189,7 @@ fn created_worktree_database_failure(
 
 fn removed_worktree_database_failure(
     service: &Service,
-    task_id: &str,
+    task_id: i64,
     repository: &Path,
     worktree: &Path,
     expected: i64,
@@ -1197,7 +1211,7 @@ fn removed_worktree_database_failure(
 
 fn adopt_recovery_command(
     service: &Service,
-    task_id: &str,
+    task_id: i64,
     repository: &Path,
     worktree: &Path,
     expected: i64,
@@ -1205,7 +1219,7 @@ fn adopt_recovery_command(
     service.recovery_command(vec![
         "worktree".to_owned(),
         "adopt".to_owned(),
-        task_id.to_owned(),
+        task_id.to_string(),
         "--repo".to_owned(),
         repository.to_string_lossy().into_owned(),
         "--path".to_owned(),
@@ -1217,14 +1231,14 @@ fn adopt_recovery_command(
 
 fn detach_recovery_command(
     service: &Service,
-    task_id: &str,
+    task_id: i64,
     worktree: &Path,
     expected: i64,
 ) -> RecoveryCommand {
     service.recovery_command(vec![
         "worktree".to_owned(),
         "detach".to_owned(),
-        task_id.to_owned(),
+        task_id.to_string(),
         "--expected-path".to_owned(),
         worktree.to_string_lossy().into_owned(),
         "--if-version".to_owned(),
@@ -1234,7 +1248,7 @@ fn detach_recovery_command(
 
 fn adopt_recovery_for_created_worktree(
     service: &Service,
-    task_id: &str,
+    task_id: i64,
     repository: &Path,
     common_dir: &Path,
     worktree: &Path,
@@ -1262,7 +1276,7 @@ fn task_without_worktree_references(task: &steward_core::TaskView) -> bool {
 fn worktree_path_owner(
     connection: &rusqlite::Connection,
     worktree: &Path,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<i64>> {
     let registered = {
         let mut statement = connection
             .prepare(
@@ -1272,7 +1286,7 @@ fn worktree_path_owner(
             .map_err(AppError::from_sqlite)?;
         statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(AppError::from_sqlite)?
             .collect::<Result<Vec<_>, _>>()
@@ -1290,7 +1304,7 @@ fn worktree_path_owner(
 
 fn detach_recovery_after_update(
     service: &Service,
-    task_id: &str,
+    task_id: i64,
     repository: &Path,
     common_dir: &Path,
     branch: &str,
@@ -1312,7 +1326,7 @@ fn detach_recovery_after_update(
         Some(task) => service.recovery_command(vec![
             "worktree".to_owned(),
             "detach".to_owned(),
-            task_id.to_owned(),
+            task_id.to_string(),
             "--expected-path".to_owned(),
             worktree.to_string_lossy().into_owned(),
             "--if-version".to_owned(),
@@ -1324,7 +1338,7 @@ fn detach_recovery_after_update(
 
 fn validated_adopt_recovery(
     service: &Service,
-    task_id: &str,
+    task_id: i64,
     repository: &Path,
     common_dir: &Path,
     worktree: &Path,
@@ -1366,7 +1380,7 @@ fn validated_adopt_recovery(
         Some(task) => service.recovery_command(vec![
             "worktree".to_owned(),
             "adopt".to_owned(),
-            task_id.to_owned(),
+            task_id.to_string(),
             "--repo".to_owned(),
             info.repository_path.to_string_lossy().into_owned(),
             "--path".to_owned(),
@@ -1507,7 +1521,7 @@ mod tests {
 
         let create_error = created_worktree_database_failure(
             &service,
-            "TASK RECOVERY",
+            1,
             &repository,
             &created,
             7,
@@ -1545,7 +1559,7 @@ mod tests {
 
         let remove_error = removed_worktree_database_failure(
             &service,
-            "TASK RECOVERY",
+            1,
             &repository,
             &worktree,
             8,
@@ -1582,7 +1596,7 @@ mod tests {
             .task_create(
                 "TASK OWNER",
                 r#"{
-                    "title":"Owner",
+                    "title":"0904｜功能｜Owner",
                     "goal":"Protect the live Worktree",
                     "scope":"Test",
                     "acceptanceCriteria":"A stale path key cannot hide the owner"
@@ -1591,6 +1605,7 @@ mod tests {
             .unwrap();
         let worktree = temp.path().join("worktree");
         fs::create_dir(&worktree).unwrap();
+        let owner_id = task_numeric_id(&service, "TASK OWNER");
         service
             .connection()
             .unwrap()
@@ -1598,16 +1613,13 @@ mod tests {
                 "UPDATE tasks SET repository_path='repo',repository_common_dir='common',
                     repository_branch='feature',worktree_path=?2,worktree_path_key='stale-key'
                  WHERE id=?1",
-                params!["TASK OWNER", worktree.to_str().unwrap()],
+                params![owner_id, worktree.to_str().unwrap()],
             )
             .unwrap();
 
         let mut connection = service.connection().unwrap();
         let tx = storage_sqlite::write_transaction(&mut connection).unwrap();
-        assert_eq!(
-            worktree_path_owner(&tx, &worktree).unwrap().as_deref(),
-            Some("TASK OWNER")
-        );
+        assert_eq!(worktree_path_owner(&tx, &worktree).unwrap(), Some(owner_id));
     }
 
     #[test]
@@ -1618,7 +1630,7 @@ mod tests {
             .task_create(
                 "TASK RECOVERY",
                 r#"{
-                    "title":"Initial",
+                    "title":"0904｜功能｜Initial",
                     "goal":"Recover the worktree",
                     "scope":"Test",
                     "acceptanceCriteria":"Current version is used"
@@ -1626,12 +1638,12 @@ mod tests {
             )
             .unwrap();
         service
-            .task_update("TASK RECOVERY", 1, r#"{"title":"Updated"}"#)
+            .task_update("TASK RECOVERY", 1, r#"{"title":"0904｜优化｜Updated"}"#)
             .unwrap();
 
         let recovery = adopt_recovery_for_created_worktree(
             &service,
-            "TASK RECOVERY",
+            task_numeric_id(&service, "TASK RECOVERY"),
             Path::new("repository"),
             Path::new("common"),
             Path::new("worktree with spaces"),
@@ -1647,7 +1659,7 @@ mod tests {
             .task_create(
                 "TASK DETACH RECOVERY",
                 r#"{
-                    "title":"Initial",
+                    "title":"0904｜功能｜Initial",
                     "goal":"Recover the database reference",
                     "scope":"Test",
                     "acceptanceCriteria":"Current version is used"
@@ -1666,7 +1678,7 @@ mod tests {
                     repository_branch='feature',worktree_path=?4,worktree_path_key=?5,
                     version=2 WHERE id=?1",
                 params![
-                    "TASK DETACH RECOVERY",
+                    task_numeric_id(&service, "TASK DETACH RECOVERY"),
                     repository.to_string_lossy(),
                     common_dir.to_string_lossy(),
                     worktree.to_string_lossy(),
@@ -1680,7 +1692,7 @@ mod tests {
 
         let recovery = detach_recovery_after_update(
             &service,
-            "TASK DETACH RECOVERY",
+            task_numeric_id(&service, "TASK DETACH RECOVERY"),
             &repository,
             &common_dir,
             "feature",
@@ -1700,7 +1712,7 @@ mod tests {
                     task_id,
                     &format!(
                         r#"{{
-                            "title":"{task_id}",
+                            "title":"0904｜功能｜{task_id}",
                             "goal":"Protect Worktree ownership",
                             "scope":"Test",
                             "acceptanceCriteria":"Conflicting adoption is not recommended"
@@ -1738,7 +1750,7 @@ mod tests {
                     repository_branch='feature',worktree_path=?4,worktree_path_key=?5,
                     version=2 WHERE id=?1",
                 params![
-                    "TASK OWNER",
+                    task_numeric_id(&service, "TASK OWNER"),
                     repository.to_string_lossy(),
                     common_dir.to_string_lossy(),
                     worktree.to_string_lossy(),
@@ -1749,7 +1761,7 @@ mod tests {
 
         let recovery = adopt_recovery_for_created_worktree(
             &service,
-            "TASK RECOVERY",
+            task_numeric_id(&service, "TASK RECOVERY"),
             &repository,
             &common_dir,
             &worktree,
@@ -1803,7 +1815,7 @@ mod tests {
             .task_create(
                 "TASK ADOPT RECOVERY",
                 r#"{
-                    "title":"Initial",
+                    "title":"0904｜功能｜Initial",
                     "goal":"Recover a valid worktree",
                     "scope":"Test",
                     "acceptanceCriteria":"Unsafe adoption is not recommended"
@@ -1811,17 +1823,22 @@ mod tests {
             )
             .unwrap();
         service
-            .task_update("TASK ADOPT RECOVERY", 1, r#"{"title":"Updated"}"#)
+            .task_update(
+                "TASK ADOPT RECOVERY",
+                1,
+                r#"{"title":"0904｜优化｜Updated"}"#,
+            )
             .unwrap();
         service
             .task_note("TASK ADOPT RECOVERY", 2, "progress", "Concurrent update")
             .unwrap();
+        let task_id = task_numeric_id(&service, "TASK ADOPT RECOVERY");
 
         let info = git_adapter::repository_info(&repository).unwrap();
         let live_item = git_adapter::find_worktree(&repository, &live).unwrap();
         let recovery = validated_adopt_recovery(
             &service,
-            "TASK ADOPT RECOVERY",
+            task_id,
             &repository,
             &info.common_dir,
             &live,
@@ -1830,7 +1847,7 @@ mod tests {
         assert_eq!(recovery.args.last().unwrap(), "3");
         let recovery = adopt_recovery_for_created_worktree(
             &service,
-            "TASK ADOPT RECOVERY",
+            task_id,
             &repository,
             &info.common_dir,
             &live,
@@ -1840,7 +1857,7 @@ mod tests {
         let detached_item = git_adapter::find_worktree(&repository, &detached).unwrap();
         let recovery = validated_adopt_recovery(
             &service,
-            "TASK ADOPT RECOVERY",
+            task_id,
             &repository,
             &info.common_dir,
             &detached,
@@ -1849,7 +1866,7 @@ mod tests {
         assert_eq!(recovery.args.last().unwrap(), "doctor");
         let recovery = adopt_recovery_for_created_worktree(
             &service,
-            "TASK ADOPT RECOVERY",
+            task_id,
             &repository,
             &info.common_dir,
             &detached,
@@ -1859,7 +1876,7 @@ mod tests {
         let stale_item = git_adapter::find_worktree(&repository, &stale).unwrap();
         let recovery = validated_adopt_recovery(
             &service,
-            "TASK ADOPT RECOVERY",
+            task_id,
             &repository,
             &info.common_dir,
             &stale,
@@ -1868,7 +1885,7 @@ mod tests {
         assert_eq!(recovery.args.last().unwrap(), "doctor");
         let recovery = adopt_recovery_for_created_worktree(
             &service,
-            "TASK ADOPT RECOVERY",
+            task_id,
             &repository,
             &info.common_dir,
             &stale,
@@ -1879,7 +1896,7 @@ mod tests {
         fs::create_dir(&other_common).unwrap();
         let recovery = adopt_recovery_for_created_worktree(
             &service,
-            "TASK ADOPT RECOVERY",
+            task_id,
             &repository,
             &other_common,
             &live,
@@ -1907,7 +1924,7 @@ mod tests {
             .task_create(
                 "TASK COMMON DIR",
                 r#"{
-                    "title":"Initial",
+                    "title":"0904｜功能｜Initial",
                     "goal":"Protect repository identity",
                     "scope":"Test",
                     "acceptanceCriteria":"Mismatched common directories are refused"
@@ -1922,7 +1939,7 @@ mod tests {
                     repository_branch='main',worktree_path=?4,worktree_path_key=?5,
                     version=2 WHERE id=?1",
                 params![
-                    "TASK COMMON DIR",
+                    task_numeric_id(&service, "TASK COMMON DIR"),
                     current_info.repository_path.to_string_lossy(),
                     registered_info.common_dir.to_string_lossy(),
                     missing_worktree.to_string_lossy(),
@@ -1968,6 +1985,12 @@ mod tests {
             "doctor"
         );
         assert_eq!(error.body.details["diagnostics"]["phase"], "databaseCommit");
+    }
+
+    fn task_numeric_id(service: &Service, reference: &str) -> i64 {
+        service.task_show(reference).unwrap().data["task"]["id"]
+            .as_i64()
+            .unwrap()
     }
 
     fn git<const N: usize>(repository: &Path, args: [&str; N]) {

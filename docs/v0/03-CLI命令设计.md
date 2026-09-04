@@ -10,7 +10,7 @@ taskctl [global-options] <domain> <action> [subaction] [arguments] [options]
 
 - `--database <path>`：覆盖默认 SQLite 数据库路径；
 - `--json`：输出稳定机器合同；
-- `--input <file>`：从 UTF-8 JSON 文件读取结构化输入，文件只作为本次命令输入，不成为主存储；
+- `--input <file|->`：从 UTF-8 JSON 文件读取结构化输入；与 `--json` 同用时，`-` 表示从 stdin 按原始字节读取并严格验证 UTF-8。空输入、非法 UTF-8、非法 JSON 和未知字段都返回稳定 `INVALID_INPUT`（`details.field="input"`），输入不成为主存储；
 - `--yes`：确认 Worktree 删除等明确的本地操作；
 - `--verbose`：输出诊断信息，不改变结果合同。
 
@@ -19,26 +19,36 @@ taskctl [global-options] <domain> <action> [subaction] [arguments] [options]
 ## 2. Task
 
 ```bash
-taskctl task list [--status in_progress]
-taskctl task show <task-id> [--json]
-taskctl task create <task-id> --input <file>
-taskctl task claim <task-id> --session <session-id> --if-version <version> [--take-over]
-taskctl task update <task-id> --if-version <version> --input <file>
-taskctl task note <task-id> --if-version <version> --type <decision|progress|risk> --text <text>
-taskctl task block <task-id> --if-version <version> --reason <text> --recovery <text>
-taskctl task unblock <task-id> --if-version <version> --next-step <text>
-taskctl task checkpoint <task-id> --session <session-id> --if-version <version> --input <file>
-taskctl task resume <task-id> --session <new-session-id> --if-version <version> [--from-session <old-session-id>] [--take-over] [--json]
-taskctl task close <task-id> --if-version <version> --outcome <outcome> [--reason <text>]
+taskctl task list [--status in_progress] [--task-key <key>] [--query <text>]
+  [--page-size <1..200>] [--cursor <cursor>] [--fields <field,...>]
+  [--format table|lines]
+taskctl task show <task-ref> [--json]
+taskctl task create [task-key] [--input <file|->]
+taskctl task claim <task-ref> --session <session-id> --if-version <version> [--take-over]
+taskctl task update <task-ref> --if-version <version> --input <file|->
+taskctl task retitle <task-ref> --if-version <version> --title <MMDD｜类型｜主题>
+taskctl task note <task-ref> --if-version <version> --type <decision|progress|risk> --text <text>
+taskctl task block <task-ref> --if-version <version> --reason <text> --recovery <text>
+taskctl task unblock <task-ref> --if-version <version> --next-step <text>
+taskctl task checkpoint <task-ref> --session <session-id> --if-version <version> --input <file|->
+taskctl task resume <task-ref> --session <new-session-id> --if-version <version> [--from-session <old-session-id>] [--take-over] [--json]
+taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reason <text>]
 ```
+
+`<task-ref>` 接受三种常规形式：纯数字 `12`、带展示前缀的 `#12`，或旧的可选 `taskKey`。前两种解析为数据库整数主键，`taskKey` 按唯一键解析。迁移前恰好为 `12` 或 `#12` 的旧字符串 ID 会保存在 `taskKey`，调用方必须用显式 `key:12` 或 `key:#12` 消除歧义；任意以 `key:` 开头的旧 Key 可再加一层前缀，例如旧 Key `key:12` 使用 `key:key:12`。JSON 输出中的 `TaskView.id` 和所有 `taskId` 是整数；人类输出统一显示 `#12`。新 `taskKey` 不能使用纯数字、`#数字` 或保留的 `key:` 前缀，以避免引用歧义；它可在创建时给出，也可在后续 Patch 中从 `null` 设置一次，设置后不可更改或清空。
+
+`task list` 默认每页 50 条，最大 200 条，固定按 `updatedAt DESC, id ASC` 排序，并使用 `nextCursor` 继续读取。游标保存固定长度的筛选摘要并绑定创建它时的 `status/taskKey/query` 条件，不内嵌完整筛选文本；因此合法输入产生的 `nextCursor` 一定可被下一页消费，筛选条件变化后复用旧游标返回 `INVALID_INPUT`。`--status` 和 `--task-key` 精确匹配，`--query` 对 title/goal/scope 做转义后的 SQLite `LIKE` 包含匹配，ASCII 字母不区分大小写，非 ASCII 遵循 SQLite 默认比较语义，`%` 和 `_` 按普通字符处理。`--fields title` 或 `--fields id,title,status` 只投影白名单字段；不传时 JSON 返回完整 TaskView。未知、重复或空字段拒绝，字段白名单就是下文 `TaskView` 的 camelCase 字段集合；投影不改变筛选、排序和游标计算。
+
+非 JSON 的 `task list` 默认输出 ID/title/status/updatedAt 表格；显式 `--fields` 决定表格列，`null` 显示为 `—`，过长单元格只在表格中以省略号截断。`--format lines` 要求恰好选择一个字段，每条 Task 输出一行；它不能与 `--json` 组合。机器调用始终使用 `--json`，不解析表格或 lines 文本。
 
 除 `task create` 外，所有会改变 Task、Session、Checkpoint、Note、History 或 Worktree 引用的命令都必须携带最近一次读取结果中的 `--if-version`。Application Service 使用该值执行 compare-and-swap；不匹配时返回版本冲突和当前版本，不执行部分 mutation。纯查询不需要版本。
 
-`create --input` 使用以下完整输入，其中前四个字段必须是去除首尾空白后仍非空的字符串，`nextStep` 可省略或为非空字符串；未知字段作为 Schema 错误拒绝，不能静默忽略：
+不带 task-key 和 `--input` 的 `task create` 创建最小 Task：数据库生成整数 ID，`version=1`、`status=open`，描述和 `taskKey` 均为 `null`。位置参数可提供 `taskKey`；`create --input` 还可使用以下完整输入，`taskKey` 可选，描述字段可省略或为 `null`，非 `null` 时必须是去除首尾空白后仍非空的字符串；未知字段作为 Schema 错误拒绝，不能静默忽略：
 
 ```json
 {
-  "title": "修复登录回归",
+  "taskKey": "LOGIN-REGRESSION",
+  "title": "0904｜修复｜登录回归",
   "goal": "恢复登录并保留现有会话兼容性",
   "scope": "仅修改认证模块和对应测试",
   "acceptanceCriteria": "相关单元测试和集成测试通过",
@@ -46,7 +56,11 @@ taskctl task close <task-id> --if-version <version> --outcome <outcome> [--reaso
 }
 ```
 
-`update --input` 是 JSON Merge Patch 风格的受限字段更新，只允许 `title`、`goal`、`scope`、`acceptanceCriteria` 和 `nextStep`。省略表示不修改，`nextStep` 可以显式为 `null`，其余字段不能为 `null` 或空字符串；空 Patch 拒绝。状态、阻塞和关闭结果只能通过专用命令改变。
+`title` 非空时统一使用 `MMDD｜类型｜主题`，分隔符必须是全角 `｜`，`MMDD` 必须是有效月日，类型只能是 `功能`、`设计`、`修复`、`优化`、`发布`、`探索`、`文档` 或 `研究`，主题不能为空或带首尾空白。调用方负责按会话时间转换到 `Asia/Shanghai` 后生成 `MMDD`；核心校验结构、月日和类型，不从机器时区猜测日期。迁移前或规则启用前的既有标题保持可读，但后续新建或修改 title 必须满足该格式。
+
+`update --input` 是 JSON Merge Patch 风格的受限字段更新，只允许 `taskKey`、`title`、`goal`、`scope`、`acceptanceCriteria` 和 `nextStep`。省略表示不修改；`nextStep` 可显式为 `null`，字符串值必须非空白。四个描述字段初始可为 `null`，但设置为字符串后不能通过 `null` 清空；清空请求返回 `INVALID_INPUT` 且不递增 version。`taskKey` 仅允许从 `null` 设置为非空、非歧义引用语法且不以 `key:` 开头的字符串，之后不可改变；空 Patch、无实际变化的 Patch 和未知字段均拒绝。单次 Patch 无论改变多少字段，都只执行一次 CAS、递增一次 version 并写一条 `task.updated` History。状态、阻塞和关闭结果只能通过专用命令改变。
+
+`retitle` 是唯一允许修改已关闭 Task 的命令。它只接受符合命名规则的非空 title，执行一次 CAS，仅修改 `title`、`version` 和 `updatedAt`，写入一条 `task.retitled` History；不得重新打开 Task、改变关闭结果或修改其他字段。相同 title 作为无实际变化请求拒绝。未关闭 Task 也可使用该命令做 title-only 修正。
 
 `claim` 的语义是把当前 Session 记录为 Task 的执行会话，并将 `open` Task 推进到 `in_progress`。请求的 Session ID 不存在时，命令在同一事务中创建未结束 Session；它已经存在时，仅允许它是该 Task 尚未结束的当前 Session，并按下述规则返回 no-op，不能重新激活已结束 Session、复用其他 Task 的 Session 或改写既有继续关系，否则返回 `SESSION_CONFLICT`。相同当前 Session 再次领取时，Application Service 先执行 version 校验；只有调用方携带当前 version 时才返回同状态 no-op success，不写 History、不递增 version。首次成功后丢失响应并原样重试旧 version 会返回 `VERSION_CONFLICT`，V0 不把它称为请求级幂等。如果已有其他当前 Session，默认返回冲突；用户可以明确使用 `--take-over` 接管。接管使用尚不存在的新 Session ID，把新 Session 的 `continuedFrom` 指向旧 Session，但不会伪造旧 Session 的 `endedAt`。
 
@@ -85,21 +99,21 @@ taskctl task close <task-id> --if-version <version> --outcome <outcome> [--reaso
 | `in_progress/blocked` | `claim --take-over` | 原状态 | 更换当前 Session 并保留继续关系 |
 | `in_progress` | `block` | `blocked` | reason 和 recovery 必填 |
 | `blocked` | `unblock` | `in_progress` | 清空阻塞字段，next step 必填 |
-| `in_progress` | `close completed` | `closed` | 清空当前 Session 和 next step |
+| `in_progress` | `close completed` | `closed` | title、goal、scope、acceptanceCriteria 必须完整；清空当前 Session 和 next step |
 | `in_progress/blocked` | `close partial` | `closed` | reason 必填并记录残余事项 |
 | `open/in_progress/blocked` | `close cancelled/superseded` | `closed` | reason 必填 |
 
 `update` 和 `note` 允许用于 `open/in_progress/blocked`，但不能绕过专用命令改变状态字段。`checkpoint` 只允许用于 `in_progress/blocked`，且指定 Session 必须是同一 Task 尚未结束的当前 Session。`resume` 只允许用于 `in_progress/blocked`；`open` Task 必须先 `claim`。`claim` 首次把 `open` 推进到 `in_progress`；对于 `in_progress/blocked`，相同且尚未结束的当前 Session 在当前 version 下可以 no-op success，不同当前 Session 必须以尚不存在的新 Session ID 执行 `--take-over`，状态保持不变；当前 Session 为空时必须使用带明确来源的 `resume`，不能丢失继续关系。
 
-`closed` 不允许重新领取、更新、阻塞或保存 Checkpoint；V0 不提供 reopen。所有关闭命令都清空 next step 和阻塞字段；若存在当前 Session，还在同一事务中设置其 `endedAt` 并清空 Task 的 `currentSessionId`。非 `blocked` 状态的阻塞字段必须为空；非 `closed` 状态的关闭字段必须为空。
+`closed` 不允许重新领取、普通更新、阻塞或保存 Checkpoint；V0 不提供 reopen，但允许通过 `retitle` 做 title-only 元数据修正。所有关闭命令都清空 next step 和阻塞字段；若存在当前 Session，还在同一事务中设置其 `endedAt` 并清空 Task 的 `currentSessionId`。非 `blocked` 状态的阻塞字段必须为空；非 `closed` 状态的关闭字段必须为空。
 
 ## 3. Session
 
 ```bash
-taskctl session list [--task <task-id>]
+taskctl session list [--task <task-ref>]
 taskctl session show <session-id>
-taskctl session attach <task-id> --session <session-id> --if-version <version> [--source <client>] [--external-session <external-id>] [--record-path <path>]
-taskctl session import add <task-id> --session <session-id> --if-version <version> --file <session-file> --confirm-sensitive-content-reviewed
+taskctl session attach <task-ref> --session <session-id> --if-version <version> [--source <client>] [--external-session <external-id>] [--record-path <path>]
+taskctl session import add <task-ref> --session <session-id> --if-version <version> --file <session-file> --confirm-sensitive-content-reviewed
 taskctl session import list <session-id> [--json]
 taskctl session import remove <import-id> --if-version <version> [--yes]
 taskctl session close <session-id> --if-version <version>
@@ -120,18 +134,18 @@ taskctl session close <session-id> --if-version <version>
 ## 4. Worktree
 
 ```bash
-taskctl worktree create <task-id> --repo <path> --branch <branch> --path <worktree-path> --if-version <version>
-taskctl worktree status <task-id> [--json]
-taskctl worktree remove <task-id> --if-version <version> [--yes]
-taskctl worktree adopt <task-id> --repo <path> --path <worktree-path> --if-version <version>
-taskctl worktree detach <task-id> --expected-path <worktree-path> --if-version <version>
+taskctl worktree create <task-ref> --repo <path> --branch <branch> --path <worktree-path> --if-version <version>
+taskctl worktree status <task-ref> [--json]
+taskctl worktree remove <task-ref> --if-version <version> [--yes]
+taskctl worktree adopt <task-ref> --repo <path> --path <worktree-path> --if-version <version>
+taskctl worktree detach <task-ref> --expected-path <worktree-path> --if-version <version>
 ```
 
 `create` 要求调用方显式提供目标路径。命令取得下述按 Task advisory lock 后，必须重新读取 Task version，并确认 Task 的 Repository 路径、common-dir 身份、Branch 和 Worktree 引用全部为空；任一引用已经存在时，在调用 Git 前返回 `WORKTREE_SAFETY_REFUSED`，不能覆盖或创建第二个未登记 Worktree。Git 调用完成后无论退出状态如何都必须重新观察现场；只有现场证明创建成功，才在数据库事务中以同一 version compare-and-swap，并同时保存实际 Repository 路径、规范化 common-dir 身份、Branch 和 Worktree 引用。数据库提交后、返回成功前必须再次确认 Worktree 仍存在且身份一致。`--branch` 表示已经存在的本地分支；V0 不隐式创建分支。目标分支不存在、已被其他 Worktree 占用或 Repository 身份不一致时拒绝。如果未来需要创建分支，另行增加显式 `--new-branch` 和 `--start-point` 合同。
 
 Repository、Worktree 和目标父目录必须遵循安全文档中的 `CanonicalPath` 与 `RepositoryIdentity` 合同。数据库路径相等、用户输入字符串相等或单独一次 `resolve()` 都不足以证明是同一现场。
 
-`create/remove/adopt/detach` 在读取最终前置条件前，必须取得跨进程 OS advisory lock，并持有到 Git 后置观察和数据库提交或错误分类完成。锁文件位于用户应用数据目录的 `agent-steward/locks`，文件名使用 `SHA-256(canonicalDatabasePath + NUL + taskId)`，目录权限与数据库应用目录相同；文件内容不保存业务状态，进程退出后由操作系统释放锁。锁不可用时返回 `WORKTREE_OPERATION_BUSY`，不得启动 Git。该锁只串行化同一数据库中同一 Task 的 Worktree 外部操作，Task version CAS 和数据库唯一约束仍是持久化一致性的最终保护；V0 不支持多个 OS 用户共享同一数据库。
+`create/remove/adopt/detach` 在读取最终前置条件前，必须取得跨进程 OS advisory lock，并持有到 Git 后置观察和数据库提交或错误分类完成。锁文件位于用户应用数据目录的 `agent-steward/locks`，文件名使用 `SHA-256(canonicalDatabasePath + NUL + 数字 taskId)`，目录权限与数据库应用目录相同；文件内容不保存业务状态，进程退出后由操作系统释放锁。锁不可用时返回 `WORKTREE_OPERATION_BUSY`，不得启动 Git。该锁只串行化同一数据库中同一 Task 的 Worktree 外部操作，Task version CAS 和数据库唯一约束仍是持久化一致性的最终保护；V0 不支持多个 OS 用户共享同一数据库。
 
 最低保护：
 
@@ -156,7 +170,7 @@ Git 与 SQLite 部分完成时使用显式恢复命令：
 ## 5. History 与诊断
 
 ```bash
-taskctl history <task-id> [--json]
+taskctl history <task-ref> [--json]
 taskctl doctor
 ```
 
@@ -184,7 +198,7 @@ AI 应遵守：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "ok": true,
   "data": {},
   "warnings": [
@@ -194,9 +208,9 @@ AI 应遵守：
 }
 ```
 
-失败时 `ok=false`、`data=null`，`error` 至少包含 `code`、`message`、`retryable` 和 `details`。可选字段必须显式输出为 `null`，不能因为空而省略；输出消费者必须忽略未来新增字段。输入中的未知字段拒绝，以防拼写错误静默丢失。持久化 Checkpoint 或 History JSON 无法解码时返回 `DATABASE_UNAVAILABLE`，不得转换为空数组或 `null`；`resume` 必须在创建新 Session 前完成 Checkpoint 解码。
+失败时 `ok=false`、`data=null`，`error` 至少包含 `code`、`message`、`retryable` 和 `details`。可选字段必须显式输出为 `null`，不能因为空而省略；输出消费者必须忽略未来新增字段。输入中的未知字段拒绝，以防拼写错误静默丢失。持久化 Checkpoint 或 History JSON 无法解码时返回 `DATABASE_UNAVAILABLE`，不得转换为空数组或 `null`；`resume` 必须在创建新 Session 前完成 Checkpoint 解码。v6→v7 migration 不重写既有 History payload：迁移前的 `task.created` 事件允许只有旧合同中的 `title`，v7 新建事件才要求同时显式包含 `title` 和 `taskKey`。
 
-所有成功的 Task mutation 在 `data.task` 中返回完整 Task，其 `version` 是 mutation 后的新版本。`VERSION_CONFLICT` 的 `details` 返回 `expectedVersion` 和 `currentVersion`。Git 已经改变现场，或操作期间无法证明 Git 与数据库一致时，返回 `PARTIAL_EXTERNAL_STATE`；`details` 返回规范化 Repository/Worktree 路径、实际或 `unknown` Git 状态、稳定的 `databaseState`（`unchanged`、`updated` 或 `unknown`），以及可执行的 `adopt`、`detach` 或 `taskctl doctor` 建议。为保持 `schemaVersion: 1` 兼容，`recommendedCommand` 保持字符串；新增的 `recommendedArgs` 是不经过 Shell 拼接的参数数组，首项为 `taskctl`，并显式携带 `--database` 和规范化数据库路径；Task ID、Repository 与 Worktree 路径各自占用独立数组元素。
+所有成功的 Task mutation 在 `data.task` 中返回完整 Task，其 `version` 是 mutation 后的新版本。`VERSION_CONFLICT` 的 `details` 返回 `expectedVersion` 和 `currentVersion`。Git 已经改变现场，或操作期间无法证明 Git 与数据库一致时，返回 `PARTIAL_EXTERNAL_STATE`；`details` 返回规范化 Repository/Worktree 路径、实际或 `unknown` Git 状态、稳定的 `databaseState`（`unchanged`、`updated` 或 `unknown`），以及可执行的 `adopt`、`detach` 或 `taskctl doctor` 建议。`schemaVersion: 2` 表示 Task 主键和所有 `taskId` 已改为 JSON 整数，并新增 `taskKey` 及可空描述语义；旧 `schemaVersion: 1` 消费者不得把该结果当作兼容响应。`recommendedCommand` 保持字符串；`recommendedArgs` 是不经过 Shell 拼接的参数数组，首项为 `taskctl`，并显式携带 `--database` 和规范化数据库路径；数字 Task ID、Repository 与 Worktree 路径各自占用独立数组元素。
 
 `gitState` 只能承载可判定的现场事实：无法证明现场时（例如后置观察失败）必须稳定输出字符串 `"unknown"`，不得用包含 `phase`/`observationError` 的对象冒充状态；`phase`、`observationError`、`observed` 等过程诊断统一放入可选 `diagnostics` 对象，无诊断时显式输出 `null`。`detach` 建议只在该 Task 的文件系统路径与 Git 登记均已证明不存在时给出；目录缺失但 Git 仍登记该 Worktree 时不得建议 `detach`（它必然被拒绝），应建议 `taskctl doctor` 并在 `diagnostics` 或 doctor issue 中说明需要先清理 Git 登记或恢复目录。
 
@@ -212,6 +226,7 @@ V0 稳定错误码固定为：
 | `VERSION_CONFLICT` | 4 | true | `expectedVersion`、`currentVersion` |
 | `SESSION_CONFLICT` | 4 | false | `currentSessionId`、`requestedSessionId` |
 | `DATABASE_BUSY` | 4 | true | `timeoutMs` |
+| `SCHEMA_MIGRATION_BLOCKED` | 4 | true | `databaseVersion`、`targetVersion`、`legacyTaskId` |
 | `WORKTREE_OPERATION_BUSY` | 4 | true | `taskId`、`operation` |
 | `CONSTRAINT_VIOLATION` | 4 | false | `constraint` |
 | `WORKTREE_SAFETY_REFUSED` | 5 | false | `reason`、`worktreePath` |
@@ -227,7 +242,7 @@ V0 DTO 固定如下；这里列出的可选字段也必须以 `null` 输出：
 
 | DTO | 字段 |
 | --- | --- |
-| `TaskView` | `id`、`title`、`status`、`version`、`goal`、`scope`、`acceptanceCriteria`、`nextStep`、`blockReason`、`blockRecovery`、`currentSessionId`、`repositoryPath`、`repositoryCommonDir`、`repositoryBranch`、`worktreePath`、`latestCheckpointId`、`closureOutcome`、`closureReason`、`closedAt`、`createdAt`、`updatedAt` |
+| `TaskView` | `id`（整数）、`taskKey`、`title`、`status`、`version`、`goal`、`scope`、`acceptanceCriteria`、`nextStep`、`blockReason`、`blockRecovery`、`currentSessionId`、`repositoryPath`、`repositoryCommonDir`、`repositoryBranch`、`worktreePath`、`latestCheckpointId`、`closureOutcome`、`closureReason`、`closedAt`、`createdAt`、`updatedAt`；`taskKey/title/goal/scope/acceptanceCriteria` 可为 `null` |
 | `SessionView` | `id`、`taskId`、`source`、`externalSessionId`、`continuedFrom`、`recordPath`、`startedAt`、`endedAt` |
 | `CheckpointView` | `id`、`taskId`、`sessionId`、`summary`、`completed`、`decisions`、`pending`、`nextStep`、`risks`、`gitHead`、`createdAt` |
 | `TaskNoteView` | `id`、`taskId`、`sessionId`、`noteType`、`text`、`createdAt` |
@@ -239,10 +254,10 @@ V0 DTO 固定如下；这里列出的可选字段也必须以 `null` 输出：
 
 命令的 `data` 映射固定为：
 
-- `task show` 以及 `task create/claim/update/block/unblock/close`：`{ "task": TaskView }`；
+- `task show` 以及 `task create/claim/update/retitle/block/unblock/close`：`{ "task": TaskView }`；
 - `task note`：`{ "task": TaskView, "note": TaskNoteView }`；
 - `task checkpoint`：`{ "task": TaskView, "checkpoint": CheckpointView }`；
-- `task list`：`{ "tasks": TaskView[] }`；V0 不分页，排序固定为 `updatedAt DESC, id ASC`；
+- `task list`：`{ "tasks": TaskView[]|object[], "nextCursor": string|null, "hasMore": boolean, "pageSize": integer }`；未指定 `fields` 时返回完整 TaskView，指定后每个 object 只含请求字段；排序固定为 `updatedAt DESC, id ASC`；
 - `task resume`：`{ "task": TaskView, "checkpoint": CheckpointView|null, "sessions": SessionView[], "worktreeStatus": WorktreeStatus|null, "nextStep": string|null }`；`sessions` 按 `startedAt ASC, id ASC`；
 - `session show/list`：分别为 `{ "session": SessionView }` 和 `{ "sessions": SessionView[] }`；`session list` 按 `startedAt ASC, id ASC`；
 - `session attach/close`：`{ "task": TaskView, "session": SessionView }`；
@@ -253,7 +268,7 @@ V0 DTO 固定如下；这里列出的可选字段也必须以 `null` 输出：
 - `history`：`{ "history": HistoryEntry[] }`，按 sequence 升序；
 - `doctor`：`{ "checks": [{ "code": string, "status": "ok"|"warning"|"error", "details": object }] }`。
 
-DTO 与 SQLite 字段分离，但字段含义必须一一映射；时间统一输出 UTC RFC 3339，Task/Session/Checkpoint/Import ID 和 SHA-256 输出字符串，Note/History 自增 ID 输出 JSON 整数。任何破坏兼容性的字段删除、改名或语义改变必须增加 `schemaVersion`；只新增字段时消费者仍必须能够忽略。
+DTO 与 SQLite 字段分离，但字段含义必须一一映射；时间统一输出 UTC RFC 3339。Task ID、Session/Checkpoint/Note/History DTO 中的 `taskId` 和 Note/History 自增 ID 输出 JSON 整数；Session、Checkpoint、Import ID 与 SHA-256 输出字符串。人类模式中的 Task ID 显示为 `#<id>`。任何破坏兼容性的字段删除、改名或语义改变必须增加 `schemaVersion`；只新增字段时消费者仍必须能够忽略。
 
 ## 8. 退出码
 

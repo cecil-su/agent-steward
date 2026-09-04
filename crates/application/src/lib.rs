@@ -6,7 +6,7 @@ mod worktrees;
 use std::path::{Path, PathBuf};
 
 use git_adapter::GitError;
-use rusqlite::ErrorCode;
+use rusqlite::{ErrorCode, Transaction};
 use serde::Serialize;
 use serde_json::{Value, json};
 use steward_core::Warning;
@@ -18,6 +18,16 @@ pub struct ErrorBody {
     pub message: String,
     pub retryable: bool,
     pub details: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TaskListOptions {
+    pub status: Option<String>,
+    pub task_key: Option<String>,
+    pub query: Option<String>,
+    pub page_size: Option<u32>,
+    pub cursor: Option<String>,
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +204,28 @@ impl AppError {
                 2,
             ),
             storage_sqlite::StorageError::Sqlite(error) => Self::from_sqlite(error),
+            storage_sqlite::StorageError::MigrationBlocked {
+                database_version,
+                target_version,
+                legacy_task_id,
+            } => Self::new(
+                "SCHEMA_MIGRATION_BLOCKED",
+                "stop older taskctl worktree operations before upgrading the database",
+                true,
+                json!({
+                    "databaseVersion": database_version,
+                    "targetVersion": target_version,
+                    "legacyTaskId": legacy_task_id,
+                }),
+                4,
+            ),
+            storage_sqlite::StorageError::MigrationGuard { reason } => Self::new(
+                "DATABASE_UNAVAILABLE",
+                "schema migration compatibility barrier could not be established",
+                false,
+                json!({"reason": reason}),
+                10,
+            ),
             storage_sqlite::StorageError::Io(error) => Self::new(
                 "DATABASE_UNAVAILABLE",
                 "database path is unavailable",
@@ -358,7 +390,45 @@ impl Service {
     }
 
     fn connection(&self) -> AppResult<rusqlite::Connection> {
-        storage_sqlite::open_database(&self.database_path).map_err(AppError::from_storage)
+        storage_sqlite::open_database_with_migration_guard(&self.database_path, |tx| {
+            self.acquire_legacy_migration_locks(tx)
+        })
+        .map_err(AppError::from_storage)
+    }
+
+    fn acquire_legacy_migration_locks(
+        &self,
+        tx: &Transaction<'_>,
+    ) -> Result<Vec<git_adapter::WorktreeLock>, storage_sqlite::StorageError> {
+        let mut statement = tx.prepare("SELECT id FROM tasks ORDER BY id ASC")?;
+        let legacy_task_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        let mut locks = Vec::with_capacity(legacy_task_ids.len());
+        for legacy_task_id in legacy_task_ids {
+            match git_adapter::acquire_worktree_lock(
+                &self.database_path,
+                &legacy_task_id,
+                self.lock_root_override.as_deref(),
+            ) {
+                Ok(lock) => locks.push(lock),
+                Err(GitError::OperationBusy) => {
+                    return Err(storage_sqlite::StorageError::MigrationBlocked {
+                        database_version: 6,
+                        target_version: 7,
+                        legacy_task_id,
+                    });
+                }
+                Err(error) => {
+                    return Err(storage_sqlite::StorageError::MigrationGuard {
+                        reason: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(locks)
     }
 }
 
@@ -392,6 +462,47 @@ pub fn warning(code: &str, message: &str, details: Value) -> Warning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v7_migration_refuses_an_active_v6_task_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("legacy.db");
+        std::fs::File::create(&database).unwrap();
+        let lock_root = temp.path().join("locks");
+        let legacy_lock =
+            git_adapter::acquire_worktree_lock(&database, "LEGACY-TASK", Some(&lock_root)).unwrap();
+        let service = Service::new(&database).with_lock_root(&lock_root);
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks(id TEXT PRIMARY KEY);
+                 INSERT INTO tasks(id) VALUES ('LEGACY-TASK');",
+            )
+            .unwrap();
+        let tx = connection.transaction().unwrap();
+
+        let Err(error) = service.acquire_legacy_migration_locks(&tx) else {
+            panic!("held legacy lock must block migration");
+        };
+        assert!(matches!(
+            &error,
+            storage_sqlite::StorageError::MigrationBlocked {
+                database_version: 6,
+                target_version: 7,
+                legacy_task_id,
+            } if legacy_task_id == "LEGACY-TASK"
+        ));
+        let error = AppError::from_storage(error);
+        assert_eq!(error.body.code, "SCHEMA_MIGRATION_BLOCKED");
+        assert!(error.body.retryable);
+        assert_eq!(error.body.details["legacyTaskId"], "LEGACY-TASK");
+
+        drop(legacy_lock);
+        assert_eq!(
+            service.acquire_legacy_migration_locks(&tx).unwrap().len(),
+            1
+        );
+    }
 
     #[test]
     fn partial_error_reports_database_state_without_changing_command_type() {
