@@ -16,23 +16,6 @@ pub(crate) fn resolve_task_id(connection: &Connection, reference: &str) -> AppRe
             "must be a numeric id, #id, or non-empty taskKey",
         ));
     }
-    if let Some(task_key) = reference.strip_prefix("key:") {
-        if task_key.is_empty() {
-            return Err(AppError::invalid(
-                "taskReference",
-                "key: must be followed by a taskKey",
-            ));
-        }
-        return connection
-            .query_row(
-                "SELECT id FROM tasks WHERE task_key=?1",
-                [task_key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(AppError::from_sqlite)?
-            .ok_or_else(|| AppError::not_found("Task", reference));
-    }
     let numeric = if let Some(value) = reference.strip_prefix('#') {
         if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(AppError::invalid(

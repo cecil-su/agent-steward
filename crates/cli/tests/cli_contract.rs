@@ -213,7 +213,7 @@ fn json_cli_supports_minimal_create_stdin_and_all_task_references() {
     assert!(patched.status.success());
     assert_eq!(json_output(&patched)["data"]["task"]["version"], 2);
 
-    for reference in ["2", "#2", "STDIN-KEY", "key:STDIN-KEY"] {
+    for reference in ["2", "#2", "STDIN-KEY"] {
         let shown = run(&[
             "--database",
             database_arg,
@@ -505,7 +505,7 @@ fn task_list_cli_supports_projection_cursor_and_terminal_formats() {
 }
 
 #[test]
-fn concurrent_first_startup_serializes_migrations() {
+fn concurrent_first_startup_initializes_once() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("concurrent.db");
     let children = (0..12)

@@ -39,9 +39,9 @@ cargo run -p taskctl -- \
   --json task list --query 登录 --page-size 20
 ```
 
-Task 使用数据库自动生成且不复用的数字 ID；人类界面显示为 `#12`。可选 `taskKey`（例如 `TASK-1`）只可设置一次。后续命令接受 `12`、`#12` 或 `taskKey` 作为 Task 引用；迁移前恰好为 `12`、`#12` 等歧义形式的旧 Key 使用显式 `key:12`、`key:#12`。`task create` 可以不带参数创建最小 Task，也可以通过 `--input <file>` 或 `--json --input -` 读取完整 UTF-8 JSON。描述字段最初可为 `null`，设置为字符串后不能清空。非空标题统一使用 `MMDD｜类型｜主题`；`task retitle` 可在不重新打开 Task 的前提下修正已关闭任务标题。
+Task 使用数据库自动生成且不复用的数字 ID；人类界面显示为 `#12`。可选 `taskKey`（例如 `TASK-1`）只可设置一次。后续命令接受 `12`、`#12` 或 `taskKey` 作为 Task 引用。`task create` 可以不带参数创建最小 Task，也可以通过 `--input <file>` 或 `--json --input -` 读取完整 UTF-8 JSON。描述字段最初可为 `null`，设置为字符串后不能清空。非空标题统一使用 `MMDD｜类型｜主题`；`task retitle` 可在不重新打开 Task 的前提下修正已关闭任务标题。
 
-Task 列表支持 status、taskKey 和 title/goal/scope 文本筛选、固定长度筛选摘要游标分页及字段投影；终端默认显示表格，单字段可使用 `--format lines`。v6→v7 升级前应停止所有 v6 进程；若仍有 v6 Worktree operation 持有旧 Task ID 锁，v7 会拒绝 migration 而不是并行执行 Git mutation。除创建外，所有面向已有 Task 的 mutation 使用 `--if-version` compare-and-swap；`--json` 输出 `schemaVersion: 2` 稳定 envelope。Worktree 命令仅操作本地现有分支，不提供 `push`、`force`、`clean`、`reset` 或隐式 `stash`。完整合同从 [docs/v0/README.md](docs/v0/README.md) 开始阅读，AI/Agent 的调用约束见 [AGENTS.md](AGENTS.md)。
+Task 列表支持 status、taskKey 和 title/goal/scope 文本筛选、固定长度筛选摘要游标分页及字段投影；终端默认显示表格，单字段可使用 `--format lines`。当前 V0 只初始化新数据库，不提供旧 schema 升级或旧 Key 转义兼容。除创建外，所有面向已有 Task 的 mutation 使用 `--if-version` compare-and-swap；`--json` 输出 `schemaVersion: 2` 稳定 envelope。Worktree 命令仅操作本地现有分支，不提供 `push`、`force`、`clean`、`reset` 或隐式 `stash`。完整合同从 [docs/v0/README.md](docs/v0/README.md) 开始阅读，AI/Agent 的调用约束见 [AGENTS.md](AGENTS.md)。
 
 ## 产品优先级
 

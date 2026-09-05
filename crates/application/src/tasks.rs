@@ -920,13 +920,10 @@ fn optional_description(field: &str, value: Option<String>) -> AppResult<Option<
 fn validate_task_key(value: &str) -> AppResult<String> {
     let value = required("taskKey", value)?;
     let numeric = value.bytes().all(|byte| byte.is_ascii_digit());
-    let displayed_numeric = value.strip_prefix('#').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    });
-    if numeric || displayed_numeric || value.starts_with("key:") {
+    if numeric || value.starts_with('#') {
         return Err(AppError::invalid(
             "taskKey",
-            "must not use numeric task reference syntax or the reserved key: prefix",
+            "must not be purely numeric or start with #",
         ));
     }
     Ok(value)

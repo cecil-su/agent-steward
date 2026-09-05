@@ -35,7 +35,7 @@ taskctl task resume <task-ref> --session <new-session-id> --if-version <version>
 taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reason <text>]
 ```
 
-`<task-ref>` 接受三种常规形式：纯数字 `12`、带展示前缀的 `#12`，或旧的可选 `taskKey`。前两种解析为数据库整数主键，`taskKey` 按唯一键解析。迁移前恰好为 `12` 或 `#12` 的旧字符串 ID 会保存在 `taskKey`，调用方必须用显式 `key:12` 或 `key:#12` 消除歧义；任意以 `key:` 开头的旧 Key 可再加一层前缀，例如旧 Key `key:12` 使用 `key:key:12`。JSON 输出中的 `TaskView.id` 和所有 `taskId` 是整数；人类输出统一显示 `#12`。新 `taskKey` 不能使用纯数字、`#数字` 或保留的 `key:` 前缀，以避免引用歧义；它可在创建时给出，也可在后续 Patch 中从 `null` 设置一次，设置后不可更改或清空。
+`<task-ref>` 接受纯数字 `12`、展示形式 `#12` 或可选 `taskKey`。前两种解析为整数主键，`taskKey` 按原文查询，没有 `key:` 转义语法。JSON 中的 `TaskView.id` 和所有 `taskId` 是整数；人类输出显示 `#12`。`taskKey` 不能为纯数字或以 `#` 开头；可以在创建时设置，也可以从 `null` 设置一次，之后不可更改或清空。
 
 `task list` 默认每页 50 条，最大 200 条，固定按 `updatedAt DESC, id ASC` 排序，并使用 `nextCursor` 继续读取。游标保存固定长度的筛选摘要并绑定创建它时的 `status/taskKey/query` 条件，不内嵌完整筛选文本；因此合法输入产生的 `nextCursor` 一定可被下一页消费，筛选条件变化后复用旧游标返回 `INVALID_INPUT`。`--status` 和 `--task-key` 精确匹配，`--query` 对 title/goal/scope 做转义后的 SQLite `LIKE` 包含匹配，ASCII 字母不区分大小写，非 ASCII 遵循 SQLite 默认比较语义，`%` 和 `_` 按普通字符处理。`--fields title` 或 `--fields id,title,status` 只投影白名单字段；不传时 JSON 返回完整 TaskView。未知、重复或空字段拒绝，字段白名单就是下文 `TaskView` 的 camelCase 字段集合；投影不改变筛选、排序和游标计算。
 
@@ -56,9 +56,9 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 }
 ```
 
-`title` 非空时统一使用 `MMDD｜类型｜主题`，分隔符必须是全角 `｜`，`MMDD` 必须是有效月日，类型只能是 `功能`、`设计`、`修复`、`优化`、`发布`、`探索`、`文档` 或 `研究`，主题不能为空或带首尾空白。调用方负责按会话时间转换到 `Asia/Shanghai` 后生成 `MMDD`；核心校验结构、月日和类型，不从机器时区猜测日期。迁移前或规则启用前的既有标题保持可读，但后续新建或修改 title 必须满足该格式。
+`title` 非空时统一使用 `MMDD｜类型｜主题`，分隔符必须是全角 `｜`，`MMDD` 必须是有效月日，类型只能是 `功能`、`设计`、`修复`、`优化`、`发布`、`探索`、`文档` 或 `研究`，主题不能为空或带首尾空白。调用方负责按会话时间转换到 `Asia/Shanghai` 后生成 `MMDD`；核心校验结构、月日和类型，不从机器时区猜测日期。
 
-`update --input` 是 JSON Merge Patch 风格的受限字段更新，只允许 `taskKey`、`title`、`goal`、`scope`、`acceptanceCriteria` 和 `nextStep`。省略表示不修改；`nextStep` 可显式为 `null`，字符串值必须非空白。四个描述字段初始可为 `null`，但设置为字符串后不能通过 `null` 清空；清空请求返回 `INVALID_INPUT` 且不递增 version。`taskKey` 仅允许从 `null` 设置为非空、非歧义引用语法且不以 `key:` 开头的字符串，之后不可改变；空 Patch、无实际变化的 Patch 和未知字段均拒绝。单次 Patch 无论改变多少字段，都只执行一次 CAS、递增一次 version 并写一条 `task.updated` History。状态、阻塞和关闭结果只能通过专用命令改变。
+`update --input` 是 JSON Merge Patch 风格的受限字段更新，只允许 `taskKey`、`title`、`goal`、`scope`、`acceptanceCriteria` 和 `nextStep`。省略表示不修改；`nextStep` 可显式为 `null`，字符串值必须非空白。四个描述字段初始可为 `null`，但设置为字符串后不能通过 `null` 清空；清空请求返回 `INVALID_INPUT` 且不递增 version。`taskKey` 仅允许从 `null` 设置为非空、非纯数字且不以 `#` 开头的字符串，之后不可改变；空 Patch、无实际变化的 Patch 和未知字段均拒绝。单次 Patch 无论改变多少字段，都只执行一次 CAS、递增一次 version 并写一条 `task.updated` History。状态、阻塞和关闭结果只能通过专用命令改变。
 
 `retitle` 是唯一允许修改已关闭 Task 的命令。它只接受符合命名规则的非空 title，执行一次 CAS，仅修改 `title`、`version` 和 `updatedAt`，写入一条 `task.retitled` History；不得重新打开 Task、改变关闭结果或修改其他字段。相同 title 作为无实际变化请求拒绝。未关闭 Task 也可使用该命令做 title-only 修正。
 
@@ -208,7 +208,7 @@ AI 应遵守：
 }
 ```
 
-失败时 `ok=false`、`data=null`，`error` 至少包含 `code`、`message`、`retryable` 和 `details`。可选字段必须显式输出为 `null`，不能因为空而省略；输出消费者必须忽略未来新增字段。输入中的未知字段拒绝，以防拼写错误静默丢失。持久化 Checkpoint 或 History JSON 无法解码时返回 `DATABASE_UNAVAILABLE`，不得转换为空数组或 `null`；`resume` 必须在创建新 Session 前完成 Checkpoint 解码。v6→v7 migration 不重写既有 History payload：迁移前的 `task.created` 事件允许只有旧合同中的 `title`，v7 新建事件才要求同时显式包含 `title` 和 `taskKey`。
+失败时 `ok=false`、`data=null`，`error` 至少包含 `code`、`message`、`retryable` 和 `details`。可选字段必须显式输出为 `null`，不能因为空而省略；输出消费者必须忽略未来新增字段。输入中的未知字段拒绝，以防拼写错误静默丢失。持久化 Checkpoint 或 History JSON 无法解码时返回 `DATABASE_UNAVAILABLE`，不得转换为空数组或 `null`；`resume` 必须在创建新 Session 前完成 Checkpoint 解码。
 
 所有成功的 Task mutation 在 `data.task` 中返回完整 Task，其 `version` 是 mutation 后的新版本。`VERSION_CONFLICT` 的 `details` 返回 `expectedVersion` 和 `currentVersion`。Git 已经改变现场，或操作期间无法证明 Git 与数据库一致时，返回 `PARTIAL_EXTERNAL_STATE`；`details` 返回规范化 Repository/Worktree 路径、实际或 `unknown` Git 状态、稳定的 `databaseState`（`unchanged`、`updated` 或 `unknown`），以及可执行的 `adopt`、`detach` 或 `taskctl doctor` 建议。`schemaVersion: 2` 表示 Task 主键和所有 `taskId` 已改为 JSON 整数，并新增 `taskKey` 及可空描述语义；旧 `schemaVersion: 1` 消费者不得把该结果当作兼容响应。`recommendedCommand` 保持字符串；`recommendedArgs` 是不经过 Shell 拼接的参数数组，首项为 `taskctl`，并显式携带 `--database` 和规范化数据库路径；数字 Task ID、Repository 与 Worktree 路径各自占用独立数组元素。
 
@@ -222,11 +222,10 @@ V0 稳定错误码固定为：
 | --- | ---: | --- | --- |
 | `INVALID_INPUT` | 2 | false | `field`、`reason` |
 | `NOT_FOUND` | 2 | false | `entityType`、`id` |
-| `UNSUPPORTED_SCHEMA_VERSION` | 2 | false | `databaseVersion`、`maxSupportedVersion` |
+| `UNSUPPORTED_SCHEMA_VERSION` | 2 | false | `databaseVersion`、`supportedVersion` |
 | `VERSION_CONFLICT` | 4 | true | `expectedVersion`、`currentVersion` |
 | `SESSION_CONFLICT` | 4 | false | `currentSessionId`、`requestedSessionId` |
 | `DATABASE_BUSY` | 4 | true | `timeoutMs` |
-| `SCHEMA_MIGRATION_BLOCKED` | 4 | true | `databaseVersion`、`targetVersion`、`legacyTaskId` |
 | `WORKTREE_OPERATION_BUSY` | 4 | true | `taskId`、`operation` |
 | `CONSTRAINT_VIOLATION` | 4 | false | `constraint` |
 | `WORKTREE_SAFETY_REFUSED` | 5 | false | `reason`、`worktreePath` |

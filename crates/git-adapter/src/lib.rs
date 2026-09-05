@@ -227,15 +227,6 @@ pub fn identify_target(path: &Path) -> Result<TargetPathIdentity, GitError> {
     })
 }
 
-pub fn worktree_path_key(path: &Path) -> Result<String, GitError> {
-    steward_core::filesystem_path_key(path).map_err(|error| {
-        GitError::PathIdentity(format!(
-            "cannot determine path comparison key for {}: {error}",
-            path.display()
-        ))
-    })
-}
-
 pub fn path_exists(path: &Path) -> Result<bool, GitError> {
     path.try_exists().map_err(|error| {
         GitError::PathIdentity(format!("cannot inspect {}: {error}", path.display()))
@@ -253,9 +244,9 @@ pub fn paths_equivalent(left: &Path, right: &Path) -> Result<bool, GitError> {
     if left_exists && right_exists {
         return Ok(identify_existing(left)? == identify_existing(right)?);
     }
-    steward_core::filesystem_paths_equal(left, right).map_err(|error| {
-        GitError::PathIdentity(format!("cannot compare filesystem paths safely: {error}"))
-    })
+    // Missing paths have no object identity: only the exact canonical target
+    // spelling above can establish equality. Never probe or emulate name rules.
+    Ok(false)
 }
 
 fn require_unicode_path(path: &Path) -> Result<(), GitError> {
@@ -476,9 +467,8 @@ pub fn find_worktree(repo: &Path, path: &Path) -> Result<Option<ObservedWorktree
     if let Some(item) = worktrees.iter().find(|item| item.path == target) {
         return Ok(Some(item.clone()));
     }
-    let target_key = worktree_path_key(&target)?;
     for item in worktrees {
-        if worktree_path_key(&item.path)? == target_key {
+        if paths_equivalent(&item.path, &target)? {
             return Ok(Some(item));
         }
     }
@@ -750,7 +740,6 @@ mod tests {
         let existing = temp
             .path()
             .join(std::ffi::OsString::from_vec(b"repository-\xff".to_vec()));
-        fs::create_dir(&existing).unwrap();
         assert!(matches!(
             identify_existing(&existing),
             Err(GitError::PathIdentity(_))
@@ -763,7 +752,7 @@ mod tests {
             Err(GitError::PathIdentity(_))
         ));
         assert!(matches!(
-            worktree_path_key(&target),
+            canonicalize_target(&target),
             Err(GitError::PathIdentity(_))
         ));
     }

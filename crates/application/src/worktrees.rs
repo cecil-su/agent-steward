@@ -66,8 +66,6 @@ impl Service {
         let target_identity = git_adapter::identify_target(path)
             .map_err(|error| AppError::from_git(error, path.to_str()))?;
         let target = target_identity.canonical_path.clone();
-        git_adapter::worktree_path_key(&target)
-            .map_err(|error| AppError::from_git(error, target.to_str()))?;
         if let Some(owner) = worktree_path_owner(&connection, &target)? {
             return Err(AppError::worktree_safety(
                 format!("worktree path is already registered by task #{owner}"),
@@ -215,66 +213,27 @@ impl Service {
                 json!(error.body),
             )
         })?;
-        let tx = storage_sqlite::write_transaction(&mut connection).map_err(|error| {
-            let error = AppError::from_storage(error);
-            created_worktree_database_failure(
-                self,
-                task_id,
-                &repo_info.repository_path,
-                &created,
-                expected,
-                "databaseTransaction",
-                json!(error.body),
-            )
-        })?;
-        let current = load_task(&tx, task_id).map_err(|_| {
-            AppError::partial(
-                repo_info.repository_path.to_str(),
-                target.to_str(),
-                json!({"created": true, "branch": branch}),
-                PartialDatabaseState::Unchanged,
-                self.recovery_command(["doctor"]),
-            )
-        })?;
-        if current.version != expected || current.worktree_path.is_some() {
-            return Err(AppError::partial(
-                repo_info.repository_path.to_str(),
-                target.to_str(),
-                json!({"created": true, "branch": branch}),
-                PartialDatabaseState::Unchanged,
-                adopt_recovery_for_created_worktree(
-                    self,
-                    task_id,
-                    &repo_info.repository_path,
-                    &repo_info.common_dir,
-                    &target,
-                ),
-            ));
-        }
-        let target_key = git_adapter::worktree_path_key(&target).map_err(|error| {
-            AppError::partial_with_diagnostics(
-                repo_info.repository_path.to_str(),
-                target.to_str(),
-                json!({"created": true, "branch": branch}),
-                PartialDatabaseState::Unchanged,
-                self.recovery_command(["doctor"]),
-                json!({"phase": "databaseTransaction", "pathKeyError": error.to_string()}),
-            )
-        })?;
-        if !matches!(worktree_path_owner(&tx, &target), Ok(None)) {
-            return Err(AppError::partial(
-                repo_info.repository_path.to_str(),
-                target.to_str(),
-                json!({"created": true, "branch": branch}),
-                PartialDatabaseState::Unchanged,
-                self.recovery_command(["doctor"]),
-            ));
-        }
-        let changed = tx
-            .execute(
+        // End the transaction before re-observing Git or opening a recovery connection.
+        let persisted = (|| -> AppResult<steward_core::TaskView> {
+            let tx = storage_sqlite::write_transaction(&mut connection)
+                .map_err(AppError::from_storage)?;
+            let current = load_task(&tx, task_id)?;
+            check_version(&current, expected)?;
+            if !task_without_worktree_references(&current) {
+                return Err(AppError::worktree_safety(
+                    "task already has worktree references",
+                    target.to_str(),
+                ));
+            }
+            if let Some(owner) = worktree_path_owner(&tx, &target)? {
+                return Err(AppError::worktree_safety(
+                    format!("worktree path is already registered by task #{owner}"),
+                    target.to_str(),
+                ));
+            }
+            tx.execute(
                 "UPDATE tasks SET repository_path=?3,repository_common_dir=?4,repository_branch=?5,
-                    worktree_path=?6,worktree_path_key=?7,version=version+1,updated_at=?8
-                 WHERE id=?1 AND version=?2",
+                    worktree_path=?6,version=version+1,updated_at=?7 WHERE id=?1 AND version=?2",
                 params![
                     task_id,
                     expected,
@@ -285,27 +244,36 @@ impl Service {
                     repo_info.common_dir.to_str().expect("validated UTF-8 path"),
                     branch,
                     target.to_str().expect("validated UTF-8 path"),
-                    target_key,
                     timestamp
                 ],
             )
-            .map_err(|_| {
-                AppError::partial(
+            .map_err(AppError::from_sqlite)?;
+            insert_history(
+                &tx,
+                task_id,
+                "worktree.created",
+                current.current_session_id.as_deref(),
+                "worktree created",
+                worktree_payload(&repo_info, &target, branch),
+                &timestamp,
+            )?;
+            let response = load_task(&tx, task_id)?;
+            tx.commit().map_err(|error| {
+                database_commit_unknown(
+                    self,
                     repo_info.repository_path.to_str(),
                     target.to_str(),
                     json!({"created": true, "branch": branch}),
-                    PartialDatabaseState::Unchanged,
-                    adopt_recovery_for_created_worktree(
-                        self,
-                        task_id,
-                        &repo_info.repository_path,
-                        &repo_info.common_dir,
-                        &target,
-                    ),
+                    &error,
                 )
             })?;
-        if changed != 1 {
-            return Err(AppError::partial(
+            Ok(response)
+        })();
+        let response_task = persisted.map_err(|error| {
+            if error.body.code == "PARTIAL_EXTERNAL_STATE" {
+                return error;
+            }
+            AppError::partial_with_diagnostics(
                 repo_info.repository_path.to_str(),
                 target.to_str(),
                 json!({"created": true, "branch": branch}),
@@ -317,48 +285,7 @@ impl Service {
                     &repo_info.common_dir,
                     &target,
                 ),
-            ));
-        }
-        insert_history(
-            &tx,
-            task_id,
-            "worktree.created",
-            current.current_session_id.as_deref(),
-            "worktree created",
-            worktree_payload(&repo_info, &target, branch),
-            &timestamp,
-        )
-        .map_err(|_| {
-            AppError::partial(
-                repo_info.repository_path.to_str(),
-                target.to_str(),
-                json!({"created": true, "branch": branch}),
-                PartialDatabaseState::Unchanged,
-                adopt_recovery_for_created_worktree(
-                    self,
-                    task_id,
-                    &repo_info.repository_path,
-                    &repo_info.common_dir,
-                    &target,
-                ),
-            )
-        })?;
-        let response_task = load_task(&tx, task_id).map_err(|_| {
-            AppError::partial(
-                repo_info.repository_path.to_str(),
-                target.to_str(),
-                json!({"created": true, "branch": branch}),
-                PartialDatabaseState::Unchanged,
-                self.recovery_command(["doctor"]),
-            )
-        })?;
-        tx.commit().map_err(|_| {
-            AppError::partial(
-                repo_info.repository_path.to_str(),
-                target.to_str(),
-                json!({"created": true, "branch": branch}),
-                PartialDatabaseState::Unknown,
-                self.recovery_command(["doctor"]),
+                json!({"phase": "databaseTransaction", "databaseError": error.body}),
             )
         })?;
         let status = git_adapter::observe_status(
@@ -610,7 +537,7 @@ impl Service {
         }
         tx.execute(
             "UPDATE tasks SET repository_path=NULL,repository_common_dir=NULL,repository_branch=NULL,
-                worktree_path=NULL,worktree_path_key=NULL,version=version+1,updated_at=?3
+                worktree_path=NULL,version=version+1,updated_at=?3
              WHERE id=?1 AND version=?2",
             params![task_id, expected, timestamp],
         )
@@ -808,8 +735,6 @@ impl Service {
                 current.worktree_path.as_deref(),
             ));
         }
-        let target_key = git_adapter::worktree_path_key(&target)
-            .map_err(|error| AppError::from_git(error, target.to_str()))?;
         if let Some(owner) = worktree_path_owner(&tx, &target)? {
             return Err(AppError::worktree_safety(
                 format!("worktree path is already registered by task #{owner}"),
@@ -819,7 +744,7 @@ impl Service {
         let changed = tx
             .execute(
                 "UPDATE tasks SET repository_path=?3,repository_common_dir=?4,repository_branch=?5,
-                    worktree_path=?6,worktree_path_key=?7,version=version+1,updated_at=?8
+                    worktree_path=?6,version=version+1,updated_at=?7
                  WHERE id=?1 AND version=?2",
                 params![
                     task_id,
@@ -828,7 +753,6 @@ impl Service {
                     info.common_dir.to_str().expect("validated UTF-8 path"),
                     branch,
                     target.to_str().expect("validated UTF-8 path"),
-                    target_key,
                     timestamp
                 ],
             )
@@ -1040,7 +964,7 @@ impl Service {
         }
         let changed = tx.execute(
             "UPDATE tasks SET repository_path=NULL,repository_common_dir=NULL,repository_branch=NULL,
-                worktree_path=NULL,worktree_path_key=NULL,version=version+1,updated_at=?3
+                worktree_path=NULL,version=version+1,updated_at=?3
              WHERE id=?1 AND version=?2",
             params![task_id, expected, timestamp],
         )
@@ -1514,9 +1438,9 @@ mod tests {
         };
         let cause = json!({
             "code": "UNSUPPORTED_SCHEMA_VERSION",
-            "message": "database schema is newer than this taskctl build",
+            "message": "database schema is incompatible; use a new database for this build",
             "retryable": false,
-            "details": {"databaseVersion": 99, "maxSupportedVersion": 6},
+            "details": {"databaseVersion": 99, "supportedVersion": 1},
         });
 
         let create_error = created_worktree_database_failure(
@@ -1599,7 +1523,7 @@ mod tests {
                     "title":"0904｜功能｜Owner",
                     "goal":"Protect the live Worktree",
                     "scope":"Test",
-                    "acceptanceCriteria":"A stale path key cannot hide the owner"
+                    "acceptanceCriteria":"The existing worktree has one owner"
                 }"#,
             )
             .unwrap();
@@ -1611,7 +1535,7 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE tasks SET repository_path='repo',repository_common_dir='common',
-                    repository_branch='feature',worktree_path=?2,worktree_path_key='stale-key'
+                    repository_branch='feature',worktree_path=?2
                  WHERE id=?1",
                 params![owner_id, worktree.to_str().unwrap()],
             )
@@ -1669,20 +1593,18 @@ mod tests {
         let repository = temp.path().join("repository");
         let common_dir = temp.path().join("common");
         let worktree = temp.path().join("worktree");
-        let worktree_key = git_adapter::worktree_path_key(&worktree).unwrap();
         service
             .connection()
             .unwrap()
             .execute(
                 "UPDATE tasks SET repository_path=?2,repository_common_dir=?3,
-                    repository_branch='feature',worktree_path=?4,worktree_path_key=?5,
+                    repository_branch='feature',worktree_path=?4,
                     version=2 WHERE id=?1",
                 params![
                     task_numeric_id(&service, "TASK DETACH RECOVERY"),
                     repository.to_string_lossy(),
                     common_dir.to_string_lossy(),
                     worktree.to_string_lossy(),
-                    worktree_key,
                 ],
             )
             .unwrap();
@@ -1741,20 +1663,18 @@ mod tests {
         let common_dir = git_adapter::repository_info(&repository)
             .unwrap()
             .common_dir;
-        let worktree_key = git_adapter::worktree_path_key(&worktree).unwrap();
         service
             .connection()
             .unwrap()
             .execute(
                 "UPDATE tasks SET repository_path=?2,repository_common_dir=?3,
-                    repository_branch='feature',worktree_path=?4,worktree_path_key=?5,
+                    repository_branch='feature',worktree_path=?4,
                     version=2 WHERE id=?1",
                 params![
                     task_numeric_id(&service, "TASK OWNER"),
                     repository.to_string_lossy(),
                     common_dir.to_string_lossy(),
                     worktree.to_string_lossy(),
-                    worktree_key,
                 ],
             )
             .unwrap();
@@ -1916,7 +1836,6 @@ mod tests {
         let registered_info = git_adapter::repository_info(&registered_repository).unwrap();
         let current_info = git_adapter::repository_info(&current_repository).unwrap();
         let missing_worktree = temp.path().join("missing-worktree");
-        let worktree_key = git_adapter::worktree_path_key(&missing_worktree).unwrap();
 
         let service = Service::new(temp.path().join("state.sqlite"))
             .with_lock_root(temp.path().join("locks"));
@@ -1936,14 +1855,13 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE tasks SET repository_path=?2,repository_common_dir=?3,
-                    repository_branch='main',worktree_path=?4,worktree_path_key=?5,
+                    repository_branch='main',worktree_path=?4,
                     version=2 WHERE id=?1",
                 params![
                     task_numeric_id(&service, "TASK COMMON DIR"),
                     current_info.repository_path.to_string_lossy(),
                     registered_info.common_dir.to_string_lossy(),
                     missing_worktree.to_string_lossy(),
-                    worktree_key,
                 ],
             )
             .unwrap();

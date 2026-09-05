@@ -440,40 +440,6 @@ fn numeric_hash_and_task_key_references_cross_task_relations() {
 }
 
 #[test]
-fn explicit_key_prefix_resolves_legacy_numeric_and_reserved_task_keys() {
-    let temp = tempfile::tempdir().unwrap();
-    let service = service(&temp);
-    for _ in 0..12 {
-        service.task_create_minimal().unwrap();
-    }
-    storage_sqlite::open_database(service.database_path())
-        .unwrap()
-        .execute_batch(
-            "UPDATE tasks SET task_key='12' WHERE id=1;
-             UPDATE tasks SET task_key='#12' WHERE id=2;
-             UPDATE tasks SET task_key='key:12' WHERE id=3;",
-        )
-        .unwrap();
-
-    assert_eq!(service.task_show("12").unwrap().data["task"]["id"], 12);
-    assert_eq!(service.task_show("#12").unwrap().data["task"]["id"], 12);
-    assert_eq!(service.task_show("key:12").unwrap().data["task"]["id"], 1);
-    assert_eq!(service.task_show("key:#12").unwrap().data["task"]["id"], 2);
-    assert_eq!(
-        service.task_show("key:key:12").unwrap().data["task"]["id"],
-        3
-    );
-    let empty = service.task_show("key:").unwrap_err();
-    assert_eq!(empty.body.code, "INVALID_INPUT");
-    assert_eq!(empty.body.details["field"], "taskReference");
-    let reserved = service
-        .task_update("#4", 1, r#"{"taskKey":"key:future"}"#)
-        .unwrap_err();
-    assert_eq!(reserved.body.code, "INVALID_INPUT");
-    assert_eq!(reserved.body.details["field"], "taskKey");
-}
-
-#[test]
 fn task_list_supports_filters_projection_and_stable_cursor_pagination() {
     let temp = tempfile::tempdir().unwrap();
     let service = service(&temp);
@@ -593,6 +559,21 @@ fn task_list_supports_filters_projection_and_stable_cursor_pagination() {
             })
             .unwrap_err();
         assert_eq!(invalid.body.details["field"], "pageSize");
+    }
+}
+
+#[test]
+fn task_keys_are_literal_and_cannot_shadow_numeric_references() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    service.task_create("key:12", "{}").unwrap();
+    assert_eq!(service.task_show("key:12").unwrap().data["task"]["id"], 1);
+    assert!(service.task_show("key:key:12").is_err());
+    for key in ["12", "#12", "#label"] {
+        assert_eq!(
+            service.task_create(key, "{}").unwrap_err().body.code,
+            "INVALID_INPUT"
+        );
     }
 }
 
@@ -906,83 +887,6 @@ fn worktree_create_status_dirty_refusal_and_remove_flow() {
     assert!(!worktree.exists());
 }
 
-#[test]
-fn worktree_create_uses_detected_filesystem_path_ownership() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    git(&repo, ["add", "README.md"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "feature"]);
-
-    let service = service(&temp);
-    for task_id in ["TASK-WT-OWNER", "TASK-WT-CREATOR"] {
-        service
-            .task_create(
-                task_id,
-                &format!(
-                    r#"{{
-                        "title":"0904｜功能｜{task_id}",
-                        "goal":"Protect registered Worktree ownership",
-                        "scope":"Synthetic repository",
-                        "acceptanceCriteria":"Only one Task owns the path"
-                    }}"#
-                ),
-            )
-            .unwrap();
-    }
-    let worktree = temp.path().join("MixedParent/Worktree");
-    fs::create_dir(worktree.parent().unwrap()).unwrap();
-    service
-        .worktree_create("TASK-WT-OWNER", 1, &repo, "feature", &worktree)
-        .unwrap();
-    git(&repo, ["worktree", "remove", worktree.to_str().unwrap()]);
-    assert!(!worktree.exists());
-    fs::remove_dir(worktree.parent().unwrap()).unwrap();
-    assert!(
-        git_adapter::find_worktree(&repo, &worktree)
-            .unwrap()
-            .is_none()
-    );
-
-    let attempted_worktree = temp.path().join("mixedparent/worktree");
-    let equivalent = git_adapter::worktree_path_key(&temp.path().join("Alias-Aa")).unwrap()
-        == git_adapter::worktree_path_key(&temp.path().join("alias-aA")).unwrap();
-    if equivalent {
-        let error = service
-            .worktree_create(
-                "TASK-WT-CREATOR",
-                1,
-                &temp.path().join("repository-that-must-not-be-read"),
-                "feature",
-                &attempted_worktree,
-            )
-            .unwrap_err();
-        assert_eq!(error.body.code, "WORKTREE_SAFETY_REFUSED");
-        assert!(error.body.details["reason"].as_str().is_some_and(|reason| {
-            reason.contains(&format!("#{}", task_id(&service, "TASK-WT-OWNER")))
-        }));
-        assert!(!attempted_worktree.exists());
-    } else {
-        fs::create_dir(attempted_worktree.parent().unwrap()).unwrap();
-        let created = service
-            .worktree_create("TASK-WT-CREATOR", 1, &repo, "feature", &attempted_worktree)
-            .unwrap();
-        assert_eq!(created.data["task"]["version"], 2);
-        assert!(attempted_worktree.exists());
-    }
-    let creator = service.task_show("TASK-WT-CREATOR").unwrap();
-    assert_eq!(
-        creator.data["task"]["version"],
-        if equivalent { 1 } else { 2 }
-    );
-    assert_eq!(creator.data["task"]["worktreePath"].is_null(), equivalent);
-}
-
 #[cfg(unix)]
 #[test]
 fn worktree_create_rejects_a_non_utf8_target_before_git_mutation() {
@@ -1096,6 +1000,67 @@ fn worktree_create_does_not_commit_a_missing_post_checkout_directory() {
     assert_eq!(changes, vec!["task.created"]);
 }
 
+#[cfg(unix)]
+#[test]
+fn unicode_worktree_version_conflict_returns_usable_adopt_after_rollback() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, ["init", "-b", "main"]);
+    git(&repo, ["config", "user.email", "tests@example.invalid"]);
+    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
+    git(&repo, ["commit", "--allow-empty", "-m", "fixture"]);
+    git(&repo, ["branch", "feature"]);
+    let hook = repo.join(".git/hooks/post-checkout");
+    fs::write(&hook, "#!/bin/sh\ncommon=$(git rev-parse --git-common-dir) || exit 1\ntouch \"$common/review-ready\"\ni=0\nwhile [ ! -f \"$common/review-continue\" ] && [ \"$i\" -lt 100 ]; do\n  sleep 0.05\n  i=$((i+1))\ndone\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let service = service(&temp);
+    service.task_create_minimal().unwrap();
+    let worktree = temp.path().join("工作树");
+    let worker = {
+        let service = service.clone();
+        let repo = repo.clone();
+        let worktree = worktree.clone();
+        std::thread::spawn(move || service.worktree_create("1", 1, &repo, "feature", &worktree))
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !repo.join(".git/review-ready").exists() {
+        assert!(Instant::now() < deadline, "Git hook did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    service
+        .task_note("1", 1, "progress", "Concurrent task update")
+        .unwrap();
+    fs::write(repo.join(".git/review-continue"), "").unwrap();
+    let error = worker.join().unwrap().unwrap_err();
+    assert_eq!(error.body.code, "PARTIAL_EXTERNAL_STATE");
+    assert_eq!(error.body.details["databaseState"], "unchanged");
+    assert_eq!(error.body.details["recommendedArgs"][4], "adopt");
+    assert_eq!(
+        error.body.details["recommendedArgs"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        "2"
+    );
+    let task = service.task_show("1").unwrap();
+    assert!(task.data["task"]["worktreePath"].is_null());
+    let adopted = service.worktree_adopt("1", 2, &repo, &worktree).unwrap();
+    assert_eq!(version(&adopted), 3);
+    let history = service.history("1").unwrap();
+    assert!(
+        !history.data["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["changeType"] == "worktree.created")
+    );
+}
+
 #[test]
 fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_removal() {
     let temp = tempfile::tempdir().unwrap();
@@ -1109,10 +1074,6 @@ fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_remov
     git(&repo, ["commit", "-m", "fixture"]);
     git(&repo, ["branch", "unicode"]);
     let worktree = temp.path().join("工作树");
-    git(
-        &repo,
-        ["worktree", "add", worktree.to_str().unwrap(), "unicode"],
-    );
 
     let service = service(&temp);
     for task_id in ["TASK-WT-UNICODE-OWNER", "TASK-WT-UNICODE-ADOPTER"] {
@@ -1124,23 +1085,15 @@ fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_remov
                         "title":"0904｜功能｜{task_id}",
                         "goal":"Keep one live Worktree owner",
                         "scope":"Synthetic repository",
-                        "acceptanceCriteria":"Stale comparison keys cannot hide ownership"
+                        "acceptanceCriteria":"One live worktree has one owner"
                     }}"#
                 ),
             )
             .unwrap();
     }
     service
-        .worktree_adopt("TASK-WT-UNICODE-OWNER", 1, &repo, &worktree)
+        .worktree_create("TASK-WT-UNICODE-OWNER", 1, &repo, "unicode", &worktree)
         .unwrap();
-    storage_sqlite::open_database(service.database_path())
-        .unwrap()
-        .execute(
-            "UPDATE tasks SET worktree_path_key='stale-key' WHERE id=?1",
-            [task_id(&service, "TASK-WT-UNICODE-OWNER")],
-        )
-        .unwrap();
-
     let error = service
         .worktree_adopt("TASK-WT-UNICODE-ADOPTER", 1, &repo, &worktree)
         .unwrap_err();
@@ -1193,7 +1146,7 @@ fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_remov
 }
 
 #[test]
-fn worktree_adopt_uses_live_owner_result_when_persisted_keys_collide() {
+fn worktree_adopt_allows_distinct_worktrees() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -1231,7 +1184,7 @@ fn worktree_adopt_uses_live_owner_result_when_persisted_keys_collide() {
                         "title":"0904｜功能｜{task_id}",
                         "goal":"Use live Worktree ownership",
                         "scope":"Synthetic repository",
-                        "acceptanceCriteria":"A stale diagnostic key cannot reject a distinct Worktree"
+                        "acceptanceCriteria":"A distinct Worktree can have its own Task"
                     }}"#
                 ),
             )
@@ -1240,15 +1193,6 @@ fn worktree_adopt_uses_live_owner_result_when_persisted_keys_collide() {
     service
         .worktree_adopt("TASK-WT-KEY-OWNER", 1, &repo, &owner_worktree)
         .unwrap();
-    let adopter_key = git_adapter::worktree_path_key(&adopter_worktree).unwrap();
-    storage_sqlite::open_database(service.database_path())
-        .unwrap()
-        .execute(
-            "UPDATE tasks SET worktree_path_key=?2 WHERE id=?1",
-            rusqlite::params![task_id(&service, "TASK-WT-KEY-OWNER"), adopter_key],
-        )
-        .unwrap();
-
     let adopted = service
         .worktree_adopt("TASK-WT-KEY-ADOPTER", 1, &repo, &adopter_worktree)
         .unwrap();
@@ -1353,17 +1297,11 @@ fn worktree_adopt_doctor_and_detach_recover_external_state() {
     );
 
     let expected_path = worktree.with_file_name("RECOVERY WORKTREE;$");
-    let equivalent = git_adapter::worktree_path_key(&worktree).unwrap()
-        == git_adapter::worktree_path_key(&expected_path).unwrap();
-    let detached = if equivalent {
-        service.worktree_detach(task_id, 2, &expected_path).unwrap()
-    } else {
-        let refused = service
-            .worktree_detach(task_id, 2, &expected_path)
-            .unwrap_err();
-        assert_eq!(refused.body.code, "WORKTREE_SAFETY_REFUSED");
-        service.worktree_detach(task_id, 2, &worktree).unwrap()
-    };
+    let refused = service
+        .worktree_detach(task_id, 2, &expected_path)
+        .unwrap_err();
+    assert_eq!(refused.body.code, "WORKTREE_SAFETY_REFUSED");
+    let detached = service.worktree_detach(task_id, 2, &worktree).unwrap();
     assert_eq!(version(&detached), 3);
     assert_eq!(detached.data["worktreeStatus"]["registered"], false);
     let history = service.history(task_id).unwrap();
@@ -1502,19 +1440,17 @@ fn doctor_does_not_recommend_detach_for_a_different_repository_common_dir() {
             }"#,
         )
         .unwrap();
-    let worktree_key = git_adapter::worktree_path_key(&missing_worktree).unwrap();
     storage_sqlite::open_database(service.database_path())
         .unwrap()
         .execute(
             "UPDATE tasks SET repository_path=?2,repository_common_dir=?3,
-                repository_branch='main',worktree_path=?4,worktree_path_key=?5,
+                repository_branch='main',worktree_path=?4,
                 version=2 WHERE id=?1",
             rusqlite::params![
                 task_id(&service, "TASK-DOCTOR-COMMON-DIR"),
                 current_info.repository_path.to_string_lossy(),
                 registered_info.common_dir.to_string_lossy(),
                 missing_worktree.to_string_lossy(),
-                worktree_key,
             ],
         )
         .unwrap();

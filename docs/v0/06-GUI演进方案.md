@@ -88,7 +88,7 @@ Task 列表 Query 与 CLI 使用相同的筛选、游标分页和字段白名单
 
 1. Core 和 Application Service 不依赖终端；
 2. CLI 人类输出与结构化结果分离；
-3. SQLite Schema 和 migration 已版本化；
+3. SQLite 使用单一 Schema 和 `user_version` 标识；
 4. 所有数据库写入只经过 Application Service，并具有事务和并发测试；
 5. Worktree 状态由 Git 实时提供；
 6. 手工 CLI 流程在没有 Hook 时可以完整工作；

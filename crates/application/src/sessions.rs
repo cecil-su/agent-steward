@@ -608,13 +608,7 @@ impl Service {
                 row.get(0)
             })
             .map_err(AppError::from_sqlite)?;
-        let schema: i64 = connection
-            .query_row(
-                "SELECT COALESCE(MAX(version),0) FROM schema_migrations",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(AppError::from_sqlite)?;
+        let schema = storage_sqlite::schema_version(&connection).map_err(AppError::from_storage)?;
         let mut checks = vec![
             json!({"code":"SCHEMA_VERSION","status":"ok","details":{"version":schema}}),
             json!({"code":"SQLITE_QUICK_CHECK","status":if quick == "ok" {"ok"} else {"error"},"details":{"result":quick}}),

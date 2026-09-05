@@ -19,7 +19,7 @@ flowchart LR
     CLI["taskctl<br/>CLI"]
     APP["steward-application<br/>业务用例与事务"]
     CORE["steward-core<br/>DTO 与共享合同"]
-    DB["storage-sqlite<br/>连接、Schema、Migration"]
+    DB["storage-sqlite<br/>连接、Schema、初始化"]
     GIT["git-adapter<br/>路径、锁、Git 实时状态"]
     SQLITE[(SQLite)]
     WORKTREE[(Git / 文件系统)]
@@ -43,18 +43,18 @@ flowchart LR
 | 区域 | 代码入口 | 主要职责 |
 | --- | --- | --- |
 | CLI | [`crates/cli/src/main.rs`](crates/cli/src/main.rs) | Clap 命令树、UTF-8 文件/stdin JSON 输入、Task 列表表格/lines 渲染、危险操作确认、调用 `Service`、JSON envelope、退出码和权限警告 |
-| Application 门面 | [`crates/application/src/lib.rs`](crates/application/src/lib.rs) | `Service`、`Outcome`、v6→v7 旧 Worktree 锁 migration barrier、稳定错误映射、部分外部状态和恢复命令 |
+| Application 门面 | [`crates/application/src/lib.rs`](crates/application/src/lib.rs) | `Service`、`Outcome`、稳定错误映射、部分外部状态和恢复命令 |
 | Task 用例 | [`crates/application/src/tasks.rs`](crates/application/src/tasks.rs) | Task create/show/list 筛选与游标分页/字段投影、update/retitle/note/block/unblock/close/claim/checkpoint |
 | Session 用例 | [`crates/application/src/sessions.rs`](crates/application/src/sessions.rs) | Session show/list/attach/close、Task resume、Session Import、History 和 doctor |
 | Worktree 用例 | [`crates/application/src/worktrees.rs`](crates/application/src/worktrees.rs) | Worktree status/create/remove/adopt/detach，以及 Git 与 SQLite 的部分完成处理 |
-| SQL 映射 | [`crates/application/src/db.rs`](crates/application/src/db.rs) | 数字/`#数字`/`taskKey`/显式 `key:` 引用解析、常用查询、row 到 DTO 的转换、version 检查、Task version 递增和 History 插入 |
-| 核心合同 | [`crates/core/src/lib.rs`](crates/core/src/lib.rs) | Task 状态、输入/输出 DTO、共享校验、按路径分量使用文件系统实际比较语义生成路径键、默认数据目录和跨平台私有权限工具 |
-| SQLite 基础设施 | [`crates/storage-sqlite/src/lib.rs`](crates/storage-sqlite/src/lib.rs) | 数据库打开、busy timeout、外键、WAL、支持提交期 guard 的 Schema v7 原子 Migration、非权威 Worktree 路径键和数据库路径规范化 |
+| SQL 映射 | [`crates/application/src/db.rs`](crates/application/src/db.rs) | 数字/`#数字`/`taskKey` 引用解析、常用查询、row 到 DTO 的转换、version 检查、Task version 递增和 History 插入 |
+| 核心合同 | [`crates/core/src/lib.rs`](crates/core/src/lib.rs) | Task 状态、输入/输出 DTO、共享校验、默认数据目录和跨平台私有权限工具 |
+| SQLite 基础设施 | [`crates/storage-sqlite/src/lib.rs`](crates/storage-sqlite/src/lib.rs) | 数据库打开、busy timeout、外键、WAL、单一 Schema 原子初始化和数据库路径规范化 |
 | Git 基础设施 | [`crates/git-adapter/src/lib.rs`](crates/git-adapter/src/lib.rs) | CanonicalPath、含实时 common-dir 关联复核的 Repository identity、任务级 advisory lock、Worktree 命令和实时状态 |
 
 ### 实际持久化边界
 
-Application 当前会直接使用 `rusqlite` 编写事务和 SQL；`storage-sqlite` 负责数据库生命周期、Schema 和 Migration，但不是完整的 Repository 抽象层。代码地图应反映这个实际边界，不把设计目标写成现状。
+Application 当前会直接使用 `rusqlite` 编写事务和 SQL；`storage-sqlite` 负责数据库生命周期、Schema 初始化，但不是完整的 Repository 抽象层。代码地图应反映这个实际边界，不把设计目标写成现状。
 
 ## 4. 权威数据边界
 
@@ -87,7 +87,7 @@ CLI 的集中路由位于 `main.rs` 的 `dispatch`。Application 的公开操作
 ### Task mutation
 
 ```text
-taskctl 参数（12 / #12 / taskKey；歧义旧 Key 使用 key:）
+taskctl 参数（12 / #12 / taskKey）
   → CLI dispatch
   → Service::task_*
   → 解析为数据库数字 Task ID
@@ -148,11 +148,11 @@ Git 命令不得在 SQLite 写事务中执行。`create/remove/adopt/detach` 持
 - Task 主键是 SQLite 自动生成且不复用的整数；`taskKey` 可空、唯一，且只能从 `NULL` 设置一次。JSON DTO 使用整数 `id/taskId`，人类输出显示 `#id`。
 - 除没有旧状态可比较的创建外，所有面向已有 Task 的 mutation 都使用调用方提供的 expected version；发生 `VERSION_CONFLICT` 后必须重新读取。
 - Task 的 title/goal/scope/acceptanceCriteria 初始可空以支持最小创建和增量补全；设置为字符串后不可清空，`close completed` 前四项必须完整。新写入的 title 必须符合 `MMDD｜类型｜主题`；closed Task 只能通过 CAS `retitle` 修正 title，不得借此重开或修改其他字段。
-- Task mutation 与对应 History 必须在同一事务中提交或回滚。
+- Task mutation 与对应 History 必须在同一事务中提交或回滚；Worktree 创建的数据库阶段失败时，先释放事务，再观察现场并生成恢复建议。
 - Task list 游标用固定长度 SHA-256 摘要绑定 status/taskKey/query 筛选，排序固定为 `updatedAt DESC, id ASC`；字段投影不参与游标计算，默认 JSON 仍返回完整 TaskView。
-- v6→v7 migration 在 SQLite writer transaction 内获取并持有所有旧字符串 Task ID 的 Worktree lock；发现活跃 v6 operation 时回滚并拒绝升级。
+- 数据库只支持当前单一 Schema；仅空数据库允许初始化，不提供旧版本升级。
 - Task 的 Repository、common-dir、Branch、Worktree 四个引用必须全有或全空。
-- 同一文件系统等价的规范化 Worktree 路径最多由一个 Task 登记；持久化比较键必须逐分量保留其所属父目录的比较语义：现有分量以 canonicalization 和文件系统实际别名解析决定表示，最近现有祖先的探测规则只适用于缺失后缀。不得把末级目录规则应用到整条路径；缺失的非 ASCII 分量处于非精确比较目录时必须拒绝，不能用 Rust Unicode 大小写或规范化近似文件系统。目录规则可原地变化，因此持久化键只是登记时的诊断快照，不建立唯一索引；`create/adopt` 依靠 `BEGIN IMMEDIATE` 串行化，并在写事务内扫描全部现有引用。两条路径都存在时优先比较文件对象身份，规范化目标完全相同时直接判等，路径缺失时才按当前规则比较。恢复建议也必须执行同一 Owner 复核。
+- 路径先从最近已存在祖先规范化；规范化目标完全相同时直接判等，两条路径都存在时比较文件对象身份。缺失路径只接受规范化后的精确拼写，不探测或模拟大小写及 Unicode 比较规则，也不持久化路径比较键。`create/adopt` 在写事务内扫描现有引用，确保同一实际 Worktree 只有一个 Task；中文路径可以创建、采纳和清理。
 - Repository identity 复核不仅验证原 Repository 根和 common-dir 文件对象仍存在且未被替换，还必须重新解析当前 `git rev-parse --git-common-dir` 并证明关联仍指向原 common-dir。
 - V0 SQLite/JSON 路径合同只接受 UTF-8；Repository、Worktree 或 Git porcelain 中的路径不能无损表示时必须明确拒绝，禁止使用有损替换字符继续操作。
 - Task 当前 Session 必须属于同一 Task 且尚未结束。
@@ -168,7 +168,7 @@ Git 命令不得在 SQLite 写事务中执行。`create/remove/adopt/detach` 持
 
 - `tasks.rs`、`sessions.rs`：Task version、Session 连续性和响应事务快照；
 - `worktrees.rs`：Git/SQLite TOCTOU、部分完成分类和恢复命令；
-- `storage-sqlite/src/lib.rs`：Migration 原子性、旧数据升级和权限；
+- `storage-sqlite/src/lib.rs`：初始化原子性、读写并发和权限；
 - `core/src/lib.rs`：稳定 DTO、跨平台权限和序列化合同；
 - `cli/src/main.rs`：JSON schema、退出码、非交互确认和安全警告。
 
@@ -176,9 +176,9 @@ Git 命令不得在 SQLite 写事务中执行。`create/remove/adopt/detach` 持
 
 | 测试位置 | 覆盖范围 |
 | --- | --- |
-| [`crates/application/tests/v0_flow.rs`](crates/application/tests/v0_flow.rs) | Task 数字/显式旧 Key 引用、CAS/Merge Patch、Session/Checkpoint/Import/Worktree 的跨模块业务流程和故障场景 |
+| [`crates/application/tests/v0_flow.rs`](crates/application/tests/v0_flow.rs) | Task 数字/字面 taskKey 引用、CAS/Merge Patch、Session/Checkpoint/Import/Worktree 的跨模块业务流程和故障场景 |
 | [`crates/cli/tests/cli_contract.rs`](crates/cli/tests/cli_contract.rs) | CLI JSON v2 envelope、Task list 筛选/分页/投影/终端格式、stdin、Task 引用、退出码、并发启动、敏感内容确认和权限警告 |
-| `crates/*/src/lib.rs` 内的 `#[cfg(test)]` | SQLite v7 原子 Migration/旧进程锁 barrier/关系保留/ID 不复用、Git 路径与锁、Windows ACL、局部错误合同 |
+| `crates/*/src/lib.rs` 内的 `#[cfg(test)]` | SQLite 初始化/读写并发/不兼容数据库拒绝/ID 不复用、Git 路径与锁、Windows ACL、局部错误合同 |
 
 常用验证命令：
 

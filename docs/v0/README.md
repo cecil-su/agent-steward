@@ -32,11 +32,11 @@
 
 - 初版 CLI 使用 Rust 实现，并采用 Cargo workspace 组织 Core、Application、SQLite Storage、Git Adapter 和 CLI；
 - 任务数据保存在本机 SQLite 数据库中，不使用 Markdown、JSON 或 JSONL 文件作为主存储；
-- Task 使用自动生成且不复用的数字主键，可选唯一 `taskKey` 只可设置一次；CLI 接受数字、`#数字` 或 `taskKey` 引用，歧义旧 Key 可用 `key:` 显式引用；
+- Task 使用自动生成且不复用的数字主键，可选唯一 `taskKey` 只可设置一次；CLI 接受数字、`#数字` 或 `taskKey` 引用；`taskKey` 按原文解析，没有转义前缀；
 - 最小 Task 可无描述创建，随后通过带 CAS 的 JSON Merge Patch 增量补全；描述一旦设置不能清空，`completed` 关闭前必须补齐；
 - `--json --input -` 可安全读取 stdin UTF-8 JSON，机器输出合同为 `schemaVersion: 2`；
 - Task list 支持 status/taskKey/文本筛选、固定长度筛选摘要游标分页和字段投影；人类模式提供表格及单字段 lines 输出；
-- SQLite 由 CLI 进程直接访问，不依赖独立数据库服务，也不支持多台机器共享同一数据库；v6→v7 migration 通过旧 Task 锁 barrier 拒绝与仍活跃的 v6 Worktree operation 并行；
+- SQLite 由 CLI 进程直接访问，不依赖独立数据库服务，也不支持多台机器共享同一数据库；只支持新建数据库，不迁移旧 schema；
 - Git 和文件系统实时状态不写成数据库权威事实；
 - 除没有旧状态可比较的 create 外，所有面向已有 Task 的 mutation 携带调用方最近读取的 version，使用 compare-and-swap 防止旧快照覆盖；
 - Git 与 SQLite 部分完成时只允许显式、非破坏性的 Worktree 引用 adopt/detach；
