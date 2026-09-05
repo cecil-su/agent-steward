@@ -43,6 +43,27 @@ Task 使用数据库自动生成且不复用的数字 ID；人类界面显示为
 
 Task 列表支持 status、taskKey 和 title/goal/scope 文本筛选、固定长度筛选摘要游标分页及字段投影；终端默认显示表格，单字段可使用 `--format lines`。当前 V0 只初始化新数据库，不提供旧 schema 升级或旧 Key 转义兼容。除创建外，所有面向已有 Task 的 mutation 使用 `--if-version` compare-and-swap；`--json` 输出 `schemaVersion: 2` 稳定 envelope。Worktree 命令仅操作本地现有分支，不提供 `push`、`force`、`clean`、`reset` 或隐式 `stash`。完整合同从 [docs/v0/README.md](docs/v0/README.md) 开始阅读，AI/Agent 的调用约束见 [AGENTS.md](AGENTS.md)。
 
+## V0 日常使用
+
+```bash
+# 在当前 Worktree 或子目录找到关联任务；在仓库根目录查看候选
+taskctl task here
+
+# 日常工作视图：active 为未关闭任务，recent 为所有任务按最近更新排序
+taskctl task list --view active
+taskctl task list --view in-progress
+taskctl task list --view blocked
+taskctl task list --view recent
+
+# 输出可直接交给另一个窗口的上下文，不创建 Session、不领取任务
+taskctl task context 12 --format markdown > task-context.md
+taskctl --json task context 12
+```
+
+开发和测试请在命令中添加 `--database <隔离数据库路径>`。`task here` 只列出候选，不自动选择或领取；优先匹配当前 Worktree，未匹配时按 Git common-dir 查找同仓库的已登记任务。未绑定 Worktree 的任务可通过列表找到。
+
+`task context` 输出目标、范围、验收条件、最新 Checkpoint、下一步、阻塞、风险、当前 Session 和实时 Git 状态；不会自动附带导入的聊天原文。Git 观察失败时仍返回任务上下文，并给出警告。`resume` 保留原有 CAS/Session 行为，终端输出采用同样的分段摘要；`--json` 保留结构化输出。
+
 ## 产品优先级
 
 1. **Workspace 与 Repository**：先可靠识别用户在哪里工作、有哪些 Repo/Worktree，以及当前只读 Git 状态。

@@ -531,6 +531,100 @@ fn concurrent_first_startup_initializes_once() {
 }
 
 #[test]
+fn task_views_and_context_support_daily_handoff_without_mutations() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("handoff.db");
+    let db = database.to_str().unwrap();
+    let service = steward_application::Service::new(&database);
+    service
+        .task_create(
+            "HANDOFF",
+            r#"{"goal":"First line\nSecond line","nextStep":"Write a regression test"}"#,
+        )
+        .unwrap();
+    service.task_claim("1", 1, "session-a", false).unwrap();
+    service.task_create_minimal().unwrap();
+    service
+        .task_close("2", 1, "cancelled", Some("No longer needed"))
+        .unwrap();
+    let before = service.task_show("1").unwrap().data;
+    for (view, count) in [
+        ("active", 1),
+        ("in-progress", 1),
+        ("blocked", 0),
+        ("recent", 2),
+    ] {
+        let result = run(&["--database", db, "--json", "task", "list", "--view", view]);
+        assert!(result.status.success());
+        assert_eq!(
+            json_output(&result)["data"]["tasks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            count
+        );
+    }
+    let invalid = run(&[
+        "--database",
+        db,
+        "--json",
+        "task",
+        "list",
+        "--view",
+        "active",
+        "--status",
+        "closed",
+    ]);
+    assert!(!invalid.status.success());
+    let markdown = run(&[
+        "--database",
+        db,
+        "task",
+        "context",
+        "1",
+        "--format",
+        "markdown",
+    ]);
+    assert!(markdown.status.success());
+    let markdown = String::from_utf8(markdown.stdout).unwrap();
+    assert!(markdown.starts_with("# Task #1"));
+    assert!(markdown.contains("First line\nSecond line"));
+    assert!(markdown.contains("## Next step\n\nWrite a regression test"));
+    let context = run(&["--database", db, "--json", "task", "context", "1"]);
+    assert_eq!(json_output(&context)["data"]["task"], before["task"]);
+    let here = Command::new(env!("CARGO_BIN_EXE_taskctl"))
+        .current_dir(temp.path())
+        .args(["--database", db, "--json", "task", "here"])
+        .output()
+        .unwrap();
+    assert!(here.status.success());
+    assert_eq!(json_output(&here)["data"]["matchedBy"], "none");
+    assert_eq!(service.task_show("1").unwrap().data, before);
+    let table = run(&["--database", db, "task", "list", "--view", "active"]);
+    assert!(
+        String::from_utf8(table.stdout)
+            .unwrap()
+            .contains("NEXT STEP")
+    );
+    let resumed = run(&[
+        "--database",
+        db,
+        "task",
+        "resume",
+        "1",
+        "--session",
+        "session-b",
+        "--if-version",
+        "2",
+        "--take-over",
+    ]);
+    assert!(resumed.status.success());
+    let resumed = String::from_utf8(resumed.stdout).unwrap();
+    assert!(resumed.contains("## Goal"));
+    assert!(resumed.contains("Current session: session-b"));
+}
+
+#[test]
 fn json_import_requires_sensitive_content_confirmation_before_mutation() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("steward.db");

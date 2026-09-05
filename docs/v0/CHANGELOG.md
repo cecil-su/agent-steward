@@ -1,5 +1,12 @@
 # V0 修订记录
 
+## 日常查找与交接
+
+- 增加 `task here` 只读目录定位和 `task context` Markdown/JSON 上下文导出；
+- 列表增加固定视图和默认下一步列；resume 终端输出改为分段摘要；
+- 不新增持久化模型，不改变领取、恢复、CAS 和关闭规则。
+
+
 ## 当前：精简 V0（不兼容历史数据库）
 
 - 七版 migration 合并为单一 Schema，使用 `PRAGMA user_version=1`，仅初始化空数据库；删除旧 ID 映射、旧进程锁屏障及 `key:` 转义语法；

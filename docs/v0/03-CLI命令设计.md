@@ -277,3 +277,12 @@ DTO 与 SQLite 字段分离，但字段含义必须一一映射；时间统一�
 - `5`：Worktree 安全检查、路径身份检查或已证明未改变现场的 Git 执行失败；
 - `6`：Git 已改变现场，或操作期间无法证明 Git 与数据库一致，返回 `PARTIAL_EXTERNAL_STATE`；
 - `10`：数据库不可用或内部错误。
+
+## 日常查找与上下文交接
+
+- `task list --view active|in-progress|blocked|recent` 提供固定视图：active 包含 open/in_progress/blocked，in-progress 和 blocked 精确筛选，recent 不筛选状态。全部按 `updatedAt DESC,id ASC` 排序，沿用分页、查询和字段投影；`--view` 与 `--status` 互斥。`--status active` 也可表示未关闭任务。
+- 默认终端列表展示 ID、标题、状态、下一步、更新时间；显式 `--fields` 不变。
+- `task here` 读取当前目录，优先返回包含该目录且属于当前 Git 仓库的已登记 Worktree 任务；否则列出同 common-dir 的候选。返回 `directory`、`matchedBy`（worktree/repository/none）、`tasks`，包含已关闭任务，不分页、不自动领取；无匹配也是成功空列表。
+- `task context <task-ref> [--format markdown]` 为只读查询，默认 Markdown 输出；`--json` 返回 envelope，data 包含 `task`、`checkpoint`、`session`（当前 Session 或 null）、`worktreeStatus`。Task、Checkpoint、Session 在同一个读事务中取得快照，事务释放后观察 Git；不修改版本、Session、History。
+- 上下文包括目标、范围、验收、最新 Checkpoint 的完成项/决策/待办/风险、当前下一步、阻塞恢复条件与工作目录；不自动导出完整 Session 历史、Import 内容或全部 Notes。无 Checkpoint 时明确留空，Git 无法观察时 `worktreeStatus=null`，附带 `WORKTREE_OBSERVATION_FAILED` 警告。
+- 人类模式 `resume` 使用同一摘要格式；其既有创建 Session 和 CAS 语义不变。导出上下文不会执行 resume。

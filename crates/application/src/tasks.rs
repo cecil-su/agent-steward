@@ -102,6 +102,9 @@ impl Service {
             .status
             .as_deref()
             .map(|value| {
+                if value == "active" {
+                    return Ok(value.to_owned());
+                }
                 TaskStatus::try_from(value)
                     .map(|status| status.as_str().to_owned())
                     .map_err(|reason| AppError::invalid("status", reason))
@@ -151,8 +154,12 @@ impl Service {
         let mut conditions = Vec::new();
         let mut values = Vec::<SqlValue>::new();
         if let Some(status) = &status {
-            conditions.push("status=?");
-            values.push(SqlValue::Text(status.clone()));
+            if status == "active" {
+                conditions.push("status != 'closed'");
+            } else {
+                conditions.push("status=?");
+                values.push(SqlValue::Text(status.clone()));
+            }
         }
         if let Some(task_key) = &task_key {
             conditions.push("task_key=?");

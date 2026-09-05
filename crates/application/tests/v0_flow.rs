@@ -80,6 +80,17 @@ fn task_session_checkpoint_import_and_history_flow() {
         )
         .unwrap();
     assert_eq!(version(&checkpoint), 7);
+    let history_before = service.history("TASK-1").unwrap().data;
+    let sessions_before = service.session_list(Some("TASK-1")).unwrap().data;
+    let context = service.task_context("TASK-1").unwrap();
+    assert_eq!(context.data["task"], checkpoint.data["task"]);
+    assert_eq!(context.data["checkpoint"]["summary"], "Core flow works");
+    assert_eq!(context.data["session"]["id"], "session-a");
+    assert_eq!(service.history("TASK-1").unwrap().data, history_before);
+    assert_eq!(
+        service.session_list(Some("TASK-1")).unwrap().data,
+        sessions_before
+    );
     let resumed = service
         .task_resume("TASK-1", 7, "session-b", Some("session-a"), true)
         .unwrap();
@@ -1198,6 +1209,23 @@ fn worktree_adopt_allows_distinct_worktrees() {
         .unwrap();
 
     assert_eq!(version(&adopted), 2);
+    let nested = adopter_worktree.join("nested");
+    fs::create_dir(&nested).unwrap();
+    let here = service.task_here(&nested).unwrap();
+    assert_eq!(here.data["matchedBy"], "worktree");
+    assert_eq!(here.data["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(here.data["tasks"][0]["taskKey"], "TASK-WT-KEY-ADOPTER");
+    let related = service.task_here(&repo).unwrap();
+    assert_eq!(related.data["matchedBy"], "repository");
+    assert_eq!(related.data["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        service.task_here(temp.path()).unwrap().data["matchedBy"],
+        "none"
+    );
+    assert_eq!(
+        service.task_show("TASK-WT-KEY-ADOPTER").unwrap().data["task"],
+        adopted.data["task"]
+    );
     assert_eq!(
         adopted.data["task"]["worktreePath"],
         fs::canonicalize(&adopter_worktree)
@@ -1205,6 +1233,18 @@ fn worktree_adopt_allows_distinct_worktrees() {
             .to_string_lossy()
             .as_ref()
     );
+    // A nested repository must not inherit its enclosing worktree's task.
+    git(&nested, ["init", "-b", "main"]);
+    assert_eq!(
+        service.task_here(&nested).unwrap().data["matchedBy"],
+        "none"
+    );
+    // Broken Git metadata must not prevent exporting the database context.
+    fs::rename(repo.join(".git"), repo.join(".git-unavailable")).unwrap();
+    let context = service.task_context("TASK-WT-KEY-ADOPTER").unwrap();
+    assert_eq!(context.data["task"], adopted.data["task"]);
+    assert!(context.data["worktreeStatus"].is_null());
+    assert_eq!(context.warnings[0].code, "WORKTREE_OBSERVATION_FAILED");
 }
 
 #[test]

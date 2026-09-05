@@ -42,10 +42,10 @@ flowchart LR
 
 | 区域 | 代码入口 | 主要职责 |
 | --- | --- | --- |
-| CLI | [`crates/cli/src/main.rs`](crates/cli/src/main.rs) | Clap 命令树、UTF-8 文件/stdin JSON 输入、Task 列表表格/lines 渲染、危险操作确认、调用 `Service`、JSON envelope、退出码和权限警告 |
+| CLI | [`crates/cli/src/main.rs`](crates/cli/src/main.rs) | Clap 命令树、UTF-8 文件/stdin JSON 输入、Task 列表视图与表格/lines 渲染、context/resume Markdown 摘要、危险操作确认、调用 `Service`、JSON envelope、退出码和权限警告 |
 | Application 门面 | [`crates/application/src/lib.rs`](crates/application/src/lib.rs) | `Service`、`Outcome`、稳定错误映射、部分外部状态和恢复命令 |
 | Task 用例 | [`crates/application/src/tasks.rs`](crates/application/src/tasks.rs) | Task create/show/list 筛选与游标分页/字段投影、update/retitle/note/block/unblock/close/claim/checkpoint |
-| Session 用例 | [`crates/application/src/sessions.rs`](crates/application/src/sessions.rs) | Session show/list/attach/close、Task resume、Session Import、History 和 doctor |
+| Session 用例 | [`crates/application/src/sessions.rs`](crates/application/src/sessions.rs) | Session show/list/attach/close、Task here/context/resume、Session Import、History 和 doctor |
 | Worktree 用例 | [`crates/application/src/worktrees.rs`](crates/application/src/worktrees.rs) | Worktree status/create/remove/adopt/detach，以及 Git 与 SQLite 的部分完成处理 |
 | SQL 映射 | [`crates/application/src/db.rs`](crates/application/src/db.rs) | 数字/`#数字`/`taskKey` 引用解析、常用查询、row 到 DTO 的转换、version 检查、Task version 递增和 History 插入 |
 | 核心合同 | [`crates/core/src/lib.rs`](crates/core/src/lib.rs) | Task 状态、输入/输出 DTO、共享校验、默认数据目录和跨平台私有权限工具 |
@@ -99,6 +99,10 @@ taskctl 参数（12 / #12 / taskKey）
   → commit
   → CLI envelope
 ```
+
+### 只读定位与交接
+
+`Service::task_here` 从当前目录与实时 common-dir 查找已登记任务，返回候选；`Service::task_context` 在读事务中取得 Task、最新 Checkpoint 和当前 Session，释放事务后观察 Git。两者不修改 Task/Session/History。CLI 以表格展示 here，以 Markdown 展示 context；resume 复用摘要渲染。
 
 ### Session resume
 

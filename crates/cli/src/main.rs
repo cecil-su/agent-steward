@@ -56,10 +56,31 @@ enum TaskListFormat {
     Lines,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TaskListView {
+    Active,
+    InProgress,
+    Blocked,
+    Recent,
+}
+
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Find tasks associated with the current directory (does not select or claim one).
+    Here,
+    /// Export task context without changing Task or Session state.
+    Context {
+        task_id: String,
+        #[arg(long, default_value = "markdown", value_parser = ["markdown"])]
+        format: String,
+    },
     List {
-        #[arg(long)]
+        #[arg(long, value_enum, conflicts_with = "status")]
+        view: Option<TaskListView>,
+        #[arg(
+            long,
+            help = "open, in_progress, blocked, closed, or active (all unclosed tasks)"
+        )]
         status: Option<String>,
         #[arg(long = "task-key")]
         task_key: Option<String>,
@@ -321,7 +342,13 @@ fn main() -> ExitCode {
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
     match &cli.command {
         TopCommand::Task { command } => match command {
+            TaskCommand::Here => service.task_here(
+                &std::env::current_dir()
+                    .map_err(|error| AppError::invalid("directory", error.to_string()))?,
+            ),
+            TaskCommand::Context { task_id, .. } => service.task_context(task_id),
             TaskCommand::List {
+                view,
                 status,
                 task_key,
                 query,
@@ -344,7 +371,13 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     ));
                 }
                 service.task_list_with_options(&TaskListOptions {
-                    status: status.clone(),
+                    status: match view {
+                        Some(TaskListView::Active) => Some("active".into()),
+                        Some(TaskListView::InProgress) => Some("in_progress".into()),
+                        Some(TaskListView::Blocked) => Some("blocked".into()),
+                        Some(TaskListView::Recent) => None,
+                        None => status.clone(),
+                    },
                     task_key: task_key.clone(),
                     query: query.clone(),
                     page_size: *page_size,
@@ -626,6 +659,28 @@ fn render_success(outcome: Outcome, cli: &Cli) -> ExitCode {
             let fields = parse_task_fields(fields.as_deref())
                 .expect("Task list fields were validated before rendering");
             render_task_list(&data, &fields, *format);
+        } else if let TopCommand::Task {
+            command: TaskCommand::Context { .. } | TaskCommand::Resume { .. },
+        } = &cli.command
+        {
+            print!("{}", render_task_context(&data));
+        } else if let TopCommand::Task {
+            command: TaskCommand::Here,
+        } = &cli.command
+        {
+            println!("Directory: {}", terminal_cell(&data["directory"]));
+            if data["matchedBy"] == "none" {
+                println!(
+                    "No task is associated with this directory. Use task list --view active to find work."
+                );
+            } else {
+                println!(
+                    "Matched by {}. No task was selected or claimed.",
+                    terminal_cell(&data["matchedBy"])
+                );
+                render_task_list(&data, &[], TaskListFormat::Table);
+                println!("Read a task with: taskctl task context <id>");
+            }
         } else {
             println!("{}", serde_json::to_string_pretty(&data).unwrap());
         }
@@ -636,12 +691,97 @@ fn render_success(outcome: Outcome, cli: &Cli) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn render_task_context(data: &Value) -> String {
+    let task = &data["task"];
+    let checkpoint = &data["checkpoint"];
+    let text = |value: &Value| match value.as_str() {
+        Some(value) => value
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect::<String>(),
+        None => terminal_cell(value),
+    };
+    let mut output = format!(
+        "# Task {} — {}\n\nStatus: {} · Version: {}\n\n",
+        text(&task["id"]),
+        text(&task["title"]),
+        text(&task["status"]),
+        text(&task["version"])
+    );
+    for (label, value) in [
+        ("Goal", &task["goal"]),
+        ("Scope", &task["scope"]),
+        ("Acceptance criteria", &task["acceptanceCriteria"]),
+        ("Last checkpoint", &checkpoint["summary"]),
+        ("Checkpoint saved at", &checkpoint["createdAt"]),
+        ("Next step", &task["nextStep"]),
+        ("Blocker", &task["blockReason"]),
+        ("Recovery", &task["blockRecovery"]),
+    ] {
+        if value.is_null() && !matches!(label, "Goal" | "Last checkpoint" | "Next step") {
+            continue;
+        }
+        output.push_str(&format!("## {label}\n\n{}\n\n", text(value)));
+    }
+    for (label, field) in [
+        ("Completed", "completed"),
+        ("Decisions", "decisions"),
+        ("Pending", "pending"),
+        ("Risks", "risks"),
+    ] {
+        if let Some(items) = checkpoint[field].as_array()
+            && !items.is_empty()
+        {
+            output.push_str(&format!("## {label}\n\n"));
+            for item in items {
+                output.push_str(&format!("- {}\n", text(item)));
+            }
+            output.push('\n');
+        }
+    }
+    if task["status"] == "closed" {
+        output.push_str(&format!(
+            "## Closure\n\n{}: {}\n\n",
+            text(&task["closureOutcome"]),
+            text(&task["closureReason"])
+        ));
+    }
+    output.push_str(&format!(
+        "## Working context\n\n- Directory: {}\n- Branch: {}\n- Current session: {}\n",
+        text(&task["worktreePath"]),
+        text(&task["repositoryBranch"]),
+        text(&task["currentSessionId"])
+    ));
+    let status = &data["worktreeStatus"];
+    if status.is_null() {
+        output.push_str("- Git state: not observed\n");
+    } else {
+        output.push_str(&format!(
+            "- Directory exists: {}\n- HEAD: {}\n- Observed at: {}\n",
+            text(&status["exists"]),
+            text(&status["head"]),
+            text(&status["observedAt"])
+        ));
+        for field in ["staged", "unstaged", "untracked", "ignored"] {
+            output.push_str(&format!(
+                "- {field}: {}\n",
+                status[field]
+                    .as_array()
+                    .map(|files| files.len().to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            ));
+        }
+    }
+    output.push_str("\nRead the latest task version before making changes. This context does not grant permission to close the task.\n");
+    output
+}
+
 fn render_task_list(data: &Value, selected_fields: &[String], format: TaskListFormat) {
     let tasks = data["tasks"]
         .as_array()
         .expect("Task list data must contain an array");
     let fields = if selected_fields.is_empty() {
-        vec!["id", "title", "status", "updatedAt"]
+        vec!["id", "title", "status", "nextStep", "updatedAt"]
     } else {
         selected_fields.iter().map(String::as_str).collect()
     };

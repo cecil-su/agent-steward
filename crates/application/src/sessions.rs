@@ -20,6 +20,85 @@ const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
 const IMPORT_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 impl Service {
+    /// Read one coherent database snapshot without creating or resuming a Session.
+    pub fn task_context(&self, reference: &str) -> AppResult<Outcome> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction().map_err(AppError::from_sqlite)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let checkpoint = load_latest_checkpoint(&tx, &task)?;
+        let session = task
+            .current_session_id
+            .as_deref()
+            .map(|id| load_session(&tx, id))
+            .transpose()?;
+        tx.commit().map_err(AppError::from_sqlite)?;
+        let mut outcome = Outcome::new(json!({"task": task, "checkpoint": checkpoint,
+            "session": session, "worktreeStatus": null}));
+        if let (Some(repo), Some(common), Some(path), Some(branch)) = (
+            task.repository_path.as_deref(),
+            task.repository_common_dir.as_deref(),
+            task.worktree_path.as_deref(),
+            task.repository_branch.as_deref(),
+        ) {
+            match git_adapter::observe_status(repo, common, path, branch) {
+                Ok(status) => outcome.data["worktreeStatus"] = json!(status),
+                Err(error) => outcome.warnings.push(warning(
+                    "WORKTREE_OBSERVATION_FAILED",
+                    "Task context is available, but live Git state could not be verified",
+                    json!({"reason": error.to_string()}),
+                )),
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Prefer a registered worktree containing this directory; otherwise list this repo's tasks.
+    pub fn task_here(&self, directory: &Path) -> AppResult<Outcome> {
+        let directory = git_adapter::canonicalize_existing(directory)
+            .map_err(|error| AppError::from_git(error, directory.to_str()))?;
+        let repository = git_adapter::repository_info(&directory).ok();
+        let mut connection = self.connection()?;
+        let tx = connection.transaction().map_err(AppError::from_sqlite)?;
+        let ids = {
+            let mut statement = tx.prepare("SELECT id FROM tasks WHERE worktree_path IS NOT NULL ORDER BY updated_at DESC,id ASC")
+                .map_err(AppError::from_sqlite)?;
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .map_err(AppError::from_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(AppError::from_sqlite)?
+        };
+        let mut direct = Vec::new();
+        let mut related = Vec::new();
+        for id in ids {
+            let task = load_task(&tx, id)?;
+            let contains = task
+                .worktree_path
+                .as_deref()
+                .and_then(|path| git_adapter::canonicalize_existing(Path::new(path)).ok())
+                .is_some_and(|path| directory.starts_with(path));
+            let same_repository = repository.as_ref().is_some_and(|repo| {
+                task.repository_common_dir.as_deref() == repo.common_dir.to_str()
+            });
+            if contains && (repository.is_none() || same_repository) {
+                direct.push(task);
+            } else if same_repository {
+                related.push(task);
+            }
+        }
+        tx.commit().map_err(AppError::from_sqlite)?;
+        let (matched_by, tasks) = if !direct.is_empty() {
+            ("worktree", direct)
+        } else if !related.is_empty() {
+            ("repository", related)
+        } else {
+            ("none", related)
+        };
+        Ok(Outcome::new(
+            json!({"directory": directory, "matchedBy": matched_by, "tasks": tasks}),
+        ))
+    }
+
     pub fn session_show(&self, id: &str) -> AppResult<Outcome> {
         let connection = self.connection()?;
         let session = load_session(&connection, id)?;
