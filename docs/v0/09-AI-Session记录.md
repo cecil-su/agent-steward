@@ -1,5 +1,8 @@
 # AI Session 记录
 
+> M4/M5 正在实现；具体接口、范围和安全合同以 [实施合同](11-M4-M5实施合同.md) 为准，本文保留背景与初版合同。
+
+
 ## 1. 目标
 
 Session 记录用于让 AI 在新会话或新窗口中继续同一个 Task。初版记录保存在本机 SQLite 数据库中，重点是可靠恢复，不追求自动保存完整聊天。
@@ -115,41 +118,18 @@ Task 当前内容
 
 这使初版不依赖特定 AI 客户端插件。
 
-## 5. AI Client Hook / Runtime Adapter 规划
+## 5. AI Client Hook / Runtime Adapter
 
-手工 CLI 闭环稳定后，增加客户端自动上报：
+M4 提供通用 `task-hook` 进程适配器。宿主显式配置后，以 JSON stdin 提供稳定 eventId、kind 和 occurredAt；适配器只投影元数据，经 Application Service 写入独立 `session_events`。特定客户端原生配置需要另外验证，不能把通用协议说成已接入某个客户端。
 
-```text
-AI Client
-   │ Hook：Session 生命周期和可观察事件
-   ▼
-Runtime Adapter
-   │ 统一、脱敏、幂等
-   ▼
-Application Service
-   └─ SQLite Session Repository / Observable Log
-```
+- 先 `claim/resume`，再用 CAS `session bind` 为已有执行 Session 一次性绑定 source/externalSessionId；事件不自动创建或改绑 Task/Session。
+- started/resumed/idle/closed 及消息/工具事件只作观测，不映射到 `claim/resume/session close`，也不影响 Task version 或 History。
+- 消息正文、工具参数/结果、自由格式错误和附件在适配器投影时丢弃，不存储或写入重试日志。标准接收接口拒绝未知字段。
+- `(sessionId,eventId)` 幂等；同 ID 不同内容拒绝。上限、分页、乱序、迟到和删除后防复活规则见 [实施合同](11-M4-M5实施合同.md)。
+- 用户主动清除观测时，CAS 更新 Task version 并记录不含原文的 History；保留去重标记，且不保证物理擦除。
+- Hook 失败通过稳定错误和非零退出报告，显式 CLI 不依赖它；仅 busy 可做两次有界重试，不创建后台队列或通用 Event 框架。
 
-计划采集：
-
-- Session started、resumed、idle、closed；
-- 客户端实际暴露的用户/助手消息；
-- 工具调用和工具结果；
-- 模型、usage 和错误信息，如果客户端提供；
-- 外部 Session ID 和来源事件 ID。
-
-约束：
-
-- 不读取或推断隐藏 Chain of Thought；
-- Token、Cookie、密码和授权头在落盘前脱敏；
-- 来源事件按 ID 幂等导入；
-- Hook 失败时不影响显式 CLI 更新；
-- Hook 只补充 Session 记录，不能根据消息内容自动更新或关闭 Task；
-- 客户端差异限制在 Runtime Adapter 内，不进入 Core。
-
-V0 手工 `session import add` 还必须限制为不超过 16 MiB 的普通文件，有界流式读取并计算 SHA-256；目录、设备、Socket、FIFO 和超限输入全部拒绝。相同 Session 和 SHA-256 只保存一份。自动 Hook 的内容分片与更大附件不复用该入口。
-
-完整 Observable Log、内容分片和大型附件存储只有在实际数据量出现后再设计。
+手工 `session import add` 仍只接受经用户敏感内容审查、不超过 16 MiB 的普通文件，语义与自动元数据事件分开。正文、内容分片、大附件和 model/usage 收集留待明确需求，不属于此轮 M4 实现。
 
 ## 6. CLI 合同
 
@@ -161,6 +141,10 @@ taskctl session import add <task-ref> --session <session-id> --if-version <versi
 taskctl session import list <session-id> [--json]
 taskctl session import remove <import-id> --if-version <version> [--yes]
 taskctl session close <session-id> --if-version <version>
+taskctl session bind <session-id> --source <source> --external-session <id> --if-version <version>
+taskctl --json --input <event.json> hook ingest
+taskctl hook list <session-id> --after 0 --limit 100
+taskctl hook clear <session-id> --if-version <version> --yes
 ```
 
 `<task-ref>` 可以是数字 `12`、人类展示形式 `#12` 或可选 `taskKey`。Session/Checkpoint/History JSON 中的 `taskId` 始终是整数。`task claim` 可以在同一 SQLite 事务中创建缺失的本地 Session；已存在的 ID 仅在它是该 Task 尚未结束的当前 Session 时允许 no-op，不能重新激活历史 Session。`task resume` 和 `task claim --take-over` 使用尚不存在且不同于来源的新 Session ID，在同一事务中创建 Session 并更新 Task。`session attach` 显式保存可选外部 Session ID；`session import add` 要求调用方先携带 `--confirm-sensitive-content-reviewed`，并要求指定的本地 Session 已存在且属于同一 Task，来源读取该 Session 的 `source`，再保存用户明确提供的文件内容和哈希；`session attach --record-path` 对已存在文件保存规范化绝对路径，对不存在文件保存展开后的绝对弱引用。

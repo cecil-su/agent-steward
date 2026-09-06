@@ -28,6 +28,9 @@
 9. [实施路线图](07-实施路线图.md)
 10. [测试与验收](08-测试与验收.md)
 
+- [M4 / M5 实施合同与验收记录](11-M4-M5实施合同.md)
+- [M4 / M5 使用与验收](12-M4-M5使用与验收.md)
+
 ## 技术基线
 
 - 初版 CLI 使用 Rust 实现，并采用 Cargo workspace 组织 Core、Application、SQLite Storage、Git Adapter 和 CLI；
@@ -50,5 +53,5 @@
 - AI 在关键节点主动调用 CLI 更新，不能直接修改数据库；
 - 结构化输入和 `--json` 输出使用已版本化 JSON 合同；
 - 完整会话自动采集由后续 AI Client Hook / Runtime Adapter 提供；
-- 初版不实现 Owner、Assignment、Event、Operation、Approval、Daemon 或 GUI；
+- M1–M3 初版不实现 Owner、Assignment、Event、Operation、Approval、Daemon 或 GUI；M4/M5 在此基础上提供独立 Session 观测及本地 GUI，仍不引入通用领域 Event 或编排模型；
 - Cargo workspace 中的 `taskctl` 是本合同的可运行参考实现，用于验证 V0 M1–M3 的本地 CLI 闭环；其完成度仅按 V0 合同判断，不据此推断 V1 或其它方案的 Daemon、TUI/GUI、MCP 或领域模型实现状态。

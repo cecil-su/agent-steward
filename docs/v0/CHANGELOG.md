@@ -1,5 +1,22 @@
 # V0 修订记录
 
+## M4：Codex 与 pi 原生适配
+
+- 增加 Codex 原生 stdin 投影、被动 JSON 响应与 hooks.json 配置生成器。
+- 增加 pi 扩展：生命周期、消息类型、工具及空闲观察，显式会话匹配与故障回退。
+- 4 项原生契约集成测试通过，77 项 Rust 回归通过；未执行真实客户端模型运行。
+- 明确原生时间为适配器观察时间，独立重复投递不保证去重。
+
+## M4/M5：通用 Hook 与本地工作台
+
+- 修复外部 Session 绑定与生命周期语义，增加 CAS 一次性 `session bind`；
+- 增加独立 `session_events`、有界输入、幂等去重、分页、容量与清除防复活；观测不改 Task version；
+- 增加只投影元数据的 `task-hook` 通用宿主适配器，不采集消息/工具正文；
+- 增加 `taskd` 同源 HTTP/GUI、启动凭据、严格 Host/Origin/CSRF 边界，共用权限告警；
+- GUI 支持任务编辑、版本冲突保留输入、Session 交接、Checkpoint、Import、History 和显式安全 Worktree 操作；
+- 数据库 schema 提升到 2，继续拒绝旧库且不迁移；新增 Rust 与真实浏览器验收。
+
+
 ## 日常查找与交接
 
 - 增加 `task here` 只读目录定位和 `task context` Markdown/JSON 上下文导出；

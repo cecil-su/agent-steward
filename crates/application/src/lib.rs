@@ -1,4 +1,8 @@
 mod db;
+mod hooks;
+pub use hooks::HookEventInput;
+mod permissions;
+pub use permissions::database_permission_warning;
 mod sessions;
 mod tasks;
 mod worktrees;

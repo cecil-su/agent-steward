@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::{Value, json};
+use steward_application::database_permission_warning;
 use steward_application::{AppError, ErrorBody, Outcome, Service, TaskListOptions};
 use steward_core::Warning;
 
@@ -32,6 +33,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum TopCommand {
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
+    },
     Task {
         #[command(subcommand)]
         command: TaskCommand,
@@ -66,6 +71,10 @@ enum TaskListView {
 
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Read progress, decision, and risk notes.
+    Notes {
+        task_id: String,
+    },
     /// Find tasks associated with the current directory (does not select or claim one).
     Here,
     /// Export task context without changing Task or Session state.
@@ -178,6 +187,15 @@ enum TaskCommand {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommand {
+    Bind {
+        session_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+        #[arg(long)]
+        source: String,
+        #[arg(long = "external-session")]
+        external_session: String,
+    },
     List {
         #[arg(long)]
         task: Option<String>,
@@ -203,6 +221,23 @@ enum SessionCommand {
         command: ImportCommand,
     },
     Close {
+        session_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HookCommand {
+    Ingest,
+    List {
+        session_id: String,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    Clear {
         session_id: String,
         #[arg(long = "if-version")]
         if_version: i64,
@@ -341,7 +376,71 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
     match &cli.command {
+        TopCommand::Hook { command } => match command {
+            HookCommand::Ingest => {
+                let path = cli
+                    .input
+                    .as_deref()
+                    .ok_or_else(|| AppError::invalid("input", "--input required"))?;
+                let reader: Box<dyn Read> = if path == Path::new("-") {
+                    if !cli.json {
+                        return Err(AppError::invalid("input", "stdin requires --json"));
+                    }
+                    Box::new(io::stdin())
+                } else {
+                    let mut options = fs::OpenOptions::new();
+                    options.read(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+                    }
+                    let file = options
+                        .open(path)
+                        .map_err(|_| AppError::invalid("input", "cannot open event file"))?;
+                    if !file
+                        .metadata()
+                        .map_err(|_| AppError::invalid("input", "cannot inspect event file"))?
+                        .is_file()
+                    {
+                        return Err(AppError::invalid("input", "expected a regular event file"));
+                    }
+                    Box::new(file)
+                };
+                let mut bytes = Vec::new();
+                reader
+                    .take(16 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| AppError::invalid("input", "cannot read event"))?;
+                if bytes.len() > 16 * 1024 {
+                    return Err(AppError::invalid("input", "event exceeds 16 KiB"));
+                }
+                let input = std::str::from_utf8(&bytes)
+                    .map_err(|_| AppError::invalid("input", "invalid UTF-8"))?;
+                service.hook_ingest(input)
+            }
+            HookCommand::List {
+                session_id,
+                after,
+                limit,
+            } => service.hook_list(session_id, *after, *limit),
+            HookCommand::Clear {
+                session_id,
+                if_version,
+            } => {
+                if !cli.yes {
+                    confirm(
+                        false,
+                        &format!(
+                            "Clear observations for Session {session_id}; deduplication markers remain"
+                        ),
+                    )?;
+                }
+                service.hook_clear(session_id, *if_version)
+            }
+        },
         TopCommand::Task { command } => match command {
+            TaskCommand::Notes { task_id } => service.task_notes(task_id),
             TaskCommand::Here => service.task_here(
                 &std::env::current_dir()
                     .map_err(|error| AppError::invalid("directory", error.to_string()))?,
@@ -453,6 +552,12 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             } => service.task_close(task_id, *if_version, outcome, reason.as_deref()),
         },
         TopCommand::Session { command } => match command {
+            SessionCommand::Bind {
+                session_id,
+                if_version,
+                source,
+                external_session,
+            } => service.session_bind(session_id, *if_version, source, external_session),
             SessionCommand::List { task } => service.session_list(task.as_deref()),
             SessionCommand::Show { session_id } => service.session_show(session_id),
             SessionCommand::Attach {
@@ -983,149 +1088,6 @@ fn render_error(error: AppError, json_output: bool, warnings: Vec<Warning>) -> E
 
 fn default_database_path() -> Option<PathBuf> {
     steward_core::default_data_dir().map(|directory| directory.join("steward.db"))
-}
-
-#[cfg(unix)]
-fn database_permission_warning(path: &Path, _custom_database: bool) -> Option<Warning> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let parent = database_parent(path).map_err(|reason| permission_check_warning(path, reason));
-    let parent = match parent {
-        Ok(parent) => parent,
-        Err(warning) => return Some(warning),
-    };
-    match fs::metadata(&parent) {
-        Ok(metadata) => {
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode & 0o077 != 0 {
-                return Some(Warning {
-                    code: "INSECURE_DATABASE_PERMISSIONS".into(),
-                    message: "the database parent directory is accessible to other users".into(),
-                    details: json!({"path": parent, "mode": format!("{mode:04o}")}),
-                });
-            }
-        }
-        Err(error) => return Some(permission_check_warning(path, error.to_string())),
-    }
-    insecure_database_file_warning(path)
-}
-
-#[cfg(unix)]
-fn insecure_database_file_warning(path: &Path) -> Option<Warning> {
-    use std::os::unix::fs::PermissionsExt;
-
-    for file in database_storage_files(path) {
-        match file.try_exists() {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => return Some(permission_check_warning(&file, error.to_string())),
-        }
-        match fs::metadata(&file) {
-            Ok(metadata) => {
-                let mode = metadata.permissions().mode() & 0o777;
-                if mode & 0o077 == 0 {
-                    continue;
-                }
-                return Some(Warning {
-                    code: "INSECURE_DATABASE_PERMISSIONS".into(),
-                    message: "the database file or sidecar is accessible to other users".into(),
-                    details: json!({"path": file, "mode": format!("{mode:04o}")}),
-                });
-            }
-            Err(error) => return Some(permission_check_warning(&file, error.to_string())),
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn database_permission_warning(path: &Path, custom_database: bool) -> Option<Warning> {
-    if custom_database {
-        return Some(Warning {
-            code: "INSECURE_DATABASE_PERMISSIONS".into(),
-            message: "the custom database parent directory is not managed by taskctl".into(),
-            details: json!({
-                "path": database_parent(path).ok(),
-                "reason": "custom parent directory ACL may allow database replacement"
-            }),
-        });
-    }
-    let parent = match database_parent(path) {
-        Ok(parent) => parent,
-        Err(reason) => return Some(permission_check_warning(path, reason)),
-    };
-    match steward_core::private_acl_is_protected(&parent) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Some(permission_check_warning(
-                &parent,
-                "database directory DACL grants access to unapproved principals or is not protected",
-            ));
-        }
-        Err(error) => return Some(permission_check_warning(&parent, error.to_string())),
-    }
-    insecure_database_file_warning(path)
-}
-
-#[cfg(windows)]
-fn insecure_database_file_warning(path: &Path) -> Option<Warning> {
-    for file in database_storage_files(path) {
-        match file.try_exists() {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => return Some(permission_check_warning(&file, error.to_string())),
-        }
-        match steward_core::private_acl_is_protected(&file) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Some(permission_check_warning(
-                    &file,
-                    "database file or sidecar ACL grants access to unapproved principals or is not protected",
-                ));
-            }
-            Err(error) => return Some(permission_check_warning(&file, error.to_string())),
-        }
-    }
-    None
-}
-
-#[cfg(not(any(unix, windows)))]
-fn database_permission_warning(path: &Path, _custom_database: bool) -> Option<Warning> {
-    Some(permission_check_warning(
-        path,
-        "permission verification unavailable",
-    ))
-}
-
-fn database_storage_files(path: &Path) -> [PathBuf; 3] {
-    let mut wal = path.as_os_str().to_os_string();
-    wal.push("-wal");
-    let mut shm = path.as_os_str().to_os_string();
-    shm.push("-shm");
-    [path.to_path_buf(), PathBuf::from(wal), PathBuf::from(shm)]
-}
-
-fn database_parent(path: &Path) -> Result<PathBuf, String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| format!("cannot resolve current directory: {error}"))?
-            .join(path)
-    };
-    absolute
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "database parent directory is unavailable".to_owned())
-}
-
-fn permission_check_warning(path: &Path, reason: impl Into<String>) -> Warning {
-    Warning {
-        code: "INSECURE_DATABASE_PERMISSIONS".into(),
-        message: "taskctl could not verify the database permissions".into(),
-        details: json!({"path": path, "reason": reason.into()}),
-    }
 }
 
 #[cfg(test)]

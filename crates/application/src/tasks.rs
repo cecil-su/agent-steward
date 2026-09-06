@@ -90,6 +90,21 @@ impl Service {
         Ok(Outcome::new(json!({"task": task})))
     }
 
+    /// Read persisted notes without mutating the Task or its History.
+    pub fn task_notes(&self, reference: &str) -> AppResult<Outcome> {
+        let connection = self.connection()?;
+        let task = load_task_by_reference(&connection, reference)?;
+        let mut statement = connection.prepare(
+            "SELECT id,task_id,session_id,note_type,text,created_at FROM task_notes WHERE task_id=?1 ORDER BY id ASC"
+        ).map_err(AppError::from_sqlite)?;
+        let notes = statement
+            .query_map([task.id], note_from_row)
+            .map_err(AppError::from_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from_sqlite)?;
+        Ok(Outcome::new(json!({"notes":notes})))
+    }
+
     pub fn task_list(&self, status: Option<&str>) -> AppResult<Outcome> {
         self.task_list_with_options(&TaskListOptions {
             status: status.map(ToOwned::to_owned),

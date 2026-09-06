@@ -4,15 +4,15 @@
 
 ## 1. 实现状态
 
-- 当前可运行实现是 Cargo workspace 中的 V0 `taskctl`。
+- 当前可运行实现是 Cargo workspace 中的 V0 `taskctl`、通用元数据适配器 `task-hook` 和本地 HTTP/GUI `taskd`。
 - `docs/v0/` 是 V0 独立合同和当前参考实现的行为依据。
 - `docs/v1/` 是 Workspace、Repository Registry、Task Review、Daemon、TUI/GUI 和 MCP 等独立设计，尚未对应到当前代码模块。
 - V0、V1 以及未来可能出现的 V2 不是连续升级链；代码、合同和完成度不得跨版本自动继承，只有专项文档明确声明时才存在特定复用或迁移关系。
-- 阅读代码时不要把 V1 文档中的 `taskd`、`steward-tui`、`steward-gui`、`stewardctl` 或 `steward-mcp` 当作已经存在的组件。
+- V0 `taskd` 是独立的本地 HTTP 入口，不代表 V1 同名组件已经实现。不要把 V1 文档中的 `steward-tui`、`steward-gui`、`stewardctl` 或 `steward-mcp` 当作已经存在的组件。
 
 ## 2. Workspace 与依赖方向
 
-Workspace 定义位于 [`Cargo.toml`](Cargo.toml)，包含五个 crate：
+Workspace 定义位于 [`Cargo.toml`](Cargo.toml)，包含六个 crate：
 
 ```mermaid
 flowchart LR
@@ -24,6 +24,8 @@ flowchart LR
     SQLITE[(SQLite)]
     WORKTREE[(Git / 文件系统)]
 
+    HTTP["taskd / GUI"] --> APP
+    HOOK["task-hook"] --> APP
     CLI --> APP
     CLI --> CORE
     APP --> CORE
@@ -43,6 +45,11 @@ flowchart LR
 | 区域 | 代码入口 | 主要职责 |
 | --- | --- | --- |
 | CLI | [`crates/cli/src/main.rs`](crates/cli/src/main.rs) | Clap 命令树、UTF-8 文件/stdin JSON 输入、Task 列表视图与表格/lines 渲染、context/resume Markdown 摘要、危险操作确认、调用 `Service`、JSON envelope、退出码和权限警告 |
+| Hook 适配器 | [`crates/cli/src/bin/task-hook.rs`](crates/cli/src/bin/task-hook.rs) | 显式绑定的通用宿主事件投影、有界读取和 busy 重试，不保留正文 |
+| Session 观测 | [`crates/application/src/hooks.rs`](crates/application/src/hooks.rs) | 一次性绑定、独立事件接收、去重、分页、容量与清除 |
+| 共用权限告警 | [`crates/application/src/permissions.rs`](crates/application/src/permissions.rs) | CLI/HTTP 共用数据库目录及 WAL/SHM 权限检查 |
+| 本地 Daemon | [`crates/server/src/lib.rs`](crates/server/src/lib.rs) | 同源 HTTP、认证和请求边界、严格 Command DTO、Application 调用 |
+| GUI | [`crates/server/web/app.js`](crates/server/web/app.js) | 原生 DOM 任务工作台；静态资源嵌入二进制，无前端构建依赖 |
 | Application 门面 | [`crates/application/src/lib.rs`](crates/application/src/lib.rs) | `Service`、`Outcome`、稳定错误映射、部分外部状态和恢复命令 |
 | Task 用例 | [`crates/application/src/tasks.rs`](crates/application/src/tasks.rs) | Task create/show/list 筛选与游标分页/字段投影、update/retitle/note/block/unblock/close/claim/checkpoint |
 | Session 用例 | [`crates/application/src/sessions.rs`](crates/application/src/sessions.rs) | Session show/list/attach/close、Task here/context/resume、Session Import、History 和 doctor |
@@ -229,3 +236,12 @@ rg -n "^\s*pub (struct|enum|trait|fn)|^\s*pub fn" crates
 cargo test --workspace -- --list
 cargo doc --workspace --no-deps --document-private-items
 ```
+
+## M4/M5 验收入口
+
+- `crates/application/tests/hooks.rs`：绑定、并发去重、乱序/迟到、删除防复活、容量。
+- `crates/cli/tests/hook_adapter.rs`：宿主内容投影和失败不泄漏原文。
+- `crates/server/tests/http_contract.rs`：认证、Origin/CSRF、HTTP 合同、跨 CLI CAS。
+- `crates/server/tests/browser/smoke.cjs`：真实 Chrome 与临时 Daemon/数据库/Git 仓库端到端验收。
+
+- `integrations/`：Codex 配置生成器、pi 观测扩展与原生负载集成测试。

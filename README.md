@@ -4,7 +4,7 @@ Agent Steward 是一个本地优先、面向个人开发者的 Workspace 工作�
 
 项目当前同时保存彼此独立的 V0 实现与 V1 设计：
 
-- `taskctl` V0 已实现为本地优先的 Rust CLI，用于 Task、Session、Checkpoint、History、Session Import 和安全 Worktree 连续性；
+- V0 已提供 `taskctl` 本地 Rust CLI、`task-hook` 通用元数据 Hook 和 `taskd` 本地 HTTP/GUI；覆盖 Task、Session、Checkpoint、History、Session Import、安全 Worktree 和会话观测；
 - V1 仍处于设计阶段，描述 Workspace、Actor、Review、Daemon、TUI/GUI 与 MCP 产品架构。
 
 ## 版本与方案关系
@@ -64,6 +64,19 @@ taskctl --json task context 12
 
 `task context` 输出目标、范围、验收条件、最新 Checkpoint、下一步、阻塞、风险、当前 Session 和实时 Git 状态；不会自动附带导入的聊天原文。Git 观察失败时仍返回任务上下文，并给出警告。`resume` 保留原有 CAS/Session 行为，终端输出采用同样的分段摘要；`--json` 保留结构化输出。
 
+## V0 本地工作台与 Hook
+
+```bash
+cargo build --workspace --locked
+cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/steward.db
+```
+
+打开终端显示的本机 URL，将本次凭据文件的内容粘贴到页面连接。GUI 支持任务编辑、会话交接、Checkpoint、History、Hook 观测与安全 Worktree 操作；无需单独安装前端依赖。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
+
+当前数据库格式为 schema 2，不迁移旧 schema 1；旧数据库保留给原构建，启动新功能请使用新数据库。CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`。
+
+安装、绑定、事件输入、HTTP 合同和测试方法见 [M4/M5 使用与验收](docs/v0/12-M4-M5使用与验收.md)。
+
 ## 产品优先级
 
 1. **Workspace 与 Repository**：先可靠识别用户在哪里工作、有哪些 Repo/Worktree，以及当前只读 Git 状态。
@@ -101,3 +114,5 @@ taskctl --json task context 12
 | Optimization Steward | Phase 5 整理需求、偏好与优化候选 |
 
 组件名称仍属于 V1 设计项，在公开发布前需检查 GitHub、包管理器和可执行文件名冲突。
+
+Codex 与 pi 的原生 Hook 配置见 [客户端适配指南](integrations/README.md)。

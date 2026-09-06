@@ -5,7 +5,7 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -250,6 +250,20 @@ CREATE TABLE session_imports (
     imported_at TEXT NOT NULL,
     UNIQUE(session_id, sha256)
 );
+
+CREATE TABLE session_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    event_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    kind TEXT NULL CHECK(kind IS NULL OR kind IN ('started','resumed','idle','closed','user_message','assistant_message','tool_call','tool_result','error')),
+    occurred_at TEXT NULL,
+    received_at TEXT NULL,
+    UNIQUE(session_id, event_id),
+    CHECK ((kind IS NULL AND occurred_at IS NULL AND received_at IS NULL)
+        OR (kind IS NOT NULL AND occurred_at IS NOT NULL AND received_at IS NOT NULL))
+);
+CREATE INDEX idx_session_events_sequence ON session_events(session_id, sequence);
 
 CREATE INDEX idx_tasks_status_updated ON tasks(status, updated_at);
 CREATE INDEX idx_tasks_repo_updated ON tasks(repository_common_dir, updated_at);
