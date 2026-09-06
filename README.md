@@ -1,42 +1,37 @@
 # Agent Steward
 
-Agent Steward 是一个本地优先、面向个人开发者的 Workspace 工作管家。它首先建立 Workspace、Repository 和 Worktree 的可靠本地边界；随后在这些真实代码上下文中管理任务、产物与验收；再让人类与 AI 共享同一套执行流程，并逐步沉淀业务事实、实现快照和优化候选。
+Agent Steward 是一个本地优先、面向个人开发者的任务接续与交付工具：随时知道任务做到哪里、依据是什么、下一步是什么，并能让另一个会话接着做。
 
-项目当前处于 **V1 设计阶段**，尚未开始实现。
+本主分支保存 V1 设计草案；这里的路线描述计划范围，不代表能力已经实现或经过验证。
 
-## 产品优先级
+## 使用主线
 
-1. **Workspace 与 Repository**：先可靠识别用户在哪里工作、有哪些 Repo/Worktree，以及当前只读 Git 状态。
-2. **任务与验收**：Task 归属 Workspace，并可关联 Repo/Worktree；完成必须有可复核证据。
-3. **AI 执行**：AI 作为 Actor 接入同一任务模型，不另建一套任务系统。
-4. **业务事实与优化**：在 Workspace 内沉淀事实、快照和映射，再从历史生成待确认的优化候选。
+```text
+当前目录建任务 → 记录进度与证据 → 保存 Checkpoint
+ → 隔日或换会话恢复 → 继续工作 → 用户验收或返工
+```
 
-## 核心原则
+Workspace/Repository/Worktree 提供任务上下文，可自动建立默认 Workspace，不要求用户先完成仓库纳管。CLI 优先覆盖任务闭环，再选一个薄界面辅助日常使用。
 
-- Workspace 是本地数据、Repository、Task 和长期事实的第一等边界。
-- Repository/Worktree Registry 首期只读，不把注册、扫描或解除关联解释为 Git 写操作或文件删除。
-- Task 建立在 Workspace 之上，可选关联 Repository/Worktree；AI、Git 写入和优化能力都是后续扩展。
-- 本地优先；SQLite 是运行时唯一权威，Markdown 仅作可读导出。
-- TUI 和 GUI 调用相同的 Command、Query 与 Event API，不维护独立状态。
-- 人类、AI 和自动化统一建模为 Actor；Task Manager 管理任务池，Task Owner 推进具体任务。
-- AI 声明完成只会进入 Review，验收通过后任务才能进入 Done。
-- 所有 aggregate 状态变化写入统一 DomainEvent；TaskEvent 是其中的任务事件族。
-- 需求、偏好、流程和 Prompt 优化只生成候选，未经用户确认不进入正式配置。
+## 交付方向
 
-## V1 文档
+1. 阶段 A：开始任务、记录进度、保存 Checkpoint、人工验收。
+2. 阶段 B：可靠日常接续、代码现场差异与证据复核。
+3. 阶段 C：现有 AI 会话通过 CLI/MCP 读写同一任务。
+4. 阶段 D：有明确需求后控制一个 Runtime，作为可选执行增强。
+5. 探索 X：业务事实、实现漂移和优化候选，另行验证，不属于 V1 发布承诺。
 
-从 [docs/v1/README.md](docs/v1/README.md) 开始阅读。
+## 核心约束
 
-## 暂定组件名
+- SQLite 保存领域权威状态；所有入口复用同一 Application Service。
+- 进度、Checkpoint、证据和当前 Git 现场分别保留来源与版本，不互相冒充。
+- Git 识别只读；目录解绑不删除文件。
+- AI 提交完成候选，用户明确验收后才进入 Done。
+- 默认本地、无遥测，按恢复任务所需范围保存数据。
+- 常驻 taskd、第二客户端和在线备份按实际需要引入；Standard 与 Hardened 的承诺明确区分。
 
-| 组件 | 用途 |
-|---|---|
-| `taskd` | Workspace/Repo、任务状态、查询、事件和本地持久化核心 |
-| `steward-tui` | 键盘优先的终端任务界面 |
-| `steward-gui` | 可视化任务管理界面 |
-| `stewardctl` | 脚本和自动化使用的 CLI |
-| `steward-mcp` | 第三阶段供 AI 使用的 MCP Bridge |
-| Runtime Adapter | 第三阶段连接不同 AI/Agent 宿主 |
-| Optimization Steward | Phase 5 整理需求、偏好与优化候选 |
+## 设计文档
 
-组件名称仍属于 V1 设计项，在公开发布前需检查 GitHub、包管理器和可执行文件名冲突。
+从 [V1 文档入口](docs/v1/README.md) 阅读当前定位、需求、路线和待决策事项。04–10 篇中的扩展技术协议按能力启用，不是首版实现清单。
+
+CLI 暂名 `stewardctl`，AI Bridge 暂名 `steward-mcp`；采用本地服务时暂名 `taskd`。名称和具体技术栈仍待冻结。

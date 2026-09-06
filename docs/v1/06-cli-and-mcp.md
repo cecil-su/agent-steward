@@ -2,7 +2,9 @@
 
 > 本文命令和工具名是 V1 候选契约，编码前仍可调整。
 
-阶段说明：`0.1` 先实现 Workspace/Repository/Worktree Registry 的 Command/Query/Event 子集；`0.2` 增加 Task/Review，MCP 与 AI 专用命令在 `0.3` 接入。
+阶段 A/B 的 CLI 覆盖 Task/Review/TaskCheckpoint 与按需代码上下文；阶段 C 将同一核心接入现有 AI 会话。Assignment、Agent 控制和宿主 ContextWindow 命令属于可选阶段 D；Git 写入、知识与优化另行启用。本文 taskd 是可信应用核心的简称，不强制常驻服务。
+
+首条路径为 `task create`（省略 --workspace 时解析或建立默认 Workspace）、记录下一步、`task checkpoint create`、`task context`、Review。写入目标有多个候选时要求显式选择，不按最近时间猜测。
 
 ## 1. 设计原则
 
@@ -18,7 +20,7 @@
 所有改变状态的 CLI/MCP Command 共用以下字段；CLI 使用 kebab-case，MCP 使用对应 camelCase：
 
 - `--idempotency-key <key>`：所有写命令必填；taskd 以 principal + command type + key 定位 CommandReceipt，并绑定服务端计算的 requestHash。
-- `--expected-version <n>`：更新单个既有可变 aggregate 时必填；创建命令不使用。
+- `--expected-version <n>`：更新单个既有可变 aggregate 时必填；纯创建新 aggregate 时不使用；若创建依赖既有 Task 等对象的状态，仍须提供该对象的前置版本。
 - `--correlation-id <id>`：可选；省略时由 taskd 生成，客户端不能借此改变身份或授权。
 - 跨 aggregate Command 不使用含义模糊的单一 expectedVersion，必须按对象命名所有前置版本，例如 expectedFactVersion 和 expectedCandidateRevisionVersion。
 - requestHash 不由普通客户端声明；taskd 对 command schema version、target、payload、expectedVersions 和服务端绑定 scope 做 canonicalization 后计算，并在响应中返回。
@@ -27,7 +29,9 @@ principal、actingActor、session/assignment scope、causationId 和服务端 ev
 
 ## 2. CLI 命令族
 
-### 身份和会话
+### 身份和会话（按接入能力启用）
+
+阶段 A 使用本地 Human 身份，C 冻结最小 Task scope 连接；以下 Session/Grant 管理命令按需要启用，不是建立普通任务的前置步骤。
 
 ```bash
 stewardctl session attach
@@ -39,7 +43,7 @@ stewardctl role accept <grant-id>
 
 `session attach` 不接受 `--grant <value>`。CLI 只能通过无回显交互 stdin、受保护管道、继承句柄或可信本地 UI 获得一次性 capability；不得从 argv、Prompt 或可继承环境变量读取。
 
-### Workspace 与 Repository Registry（`0.1`）
+### Workspace 与 Repository 上下文（阶段 A/B，按需使用）
 
 ```bash
 stewardctl workspace create --root <path> --idempotency-key <key>
@@ -55,13 +59,15 @@ stewardctl worktree show|rescan <worktree-id>
 
 `discover` 和只读 `rescan` 返回 canonical real path、remote identity、Branch、HEAD、dirty/detached/missing 状态及 identity conflict，不写 Git。register 必须拒绝同一 Workspace 中解析到相同 identity 的重复 Repo；unlink 只把 registry row 转为 unlinked 并写审计事件，不执行目录删除、移动、clean 或其他 Git 命令。
 
-### 任务与 Review（`0.2`）
+### 任务与 Review（阶段 A/B）
 
 ```bash
 stewardctl task list [--status ...] [--json]
 stewardctl task show <task-id-or-external-id>
 stewardctl task confirmations <task-id>
-stewardctl task create --workspace <workspace-id> [--repo <repository-id>] [--worktree <worktree-id>] --idempotency-key <key>
+stewardctl task create [--workspace <workspace-id>] [--repo <repository-id>] [--worktree <worktree-id>] --idempotency-key <key>
+stewardctl task update <task-id> --input <task-patch.json> --expected-version <n> --idempotency-key <key>
+stewardctl task comment <task-id> --input <record.json> --expected-task-version <n> --idempotency-key <key>
 stewardctl task transition <task-id> --to <status> --expected-version <n> --idempotency-key <key>
 stewardctl task assign <task-id> --actor <actor-id> --expected-version <n> --idempotency-key <key>
 stewardctl review submit <task-id> --evidence <artifact-link-id>@<expected-link-version>... --expected-task-version <n> --idempotency-key <key>
@@ -70,9 +76,24 @@ stewardctl review request-changes <submission-id> --expected-task-version <n> --
 stewardctl task audit [<task-id>]
 ```
 
+`task update` 只更新 schema 允许的目标、下一步、优先级、描述等字段，不接受 status/owner/actingActor 覆盖；生命周期与分配使用专用命令。`task comment` 追加进度、决策、约束或操作说明及来源，用户确认通过受控用户入口表达，AI 不能自称已获确认。具体字段与 Review 期间编辑行为在 D-020/D-024 冻结。
+
 通用 `task transition` 不允许直接进入 Review 或 Done：这两个入口分别只由 `review submit` 和 `review accept` 提供。`review submit` 校验每个 source Link 的 expectedVersion、active 状态、权限及 Artifact contentHash，并在一个事务中为 ReviewSubmission 创建独立 active `review_evidence` Link、固定 submittedTaskVersion/acceptanceCriteriaHash/evidenceSetHash、创建新的 reviewCycle 并把 Task 推进 Review。`review accept` 同时比较 Task/Submission 版本、已固定 hash，以及每个 submission-owned evidence Link 的 active 状态、版本和 contentHash；成功时在一个事务创建 accepted ReviewDecision、结束 Submission 并推进 Done。`review request-changes` 同样原子创建 Decision 并退回 In Progress。Done 重新打开固定回到 In Progress，旧 submissionId 只能读取，下一次 submit 必须创建新的 reviewCycle。
 
-### Assignment/Agent（`0.3`）
+### TaskCheckpoint 与恢复上下文（阶段 A；阶段 C 复用）
+
+```bash
+stewardctl task context <task-id>
+stewardctl task checkpoint create <task-id> --input <checkpoint.json> --expected-task-version <n> --idempotency-key <key>
+stewardctl task checkpoint list <task-id>
+stewardctl task checkpoint show <checkpoint-id>
+```
+
+context 返回当前目标、状态、owner、下一步、约束与决策、最近 Checkpoint、证据引用，以及带观察时间的 Git 状态。发现过期或缺失内容时显式返回差异，不声称 SQLite 与 Git 是同一原子快照。
+
+Checkpoint schema 见第 05 篇与 D-024；不要求 sessionId、Assignment 或 Runtime。AI 使用服务端绑定 Task scope 调用同一命令；可选外部会话引用只作 provenance。
+
+### Assignment/Agent（可选阶段 D）
 
 ```bash
 stewardctl assignment create <task-id> --role writer --runtime herdr --idempotency-key <key>
@@ -96,7 +117,7 @@ spawn/resume/send-prompt/close 返回 taskd 生成的稳定 operationId。重试
 
 `assignment complete --report` 只接受 finalized Artifact，并在完成 Assignment 的 SQLite transaction 中创建 `relationType=report` 的 active ArtifactLink；新报告必须先走 Artifact publish 协议。Artifact 本身不保存 assignmentId 或 taskId。
 
-### Context Window、History 与 WorkingNote（`0.3`）
+### Context Window、History 与 WorkingNote（可选阶段 D）
 
 ```bash
 stewardctl context-window list --session <session-id>
@@ -114,7 +135,7 @@ stewardctl working-note write <note-id> --expected-version <n> --expected-conten
 
 Human/Admin 可以在授权范围内显式选择 Session/Assignment。Agent connection 的 sessionId、assignmentId 和 principal 由 taskd 绑定；命令中的过滤条件只能缩小 scope，不能扩大或替换 connection scope。
 
-### Git（`0.3` inspect；`0.5` write）
+### Git（按需 inspect；写入另行启用）
 
 ```bash
 stewardctl git inspect <task-id>
@@ -124,9 +145,11 @@ stewardctl git execute <plan-id>
 stewardctl git verify <operation-id>
 ```
 
-Phase 1 的 Repo/Worktree discovery 不经过本命令族且只读。`git inspect` 最早在 AI 阶段按既有 TaskContextBinding 使用；plan/approve/execute 属于高级 Git 阶段。`approve` 只有在可信 Human principal 下才可用；Agent shell 中相同命令必须被服务端拒绝。
+阶段 A 的 Repo/Worktree 身份与状态读取不经过 Git 写入命令族。`git inspect` 按既有 TaskContextBinding 使用；plan/approve/execute 属于另行启用的 Git 写入能力。`approve` 只有在可信 Human principal 下才可用；Agent shell 中相同命令必须被服务端拒绝。
 
-### 数据与优化
+### 数据（阶段 A 起）与优化（探索 X）
+
+backup/export/inspect 随实际存储启用；optimize 命令仅是探索 X 的候选接口，不进入主线 CLI 验收。
 
 ```bash
 stewardctl data backup create --destination <path> --idempotency-key <key>
@@ -139,9 +162,9 @@ stewardctl optimize experiment
 stewardctl optimize promote <proposal-id>
 ```
 
-`0.1` 的 backup create 先覆盖 Registry metadata；`0.2` 起扩展 Artifact manifest/Blob/key envelope。SQLite 一致性点由覆盖全部 writer 的数据库层 gate 固定；发布后响应丢失时按 final manifest reconcile 同一 BackupOperation。backup restore 要求 taskd 独占维护模式，在隔离临时根验证并 normalization 后原子切换；幂等键、requestHash、manifest hash 和 old/new data-root generation 记录在被替换根之外的 bootstrap journal。相同请求在切换后重试只能继续/返回原 operation，不能再次 restore。
+首期 backup create 使用显式维护停写模式，覆盖 Task/Checkpoint/上下文与实际使用的证据；启用加密 Blob 后覆盖 Blob/key envelope。以下 gate/pin/operation 规则适用于在线扩展，恢复仍需 D-021 的 generation 契约。SQLite 一致性点由覆盖全部 writer 的数据库层 gate 固定；发布后响应丢失时按 final manifest reconcile 同一 BackupOperation。backup restore 要求 taskd 独占维护模式，在隔离临时根验证并 normalization 后原子切换；幂等键、requestHash、manifest hash 和 old/new data-root generation 记录在被替换根之外的 bootstrap journal。相同请求在切换后重试只能继续/返回原 operation，不能再次 restore。
 
-### 业务事实与实现认知（`0.4`）
+### 业务事实与实现认知（探索 X）
 
 ```bash
 stewardctl fact propose|show|history
@@ -161,6 +184,9 @@ FactRevision confirm 在一个事务中比较 BusinessFact version、candidate r
 
 ## 3. MCP 工具候选
 
+阶段 C 只暴露 Task 查询、task_update/task_comment_create、task_context、task_checkpoint_create/list/get、进度/阻塞写入与 review_submit 的限定子集。review_accept/request-changes 的 AI Reviewer capability、Assignment/Agent/ContextWindow 工具均为后续能力，不能据下面完整候选表推断为阶段 C 必交付。阶段 C 的验收由用户入口执行。
+
+
 ### 只读
 
 ```text
@@ -173,6 +199,9 @@ worktree_get
 task_list
 task_get
 task_get_confirmations
+task_context
+task_checkpoint_list
+task_checkpoint_get
 review_submission_get
 task_get_next
 task_audit
@@ -200,6 +229,9 @@ drift_finding_get
 
 ```text
 task_create
+task_update
+task_comment_create
+task_checkpoint_create
 task_transition
 task_assign_owner
 review_submit

@@ -1,10 +1,10 @@
 # Herdr 与原生 Subagent Runtime
 
-> 阶段说明：Runtime Adapter 属于 Phase 3。只有 Phase 1 Workspace/Repo Registry 与 Phase 2 Task/Review 日用闭环稳定后，才选择一个 Runtime 做首个垂直切片；多 Runtime 支持不阻塞 `0.1`/`0.2`。
+> 范围：本文属于可选阶段 D 的 Runtime 控制。阶段 C 只接入现有 AI 会话读写任务，不需要本 Adapter。只有手工启动/恢复成本被验证后才选择一个宿主；多 Runtime 和宿主上下文管理都不阻塞 V1 主线。
 
 ## 1. 目标
 
-核心同时支持：
+后续可评估的接入形态：
 
 - Herdr 管理的独立终端 Agent；
 - Pi、Claude、Codex 等宿主的原生 subagent；
@@ -143,7 +143,7 @@ Host Plugin 负责：
 - 捕获完成/阻塞信号；
 - 上报 capability。
 
-V1 需要选定至少一个具体 Native Host 作为首个实现，并通过相同 Runtime conformance tests。
+若选择 Native Host 路线，先实现一个具体宿主并通过 Runtime conformance tests；不要求与 Herdr 同时交付。
 
 ## 5. Manual Adapter
 
@@ -176,7 +176,7 @@ created / active / completed / blocked / cancelled / needs_reconciliation
 - Runtime unknown 不自动释放 owner/writer lease；
 - taskd 通过事件、artifact、Git 和 lease 进行 reconciliation。
 
-## 7. 上下文窗口与工作记忆
+## 7. 按所选 Runtime 需要启用上下文窗口与工作记忆
 
 - 一个 Session 可以包含多个 ContextWindow；窗口切换不创建新的 Task，也不改变 Assignment 结论。
 - 手动 reset、自动 token-budget 切换、模型变化和 resume 统一记录持久化 transition operation/event；Adapter 内部实现可以不同。

@@ -1,55 +1,59 @@
 # Agent Steward V1 设计文档
 
-状态：**Workspace / Repository 优先的设计基线草案**
+状态：**以任务接续与交付为主线的设计基线草案**
 
-目标：先冻结 Workspace、Repository 和 Worktree 的本地工作边界，再在该边界上交付不依赖 AI 的任务与验收闭环，之后接入 AI 执行、业务事实、实现认知和优化能力。
+产品承诺：随时知道一个任务做到哪里、依据是什么、下一步是什么，并能让另一个会话接着做。
 
-## 建议阅读顺序
+## 阅读与契约优先级
 
-先读[产品定位](01-product-positioning.md)和[V1 实施路线](11-roadmap.md)，确认 Workspace/Repo → Task → AI → Knowledge 的交付顺序；再读[任务管理器架构图](17-task-manager-architecture.md)和[任务管理流程图](18-task-management-workflow.md)，随后读[业务事实工作台架构图](19-business-fact-workbench-architecture.md)和[业务事实与 Git 变更流程图](20-business-fact-and-git-flow.md)，最后读[需求说明](02-requirements.md)、[总体架构](03-architecture.md)和[领域与数据模型](05-domain-model.md)。第 13–16 篇描述全部能力启用后的完整产品视图，不代表首期实现顺序。
+先读[产品定位](01-product-positioning.md)、[需求与验收](02-requirements.md)和[实施路线](11-roadmap.md)，再读[核心工作流](14-core-workflow.md)、[总体架构](03-architecture.md)与[待决策事项](12-open-decisions.md)。
+
+01、02、03、11、12 定义当前范围和阶段门槛。04–10 保存按能力启用的技术契约，不代表所有实体、组件和协议都要在首版实现。13–18 展示当前主线；19–20 仅描述后续知识探索。已有 Codex/Pi 评审属于历史记录，其旧范围建议不覆盖当前基线。
+
+## 已确认方向
+
+- 第一条用户路径是当前目录建任务、记录进度与证据、保存 Checkpoint、恢复工作、人工验收。
+- Workspace 是内部归属边界，可以自动创建默认 Workspace；用户不必先完成 Registry onboarding。
+- Repository/Worktree 身份识别随任务交付，Git 读取必须区分登记信息与当前现场；不把 Registry 单独作为首个产品版本。
+- CLI 优先覆盖任务闭环；选一个薄界面辅助浏览和验收，另一客户端按需要补齐。所有入口复用同一 Application Service。
+- SQLite 保存领域状态；状态变更、版本、幂等记录和对应事件在同一事务提交。
+- 首期采用明确停写的维护备份；在线备份、多 Blob capture 等复杂协议在相应能力启用时再实现。
+- AI 先通过 CLI/MCP 接续现有会话中的任务；主动创建、恢复或控制 Agent 是独立的后续执行增强。
+- AI 输出是进度和完成候选，Done 由用户明确验收产生。
+- 项目约束、关键决策和操作说明先作为带来源的简单记录复用；完整 BusinessFact、映射、漂移和 Optimizer 不属于 V1 发布承诺。
+- 默认本地存储、无遥测，不为潜在分析用途默认采集完整会话。
+
+## 阶段与发布范围
+
+| 阶段 | 用户结果 | 发布定位 |
+|---|---|---|
+| A | 当前目录开始任务，保存进度与 Checkpoint，人工确认完成 | 首个可用版本 |
+| B | 隔日、重启、切换 Worktree 后可靠接续并复核证据 | 日常使用版本 |
+| C | 新的现有 AI 会话读取相同任务并继续工作 | V1 核心接入范围 |
+| D | 按已验证需求控制一个 Runtime 并处理异常恢复 | 可选执行增强，不阻塞 V1 |
+| X | 结构化业务事实、实现漂移、知识提炼和优化候选 | 后续探索，另立项 |
+
+详细进入条件和退出条件见[实施路线](11-roadmap.md)。版本号在发布时确定，不把旧 0.x 阶段编号继续作为交付承诺。
 
 ## 文档目录
 
 1. [产品定位](01-product-positioning.md)
-2. [需求说明](02-requirements.md)
+2. [需求与验收](02-requirements.md)
 3. [总体架构](03-architecture.md)
-4. [安全与权限模型](04-security-model.md)
+4. [安全与权限](04-security-model.md)
 5. [领域与数据模型](05-domain-model.md)
-6. [CLI 与 MCP 设计](06-cli-and-mcp.md)
-7. [Git 生命周期治理](07-git-governance.md)
-8. [Herdr 与原生 Subagent](08-runtime-adapters.md)
-9. [会话数据、隐私与本地存储](09-session-data-and-privacy.md)
-10. [自身优化与 Skill 生成](10-self-optimization.md)
-11. [V1 实施路线](11-roadmap.md)
+6. [CLI 与 MCP](06-cli-and-mcp.md)
+7. [Git 治理：后续能力](07-git-governance.md)
+8. [Runtime 控制：阶段 D](08-runtime-adapters.md)
+9. [数据、隐私与存储](09-session-data-and-privacy.md)
+10. [Optimizer：探索 X](10-self-optimization.md)
+11. [实施路线](11-roadmap.md)
 12. [待决策事项](12-open-decisions.md)
 13. [产品架构图](13-product-architecture.md)
-14. [核心业务流程图](14-core-workflow.md)
-15. [TUI 与 GUI 交互架构图](15-tui-gui-interaction-architecture.md)
-16. [TUI 与 GUI 协同交互流程图](16-tui-gui-interaction-flow.md)
-17. [任务管理器架构图](17-task-manager-architecture.md)
-18. [任务管理流程图](18-task-management-workflow.md)
-19. [业务事实工作台架构图](19-business-fact-workbench-architecture.md)
-20. [业务事实与 Git 变更流程图](20-business-fact-and-git-flow.md)
-
-## 已确认方向
-
-- 产品将作为独立的个人工具开发，并计划后续公开到 GitHub。
-- 第一交付层是 Workspace + Repository/Worktree Registry；首个可用版本只读识别本地代码现场，不依赖 AI、MCP 或 Git 写操作。
-- Task 是第二交付层的共享工作单元，必须归属 Workspace，并可通过显式 binding 关联零个或多个 Repository/Worktree；不以 Project 作为必经父级。
-- TUI 与 GUI 都是一等客户端，调用同一套 Command、Query 和 Event API，并读取同一权威状态。
-- 人类、AI 和自动化都使用通用 Actor/Owner 模型；Task Manager 只管理任务池，Task Owner 推进具体任务。
-- AI 执行属于第三交付层，必须接入同一任务生命周期，不能形成独立的“AI 任务系统”。
-- BusinessFact、实现快照/映射和优化属于后续交付层；优化只能在任务循环外读取历史并生成候选。
-- SQLite 作为运行时唯一权威数据源。
-- 数据默认保留在本地且不上传遥测；所有任务变化记录为可追溯事件。
-- Workspace 从首期起承载 Repository、Worktree、Task 和后续业务事实；Git 首期只提供只读身份与状态，后续才提供绑定 Commit/WorktreeSnapshot 的实现快照和证据。
-- Optimizer 默认只能观察和提出候选，用户确认后才允许应用。
-- AI、高风险 Git 操作和多 Runtime 适配继续保留严格授权设计，但不阻塞 Workspace/Repo Registry 与后续任务闭环。
-
-## 非目标
-
-- 首个里程碑不提供云端多租户、团队协作、组织级 RBAC 或跨机器集群。
-- 首个里程碑不要求 Task/Review、AI 执行、多 Runtime、Git 写操作、代码扫描或完整会话采集。
-- AI 能力不能成为创建、查看、推进和验收普通任务的前置条件。
-- 优化模块不得静默修改用户偏好、项目需求、安全策略、Prompt 或代码。
-- 核心领域模型不写死 Herdr、Pi、Claude、Codex 或任一 Git 平台。
+14. [核心工作流](14-core-workflow.md)
+15. [客户端架构](15-tui-gui-interaction-architecture.md)
+16. [客户端协作流程](16-tui-gui-interaction-flow.md)
+17. [任务核心架构](17-task-manager-architecture.md)
+18. [任务生命周期](18-task-management-workflow.md)
+19. [知识工作台探索](19-business-fact-workbench-architecture.md)
+20. [事实与 Git 流程探索](20-business-fact-and-git-flow.md)

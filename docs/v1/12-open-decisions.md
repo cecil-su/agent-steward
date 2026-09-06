@@ -1,189 +1,125 @@
 # 待决策事项
 
-这些问题在实现对应阶段前必须关闭。未关闭不代表 V1 文档无效，但不得在代码中静默选择。决策按 Workspace/Repo → Task → AI → Knowledge 顺序关闭；Phase 1 Registry 不应被后续 Task、AI、Git 写入或 Optimizer 决策阻塞。
+决策按阶段 A–C 主线关闭。D 是可选执行增强，X 是探索；后期问题不得阻塞首期任务接续。本文保留原 D 编号便于追溯，但重排适用阶段。
 
-## D-001 技术栈
+## 阶段 A 编码前
 
-候选：
+### D-001 技术栈、平台与核心部署
 
-- TypeScript/Node：MCP 和现有生态集成快，但需要管理 Node 版本与单文件分发；
-- Go：单二进制和服务部署友好，Runtime/MCP 生态需要评估；
-- Rust：安全与单二进制强，开发和适配成本较高。
+选择技术栈、SQLite 方案和首个验证平台。先验证一个平台的真实任务路径，再评估跨平台分发；不把三平台全部验证作为首轮试用前提。嵌入式核心与服务部署的选择见 D-019。
 
-需要 capability spike，而不是只凭偏好决定。
+### D-012 既有数据接续
 
-## D-002 taskd 运行身份
+核查是否需要导入实际 V0 Task/Checkpoint。若需要，定义一次性导入、来源 ID、字段转换和验证；没有实际数据迁移需求时不预建 importer。Markdown 仅作为导入来源或只读导出，不能成为长期双向权威。
 
-- Standard：与用户同身份；
-- Hardened：独立 OS 用户/服务、容器或沙箱。
+### D-013 Task 最小生命周期
 
-需要明确 Windows、macOS、Linux 的最小可行方案。
+冻结创建、开始、阻塞、恢复、提交验收、返工、取消、重开及归档的合法转换和 owner/nextAction 条件。Done 只由用户显式 accept 产生，重新打开进入 In Progress。
 
-## D-003 用户审批渠道
+首版不要求父子任务、复杂依赖、自动选任务或周期模板。Review 期间编辑与撤回问题见 D-020，不能留待实现者猜测。
 
-需要选择 Agent 无法伪造的渠道：
+### D-015 事件与恢复后同步
 
-- 本地 Web UI；
-- 系统托盘/桌面 UI；
-- 独立可信终端；
-- OS credential/生物识别。
+状态、Receipt 与对应事件同事务。启用增量同步时使用独立于 aggregateVersion 的 streamPosition 和同事务 snapshot + watermark，未知 schema 显式拒绝或 upcast，过期 cursor 强制重新获取 snapshot。
 
-普通 Agent 可执行的 CLI 命令不能单独作为 Hardened 批准。
+首版可以按需查询，不要求实时推送。restore generation 对 cursor、请求、连接和幂等记录的影响见 D-021；事件保留、客户端缓存与审计删除策略按实际数据范围冻结。
 
-## D-004 Git 权限默认值
+### D-018 默认 Workspace 与最小 Repository identity
 
-需通过实际用户使用确定 commit、merge、push 的默认 deny/ask/allow 策略。无论默认值如何，force push、reset hard 和 destructive clean 首版建议 deny。
+- 从当前目录开始任务时，如何选择或自动建立默认 Workspace；显式指定与自动发现发生冲突时如何提示。
+- workspaceId 是持久归属，rootPath 是发现范围，不授予文件删除权限；不要求首期实现多 Workspace 管理界面。
+- Repository identity 组合 canonical real path、Git common dir 与可选 remote；linked Worktree 必须归为同一 Repository，独立 clone 不能仅因相同 remote 被合并。
+- 先冻结首个支持平台上的大小写、symlink、路径缺失与重复登记；nested Repo、submodule、bare Repo 未支持时明确提示，不静默误识别。
+- Task 多个候选上下文、missing/unlinked 和重新绑定的规则；解绑只改关联，不改用户目录。
 
-## D-005 Native Host 首选实现
+### D-019 Application Service 与维护备份
 
-Herdr 必须支持；Native Runtime 首个具体宿主需从 Pi、Claude Code、Codex 中选择。核心和 SDK 必须允许后续扩展。
+统一业务入口是固定边界。选择本地嵌入式核心或 taskd 服务，并确保多进程写入仍使用同一事务、身份和策略实现。
 
-## D-006 数据加密
+首期采用显式维护停写备份，冻结如何排除全部 writer/worker、验证 SQLite 与可选 Blob、发布和恢复整套数据。在线备份的 operation/pin/generation 协议仅在实际需要在线服务时扩展；恢复的跨代失效问题仍必须先解决。
 
-- SQLite 是否使用 SQLCipher；
-- Blob 加密格式；
-- OS Keychain 与用户口令；
-- 全文搜索/embedding 与加密之间的取舍；
-- 密钥丢失策略。
+### D-020 Review 编辑与撤回
 
-已冻结的备份最低要求：可移植备份必须带由用户备份口令/恢复密钥或显式外部 key provider 包装的加密 key envelope；不得保存明文密钥，也不得把仅对原设备有效的 OS Keychain 引用宣称为可移植恢复材料。具体 KDF、轮换和丢失处置仍需在本决策中关闭。
+未解决：accept/request-changes 要求 current Task version 等于 submittedTaskVersion；更换 owner 或编辑 Task 后可能同时无法验收和返工。
 
-## D-007 Session 全量采集方式
+编码前选择并定义：禁止哪些 Review 期间编辑，哪些编辑原子撤回 Submission，以及显式 withdraw 如何使用当前版本退回 In Progress。旧 Submission 与证据保留，新 submit 创建新 cycle。仅有 withdrawn 枚举不算完整契约。
 
-不同宿主的 Session 格式、增量读取、附件和 compaction 表达不一致，需要定义 importer contract 和 provenance schema。
+### D-021 Restore generation
 
-## D-008 Optimizer 使用的模型
+未解决：恢复旧 SQLite 会回退对象版本并丢失备份之后的 Receipt，旧请求可能再次满足 expectedVersion。
 
-- 当前 Agent 模型；
-- 本地模型；
-- 用户指定云模型。
+冻结新 data generation 在 Command、幂等 scope、Query snapshot、event cursor 和连接中的传播与校验。恢复后必须拒绝旧 generation 的写入并强制重建同步上下文；只撤销短期 capability 不足以覆盖人类 CLI。覆盖“备份后执行成功、恢复、旧请求重试”的验收场景。
 
-任何云模型读取 Session 都必须是单独、可见、可撤销的授权，不属于默认无遥测行为。
+### D-024 TaskCheckpoint 与最小证据
 
-## D-009 数据保留与删除
+冻结不依赖 Assignment/Session/ContextWindow 的 TaskCheckpoint schema：Task/version、当前 owner 引用、进度说明、唯一下一步、未决问题、决策与证据引用、Git 观察时间，以及 partial/missingRefs。
 
-长期数据保留策略仍需决定：
+确定首版证据保存 SQLite 小内容还是 Artifact Blob，以及不可变、大小、读取权限、保留和维护备份要求。普通文件路径可作为定位线索，不能把会变化或丢失的文件路径宣称为已固定的 Review evidence。
 
-- 默认加密和存储上限；
-- 删除后的审计最小事实；
-- embedding/全文索引重建；
-- 用户偏好在证据删除后的处理。
+## 阶段 B 前
 
-## D-010 产品和组件命名
+### D-014 首个薄界面
 
-暂定：
+CLI 先覆盖完整闭环。根据实际任务样本选择一个 TUI 或 GUI 用于列表、恢复、详情和验收；第二客户端无承诺日期。共享 Command/Query/权限规则，展示可不同。实时 Event Stream 是否需要由交互需求决定。
 
-- 项目/仓库：`agent-steward`
-- 服务：`taskd`
-- CLI：`stewardctl`
-- MCP：`steward-mcp`
+### D-009 已纳管数据的保留与删除
 
-公开前检查 GitHub、npm、PyPI、crates.io、Homebrew、Scoop 和可执行文件名冲突。
+在首批证据进入持久存储前先冻结最小保留/删除规则；阶段 B 再根据日用规模调整容量与历史查询。删除必须处理引用、索引和最小审计事实，不能破坏保留中的 Review evidence。完整 Session/embedding 策略留待对应能力启用。
 
-## D-011 开源与插件边界
+## 阶段 C 前
 
-需要确定：
+### D-016 现有 AI 会话接入
 
-- License；
-- Core/Adapter/Policy Pack 的仓库结构；
-- NRS 等私有规则不得进入通用 Core；
-- 第三方 Adapter 的权限与签名机制；
-- 数据 schema 和 plugin API 的兼容策略。
+冻结受控 CLI/MCP 的身份建立、Task scope、owner 变更失效、上下文查询和进度/Checkpoint/完成候选写入。AI 不能自行声明 Human 身份或自动关闭任务。
 
-## D-012 Markdown 迁移
+这个阶段不要求 Runtime Adapter、Assignment、spawn/resume 或 Session importer。若需要会话关联，只保存可选外部 session reference，不将其变成 Task 的父对象。
 
-SQLite 成为权威前，需要一次性 importer、只读 shadow 对比和切换计划。切换后 Markdown 仅由 exporter 生成，不能长期双向维护。
+### D-002 / D-003 安全模式与用户确认
 
-## D-013 Task 最小模型与生命周期
+阶段 C 明确 Standard 的协作完整性承诺、Human 与 AI 连接建立方式和验收入口。若威胁模型要求阻止同 OS 身份 Agent 绕过入口，必须先实现独立身份/沙箱等 Hardened 边界。
 
-实现任务内核前需要冻结：
+可信高风险批准在启用 Git 写入或其他敏感副作用前另外冻结；不能把普通同身份 CLI 命令宣称为对抗性批准渠道。
 
-- Ready 是否强制要求 owner、nextAction 和 acceptanceCriteria；
-- Blocked 恢复到 Ready 还是此前状态；
-- Done 重新打开的目标状态已冻结为 In Progress；旧 ReviewSubmission/Decision 仅保留历史，再次验收必须创建新的 reviewCycle。仍需决定 reopen 对完成率、周期时间等指标的统计处理；
-- ReviewSubmission 的 evidence 容量/保留上限；Task/criteria/evidence 版本绑定和 accept 原子事务已冻结；
-- archive/restore 的授权、允许状态和默认视图行为；
-- 父子任务的完成约束和阻塞循环检测策略。
+### D-006 加密与恢复材料
 
-建议用 20–30 个真实任务样本做状态迁移演练后决定。
+在实际保存敏感 Blob 前冻结加密、密钥保护和恢复方案；阶段 C 明确最小交接数据范围。可移植加密备份需口令/恢复密钥或可用外部 provider 包装的 key envelope，不保存明文密钥，也不把设备专属 Keychain 引用当作跨设备恢复材料。
 
-## D-014 TUI 与 GUI 交付策略
+## 可选阶段 D 与后续集成前
 
-需在同一代码库内选择：
+### D-005 一个 Runtime 的选择
 
-- 同时交付薄客户端；
-- 先交付 TUI，再复用契约实现 GUI；
-- 先交付 GUI，再补齐 TUI。
+先验证阶段 C 的手工启动/恢复成本，再从可用宿主中选择一个 Runtime。Herdr、Pi、Claude、Codex 都是候选，不要求 Herdr 加 Native Host 双实现。
 
-无论顺序如何，两端必须共享 Command/Query/Event contract，不允许共享数据库文件但各自实现业务规则。
+### D-017 宿主上下文与工作记忆
 
-## D-015 DomainEvent 与同步策略
+所选 Runtime 需要时才定义 ContextWindow、transition mode、History、WorkingNote 和 ContextCheckpoint。TaskCheckpoint 仍负责不依赖宿主的任务接续。不得把读取完整会话、控制 compaction 或存储每条工具输出当作默认前提。
 
-已冻结的最小 envelope 与同步协议：
+### D-022 Runtime 重试目标稳定性
 
-- eventId、全局唯一且单调递增的 streamPosition、aggregateType、aggregateId、aggregateVersion；streamPosition 与 aggregateVersion 分离并允许空洞；
-- principalId、actorId、eventType、payload；
-- correlationId、causationId、idempotencyKey、requestHash、createdAt；
-- 必填正整数 schemaVersion，按 eventType 标识 payload schema。未知版本必须显式 upcast 或拒绝，不能猜读。
-- Snapshot Query 必须在同一个 SQLite read transaction 返回 read model + eventWatermark；客户端只消费 `streamPosition > watermark` 的事件。
-- cursor 早于 outbox earliestAvailablePosition 时返回 CURSOR_EXPIRED 并强制重取 snapshot，不能静默跳到仍保留的事件。
-- ArtifactBlobPending 是 internal/audit-only 存储记录，没有业务 streamPosition，不进入普通客户端 Event Stream。
+未解决：先解析 active Run 再计算 requestHash，会让 close 成功后的重试找不到 Run，或在新 Run 出现后解析到不同目标。
 
-仍需决定：
+冻结首次请求目标与重试匹配顺序：命中 Receipt 使用持久化 Run/Handle 并重验读取权限；只有首次请求解析 active Run，或命令显式绑定 agentRunId。必须覆盖响应丢失后 close 重试及 Run 替换测试。
 
-- TaskEvent、FactRevisionEvent、MappingEvent、SnapshotEvent 和 DriftFindingEvent 的事件族与兼容规则；
-- outbox 保留期限、压缩方式与 earliestAvailablePosition 的发布方式；
-- 是否在首版提供实时推送，还是先用可靠轮询；
-- 更正和删除在不可变时间线中的表达方式。
+### D-004 Git 写入策略
 
-## D-016 AI 接入边界
+只读上下文识别不依赖本决策。启用 commit/merge/push 前冻结策略、可信批准、Git 现场变化检查和外部副作用恢复。force push/reset hard/clean 不属于 V1 主线。
 
-进入 AI 阶段前需要冻结：
+## 探索 X 与公开扩展前
 
-- 首个 Runtime 与最小 Adapter contract；
-- AI 作为 Owner、Worker 或两者都支持；
-- Assignment 与 Task/Subtask 的边界；
-- AI 提交 Review 所需最小证据；
-- 哪些操作只需 task policy，哪些需要安全 capability 和可信批准。
+### D-007 / D-008 完整会话采集与分析模型
 
-## D-017 AI Context Window 与持久工作记忆
+先说明具体用途、数据范围、收益验证与保留策略，再决定 importer、全文索引或 embedding。默认不采集完整会话；任何远程分析需要单独、可见、可撤销的授权。
 
-进入首个 AI Runtime 垂直切片前需要冻结：
+### D-023 事实版本与实现观察
 
-- 验证“一 ContextWindow 只服务一 Assignment”，以及 Session 切换 Assignment 时关闭旧窗口并创建新窗口的约束；
-- 首个 Runtime 支持 `fresh_window`、`summary_compaction`、`opaque_compaction` 或宿主原生策略中的哪些模式；
-- 手动 reset、自动 token-budget 切换、模型变化和 resume 是否使用同一 transition event；
-- 窗口切换前最小 ContextCheckpoint 的字段，以及 checkpoint 不完整时的恢复行为；
-- History 的采集范围、只读查询、搜索、截断、保留和删除语义；
-- WorkingNote 的逻辑命名、scope、版本、幂等、覆盖和 supersede 规则；
-- 新 ContextBrief 必须重新读取的 Task、Assignment、授权、业务事实和 Git 版本；
-- model/config/skill/environment fingerprint 变化后的重建规则；
-- History/notes 默认本地存储，接入远程后端时的显式授权和数据范围；
-- History、WorkingNote、ContextCheckpoint 和正式 Task/Business Fact 之间的权威优先级；
-- resume、重复 initial context、过期 owner epoch、越权 history 查询和 notes 冲突的验收测试。
+未解决：MappingObservation/DriftFinding 未明确绑定所评估 FactRevision，事实更新后旧 current 可能被误用于新规则。
 
-核心原则是允许模型上下文随时重置，但 Task、授权和已确认业务事实必须保存在窗口之外；History 和 WorkingNote 只能帮助恢复执行，不能成为第二套状态权威。
+进入知识实现前冻结 factRevisionId 绑定与重新评估规则；若 freshness 仅表示实现位置存在，必须与业务符合性分开展示。简单决策记录不依赖此模型。
 
-## D-018 Workspace / Repository Identity
+### D-010 / D-011 名称、发布与插件
 
-进入 Phase 1 前需要冻结：
+公开发布前冻结名称和 License；只有开放插件时才定义插件权限、签名与 API 兼容规则。不为尚未需要的多 Runtime/Policy Pack 提前建设平台框架。
 
-- Workspace.rootPath 是 discovery scope、显示属性还是安全边界，以及 root 移动后的 reconcile；
-- Repository identity 如何组合 canonical real path、Git common dir、remote identity 和无 remote Repo；
-- Windows 大小写、junction/symlink、UNC，macOS case folding，以及跨平台备份恢复后的 path 规范化；
-- nested Repo、submodule、bare Repo 和 linked Worktree 的发现/确认策略；
-- moved、missing、identity_conflict 与重新发现的状态转换；
-- dirtyState 的读取范围与性能上限；
-- unlink/archive 只改变 registry 状态、绝不删除或修改用户目录的验收测试。
+## 决策顺序
 
-## 建议优先级
-
-Phase 1 Registry 编码前优先关闭：
-
-1. D-018 Workspace / Repository Identity；
-2. D-014 首个 TUI/GUI onboarding 交付策略；
-3. D-001 技术栈；
-4. D-015 DomainEvent 与同步策略；
-5. D-012 Markdown 迁移。
-
-Phase 2 Task 编码前关闭 D-013。进入 AI 执行前关闭 D-016、D-017、D-005，并根据能力范围关闭 D-002、D-003、D-004 和 D-006。进入 Knowledge/Optimizer 前关闭 D-007、D-008 和 D-009。D-010 与 D-011 在公开发布或开放插件前关闭。
+阶段 A 优先 D-001、D-012、D-013、D-018–D-021、D-024 和 D-015 的最小子集；首次保存数据时关闭 D-009/D-006 中适用部分。B 关闭 D-014，C 关闭 D-016 和适用安全项。D/X 决策仅在对应能力获准进入时关闭。

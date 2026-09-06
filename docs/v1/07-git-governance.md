@@ -1,6 +1,6 @@
 # Git 生命周期治理
 
-> 阶段说明：Phase 1 只通过 Repository/Worktree Registry 读取 identity、Branch、HEAD 和 dirty/missing 状态；不执行 Git 写操作。本文的 Plan → Approve → Execute → Verify 属于高级集成阶段，不是 Registry 或 Task 闭环的前置条件。
+> 范围：阶段 A–C 只读取任务关联 Repo/Worktree 的现场。本篇是另行启用 Git 写入时的候选安全契约，不属于 V1 发布承诺，也不是任务接续的前置条件。
 
 ## 1. 目标
 

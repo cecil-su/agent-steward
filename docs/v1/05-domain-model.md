@@ -1,5 +1,9 @@
 # 领域与数据模型
 
+> 范围：阶段 A/B 只采用任务接续需要的 Workspace/Repo 身份、Task、Actor/Ownership、TaskCheckpoint、Review、Receipt/Event 和实际启用的证据存储。TaskRelation、SavedView 按需求启用；Assignment/AgentRun/ContextWindow 属于可选阶段 D，BusinessFact/Mapping 属于探索 X。模型存在不等于首版必须实现。
+>
+> 本文 taskd 表示可信应用核心；是否部署为常驻服务由 D-019 决定。Blob 发布协议从首次使用 Blob 起生效；在线 BackupOperation/Pin 协议按在线能力启用，首期维护备份仍必须验证整套数据。Review 编辑、restore generation、Runtime 重试目标和事实版本绑定尚待 D-020–D-023 关闭。
+
 ## 1. Workspace / Repository 基础与任务核心实体
 
 ### Workspace
@@ -10,7 +14,7 @@
 - createdAt、updatedAt、archivedAt
 - `currentVersion`
 
-Workspace 是本地数据与工作上下文的第一等边界，从 Phase 1 起存在。Repository、Worktree、Task 和后续 BusinessFact 都必须归属 Workspace；V1 不要求用户创建 Project，也不以 Project 作为 Task 的必经父级。rootPath 用于 discovery scope，不授予删除或移动目录的权限。
+Workspace 是本地数据与工作上下文的第一等边界，随阶段 A 任务创建存在。Repository、Worktree、Task 和后续 BusinessFact 都必须归属 Workspace；V1 不要求用户创建 Project，也不以 Project 作为 Task 的必经父级。rootPath 用于 discovery scope，不授予删除或移动目录的权限。系统可以自动建立默认 Workspace，用户不需要先完成 Registry onboarding；默认选择和冲突规则见 D-018。
 
 ### Repository / Worktree Registry
 
@@ -19,7 +23,7 @@ Workspace 是本地数据与工作上下文的第一等边界，从 Phase 1 起�
 - availabilityState：`available` / `missing` / `moved` / `identity_conflict` / `unlinked`
 - dirtyState：`clean` / `dirty` / `unknown`
 
-Repository identity 由规范化 real path 与可用时的 Git identity 共同校验，不能仅按用户输入字符串创建重复记录。Worktree 必须属于同一 Repository；detached HEAD 以 branch 为空和 headSha 表达，不伪造 Branch。Phase 1 的 discover/register/rescan 只读取文件系统和 Git 事实；unlink 是受审计的 registry 状态转换，不删除、移动或清理 Repository/Worktree 目录。missing/unlinked 记录保留最小 identity 与历史引用，重新发现时必须显式 reconcile，不能按路径猜测为新对象。
+Repository identity 由规范化 real path 与可用时的 Git identity 共同校验，不能仅按用户输入字符串创建重复记录。Worktree 必须属于同一 Repository；detached HEAD 以 branch 为空和 headSha 表达，不伪造 Branch。阶段 A 的按需 discover/register/rescan 只读取文件系统和 Git 事实；unlink 是受审计的 registry 状态转换，不删除、移动或清理 Repository/Worktree 目录。missing/unlinked 记录保留最小 identity 与历史引用，重新发现时必须显式 reconcile，不能按路径猜测为新对象。
 
 ### Task
 
@@ -31,9 +35,24 @@ Repository identity 由规范化 real path 与可用时的 Git identity 共同�
 - createdAt、updatedAt、completedAt、archivedAt
 - `currentVersion`
 
-Task 是 Phase 2 引入的 Workspace 内工作 aggregate。workspaceId 必填；子任务仍然是 Task，通过 `parentTaskId` 组织，且必须与父 Task 属于同一 Workspace，不引入另一套生命周期。
+Task 是阶段 A 的交付核心，属于 Workspace 内的工作 aggregate。workspaceId 必填；parentTaskId/dueAt 是按需启用字段，不构成首版必填。启用子任务后仍使用 Task，通过 parentTaskId 组织，且必须与父 Task 属于同一 Workspace，不引入另一套生命周期。
 
-### TaskRelation
+### TaskCheckpoint（阶段 A）
+
+- checkpointId、taskId、taskVersion、ownerActorIdAtCapture、ownerEpochAtCapture
+- progressSummary、nextAction、openQuestions、decisionRefs、evidenceRefs
+- gitObservationRefs（含 repository/worktree、HEAD、dirtyState、observedAt）
+- status：`complete` / `partial`；missingRefs
+- createdByActorId、createdAt、schemaVersion
+- sourceSessionRef 可选，仅作来源，不作为权限或归属依据
+
+TaskCheckpoint 是不可变恢复记录；create 使用 Task expectedVersion 和幂等键，在事务中验证引用并保存记录与事件。Checkpoint 不改变任务生命周期，也不自动关闭 Task。owner 字段仅表示采集时观察，当前 ownership 仍由 active TaskOwnership 派生。
+
+恢复时重新读取当前 Task、权限和 Git，展示它们与 Checkpoint 的差异；progressSummary、nextAction 是采集时执行者声明，不能覆盖更新后的 Task。partial 必须列出缺失证据。TaskCheckpoint 不要求 Assignment、Session、ContextWindow、AI 或 Runtime 存在；与阶段 D 的 ContextCheckpoint 分开，后者可以引用前者。
+
+证据表示与版本递增细节在 D-024 冻结；文件路径本身不能替代固定的 Review evidence。
+
+### TaskRelation（按需求启用）
 
 - `relationId`
 - fromTaskId、toTaskId
@@ -90,7 +109,7 @@ schemaVersion 是必填正整数，按 eventType 标识 payload schema；生产�
 
 ### Comment / Artifact / ArtifactLink
 
-- Comment：commentId、taskId、authorActorId、body、createdAt、editedAt
+- Comment：commentId、taskId、authorActorId、kind、body、sourceRefs、confirmationStatus、createdAt；kind 候选为 progress/decision/constraint/procedure，首版追加记录，更正通过新记录引用原条目。confirmationStatus 由受控用户确认派生，AI 不能自行写 confirmed；具体字段和复用规则在 D-024 冻结。
 - Artifact：artifactId、type、mimeType、contentHash、blobHash、size、storageState、stagingName、storagePath、ingestOperationId、deletionOperationId、failureReason、provenance、createdBy、currentVersion、createdAt、finalizedAt、failedAt、deletingAt、deletedAt
 - storageState：`pending` / `finalized` / `orphaned` / `failed` / `deleting` / `deleted`
 - ArtifactLink：artifactLinkId、artifactId、aggregateType、aggregateId、relationType、linkState、supersededByLinkId、currentVersion、createdBy、linkedAt、supersededAt、unlinkedBy、unlinkedAt
@@ -128,7 +147,9 @@ Artifact 允许 `pending → finalized/orphaned/failed`，以及 `finalized/orph
 3. GC 在事务外按 deletionOperationId 幂等删除独占 storagePath 和残留 stagingName，并 flush/fsync 对应父目录；随后在 SQLite transaction 中把 deleting 改为 deleted、保留最小 hash/审计元数据并写 ArtifactDeleted 事件。
 4. 重启发现 deleting 时：文件存在则继续删除，文件不存在则直接完成 deleted。deleted Artifact 永不重新 Link；需要相同内容时必须重新 ingest 为新 Artifact。
 
-### BackupOperation / BackupArtifactPin / RestoreBootstrapJournal
+### BackupOperation / BackupArtifactPin / RestoreBootstrapJournal（在线扩展）
+
+首期采用 D-019 的显式维护停写备份；以下 writer gate / pin 协议用于在线备份扩展。恢复的隔离验证、外部副作用不自动重放和整套数据切换仍适用于维护备份。跨恢复 generation 的请求失效契约尚待 D-021 关闭，本节不能据此视为完整冻结。
 
 - BackupOperation：backupId、destinationRef、temporaryRef、backupSchemaVersion、sourceDataRootGeneration、state、eventWatermark、artifactManifestHash、databaseHash、keyEnvelopeHash、finalManifestHash、failureReason、currentVersion、createdAt、completedAt
 - state：`preparing` / `copying` / `verifying` / `publishing` / `complete` / `failed` / `cancelled`
@@ -149,7 +170,7 @@ Artifact 允许 `pending → finalized/orphaned/failed`，以及 `finalized/orph
 8. restore 在与现有数据隔离的临时根目录中解包并验证完整性 manifest、数据库 hash/`quick_check`、schema 兼容性、key envelope 可解包，以及每个保留中 ArtifactLink → Artifact → Blob 的存在性和 hash。验证成功后，在 staged database 的恢复事务中写 restore normalization audit，并执行以下 normalization，所有条目都不得在新机器自动重放外部副作用：`prepared/blob_published` ArtifactFinalizeIntent 以及非终态 CaptureOperation/CaptureArtifactIntent 改为 cancelled/failed，其未引用 Artifact 按 Blob 是否存在进入 orphaned/failed，关联的 pending CommandReceipt 以 `interrupted_by_restore` 终结；非终态 RuntimeOperation 进入 needs_reconciliation，`starting/active` AgentRun 进入 detached；lease、heartbeat 和短期 capability 全部过期或撤销；非终态 Git execution 进入 needs_reconciliation 且旧批准失效；包内源 BackupOperation 标为 complete 并释放其 manifest pin，其他非终态 BackupOperation 标为 failed/cancelled 并释放全部 pin。验证失败不得修改 live store。
 9. restore 需要 taskd 停止或进入独占维护模式。staged root 验证和 normalization 完成后，把 journal 标为 `staged`，再通过原子切换 data-root generation 指针启用整套 SQLite + Blob Store，不在原位置逐文件覆盖；切换后把 journal 标为 `switched`，新实例启动校验通过后依次标为 `validated` 和 `complete`。启动必须先于普通 worker 读取 journal 与实际 generation：指针已指向 new generation 时只能继续校验/收尾，仍指向 old generation 时只能继续 staging 或安全失败，不能重新执行一次 restore。旧数据根保留到新实例校验完成后再按用户确认的策略处理；校验失败进入 rollback_required，由同一 journal 协调显式回切。
 
-### SavedView
+### SavedView（按需求启用）
 
 - `viewId`、name
 - filters、sort、groupBy
@@ -212,7 +233,7 @@ archiveState: active ──archive──> archived ──restore──> active
 
 Worker 执行工作并提交证据；Reviewer 根据 acceptanceCriteria 做独立决定。一个 Actor 可以在不同任务中承担不同角色，但同一高风险任务可要求角色分离。
 
-## 4. 第三阶段：AI 执行扩展
+## 4. 可选阶段 D：AI 执行控制扩展
 
 ### Assignment
 
@@ -290,7 +311,7 @@ WorkingNote 是执行者声明且必须版本化，不能直接修改 Task、Rev
 
 这些实体扩展 Task 的执行证据，不替代 Task 本身。
 
-## 5. 第四阶段：业务事实与实现认知扩展
+## 5. 探索 X：业务事实与实现认知扩展
 
 ### BusinessSystem / BusinessScenario
 
@@ -314,7 +335,7 @@ ConfirmFactRevision Command 必须携带 expectedFactVersion、expectedCandidate
 
 - Component：componentId、repositoryId、name、kind、locator、currentVersion
 
-Phase 4 在既有 Repository/Worktree Registry 上增加 Component；它们是实现载体，不是 BusinessFact 的身份来源。
+探索 X 在既有 Repository/Worktree 身份之上增加 Component；它们是实现载体，不是 BusinessFact 的身份来源。
 
 ### CommitSnapshot / WorktreeSnapshot
 
@@ -387,7 +408,7 @@ DriftFinding 只记录差异，不直接修改 BusinessFact 或代码。分类�
 - status：`candidate` / `confirmed` / `rejected` / `superseded`
 - confidence、confirmedBy、currentVersion
 
-Preference 的 scope 至少区分 global、project、task-type 和 task-local。用户明确表达与 AI 推断必须有不同 provenance。
+Preference 的候选 scope 区分 global、workspace、task-type 和 task-local；具体取舍由探索验证。用户明确表达与 AI 推断必须有不同 provenance。
 
 ### Feedback / OptimizationProposal
 
@@ -410,10 +431,11 @@ Actor 1──N TaskOwnership
 Task 1──N TaskOwnership          one active row, ownership authority
 Task 1──N DomainEvent / Comment / ReviewSubmission
 ReviewSubmission 1──N ReviewSubmissionEvidence / ReviewDecision
-Task 1──N Assignment            third stage
+Task 1──N TaskCheckpoint       stage A, no Session required
+Task 1──N Assignment            optional stage D
 Assignment 1──N AgentRun        at most one starting/active
-Assignment 1──N RuntimeOperation third stage
-Session 1──N ContextWindow      third stage
+Assignment 1──N RuntimeOperation optional stage D
+Session 1──N ContextWindow      optional stage D
 Assignment 1──N ContextWindow   one active scope per window
 Assignment 1──N WorkingNote / ContextCheckpoint
 Repository 1──N Component / CommitSnapshot / WorktreeSnapshot
@@ -436,6 +458,6 @@ DomainEvent N──N BusinessFact / Preference / Proposal evidence refs
 - 跨 aggregate 的 FactRevision 确认必须同时验证 BusinessFact、candidate revision 和旧 confirmed revision 的版本/身份，并在一个事务中提交。
 - SQLite transaction 原子提交 aggregate 状态、关系变化和 DomainEvent/outbox envelope。
 - Artifact Blob 发布不宣称跨文件系统与 SQLite 的 ACID；单 Artifact 通过 pending metadata、publish-before-reference、幂等 finalize、启动恢复和孤儿 GC 达到可恢复一致性，多 Artifact WorktreeSnapshot 另由 CaptureOperation 固定清单并原子 promotion。
-- owner 变更使用 owner epoch；第三阶段的 AI 长操作再增加 lease 与 heartbeat。
+- owner 变更使用 owner epoch；阶段 D 的 AI 长操作再增加 lease 与 heartbeat。
 - 事件和 ReviewDecision 默认不可原地改写；更正通过补充事件表达。
 - unlink 必须以 expectedVersion 将 ArtifactLink 从 active 变为 unlinked 并记录 unlinkedBy/unlinkedAt/DomainEvent；正文替换使用 superseded。只有不存在任何 active Link，且 superseded/unlinked Link 均已超过保留期时，GC 才可按协议把 Artifact claim 为 deleting 并回收独占 Blob。Artifact 最小元数据和引用状态的保留期限由数据策略决定。

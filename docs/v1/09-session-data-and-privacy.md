@@ -1,10 +1,10 @@
 # 会话数据、隐私与本地存储
 
-> 阶段说明：`0.1` 只要求 Workspace/Repository/Worktree metadata 与本地备份；`0.2` 增加任务历史、评论和附件；Phase 3 提供限定 Assignment scope 的最小加密 History/WorkingNote Store；完整 AI Session Store、跨宿主 importer、Prompt 归档和长期索引在 Phase 6 增量加入。
+> 范围：A/B 保存任务、TaskCheckpoint、关键决策与实际需要的证据；C 保存最小会话交接信息。完整会话采集、跨宿主 importer 和长期索引需要独立需求与授权，不属于 V1 默认范围。本文大规模 Blob、在线备份与会话模型按能力启用。
 
 ## 1. 数据目标
 
-AI 与优化阶段默认完整保留用户选择纳管的本地会话，以支持：
+默认只保留任务接续与证据复核所需数据。用户明确选择完整会话纳管时，才按指定范围、保留期与权限增加采集；以下是候选用途，并不自动构成采集授权：
 
 - 跨会话恢复；
 - 用户意图和偏好分析；
@@ -16,9 +16,12 @@ AI 与优化阶段默认完整保留用户选择纳管的本地会话，以支�
 
 ## 2. 数据分层
 
+以下列出全部候选能力的数据形态；仅创建已启用功能需要的存储，不预先采集。
+
 ### SQLite 元数据
 
-- Task/Session/Invocation/Assignment/ContextWindow；
+- 阶段 A 起：Task/TaskCheckpoint、上下文关联与 Comment 决策来源；
+- 可选 D：Session/Invocation/Assignment/ContextWindow；
 - RoleGrant/Capability/Lease；
 - WorkingNote/ContextCheckpoint 元数据和版本；
 - Artifact 元数据、hash、provenance 与 ArtifactLink；
@@ -50,16 +53,18 @@ AI 与优化阶段默认完整保留用户选择纳管的本地会话，以支�
 
 ### 分阶段存储边界
 
-- Phase 3：保存首个 Runtime 所需的 ContextWindow、最小 Session History、WorkingNote、ContextCheckpoint 和 PromptInstance；正文进入本地加密 Blob，SQLite 保存 scope、版本、hash 和 provenance；只提供限定范围的 list/read/search。
-- Phase 6：增加完整会话采集、多宿主 importer、长期全文索引/embedding、跨 Session 检索以及更完整的保留和迁移能力。
+- A/B：TaskCheckpoint 不依赖 Session/Assignment；保存最小进度、决策、证据引用和 Git 观察。
+- C：沿用 TaskCheckpoint 提供恢复上下文，可选记录外部会话引用；不要求原始 Prompt、全量工具输出或 ContextWindow。
+- D：控制所选 Runtime 时，按实际需要增加 ContextCheckpoint、History、WorkingNote 和 PromptInstance；正文启用加密 Blob。
+- X：完整会话 importer、长期全文索引和 embedding 需先证明用途，再单独决定范围与保留策略。
 
-Phase 3 的上下文恢复不能依赖 Phase 6 才提供的存储能力；Phase 6 只扩展采集范围、宿主覆盖和索引深度。
+TaskCheckpoint 负责任务交接，ContextCheckpoint 负责宿主窗口转换；后者不得成为前者的必填依赖。
 
 Artifact Blob 与 SQLite 不构成一个物理事务。所有阶段共用领域模型定义的 publish-before-reference 协议：pending metadata 和 durable ArtifactFinalizeIntent 不对业务查询可见，只有 Blob 原子发布且 Intent 的请求 hash、版本、权限和 Link 计划仍有效时，才能在 finalize transaction 中创建 active ArtifactLink；冲突 Intent 终止而不永久重试。WorktreeSnapshot 的多 Artifact evidence 由 CaptureOperation 固定完整 intent 清单，全部 Blob 发布并通过 token 校验后才在一个事务中原子 promotion，不能逐项暴露。V1 每个 Artifact 独占物理 Blob，启动恢复和 GC 按 Artifact 状态处理。
 
 ### 备份一致性与密钥恢复
 
-备份不是“先复制 SQLite、再尽力复制 Blob”。taskd 必须按领域模型的 BackupOperation 协议，在数据库层短期 writer gate 内从一个 SQLite 一致性点固定 eventWatermark、Artifact manifest 和 active BackupArtifactPin，再生成 online backup；该 gate 覆盖 Application Command、Artifact/Runtime recovery、lease/heartbeat、event ack/retention、GC、backup/recovery、migration 和所有维护 writer。Blob 复制期间 pin 阻止 GC 把 manifest 中的 Artifact claim 为 deleting。只有数据库、manifest、全部 Blob hash 和 key envelope 均验证通过并写入最终完整性 manifest 后，备份目录才可原子发布；启动 reconcile 负责把已发布但 live operation 未 complete 的有效备份补记完成并释放 pin。
+首期备份采用显式维护停写模式，验证 SQLite 与全部保留证据后发布。需要在线备份时，taskd 才按领域模型的 BackupOperation 协议，在数据库层短期 writer gate 内从一个 SQLite 一致性点固定 eventWatermark、Artifact manifest 和 active BackupArtifactPin，再生成 online backup；该 gate 覆盖 Application Command、Artifact/Runtime recovery、lease/heartbeat、event ack/retention、GC、backup/recovery、migration 和所有维护 writer。Blob 复制期间 pin 阻止 GC 把 manifest 中的 Artifact claim 为 deleting。只有数据库、manifest、全部 Blob hash 和 key envelope 均验证通过并写入最终完整性 manifest 后，备份目录才可原子发布；启动 reconcile 负责把已发布但 live operation 未 complete 的有效备份补记完成并释放 pin。
 
 可移植备份包含加密 key envelope，不包含明文数据密钥：默认由用户提供的备份口令/恢复密钥包装，或由显式配置且 restore 环境可访问的外部 key provider 包装。仅保存在原设备 OS Keychain 的引用不能作为可移植恢复材料；若用户选择 device-bound backup，CLI/UI 必须明确标为不可跨设备恢复。restore 先在隔离临时根验证 envelope 可解包、数据库 `quick_check`/schema、所有保留中的 Link → Artifact → Blob hash，并终止/隔离备份时刻的 pending Artifact、Runtime、AgentRun、lease/capability 和 Git 外部 operation，禁止在新机器自动重放。restore 的幂等 receipt、manifest hash、old/new data-root generation 与切换阶段写入两个 data root 之外的受保护 bootstrap journal，再于 taskd 独占维护模式原子启用整套数据；任何一项失败都不得覆盖 live store。
 
@@ -84,7 +89,8 @@ subagent
 ## 4. 上下文连续性与权威分层
 
 ```text
-Task / Confirmed Business Fact   正式权威
+Task / 用户确认的约束与决策       正式权威
+TaskCheckpoint                   阶段 A 起的任务恢复记录
 ContextBrief                     按窗口生成的派生输入
 ContextCheckpoint                引用权威版本的恢复点
 WorkingNote                      Agent 可写、版本化的工作记忆
@@ -129,7 +135,7 @@ Session History                  对“发生过什么”的保留期内不可�
 
 ## 7. 用户控制
 
-必须提供：
+随实际纳管数据提供相应查看、导出、删除和保留控制；session/reindex 等入口只在对应存储启用后出现：
 
 ```text
 data status

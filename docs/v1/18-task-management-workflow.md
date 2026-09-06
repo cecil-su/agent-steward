@@ -1,96 +1,37 @@
-# 任务管理流程图
+# 任务生命周期与恢复
 
-本流程描述 Phase 2 的任务生命周期，假设 Phase 1 已建立 Workspace/Repository/Worktree Registry。任务必须归属 Workspace，但不要求 Project；该流程不依赖 AI 才能成立。
+生命周期服务于任务接续与用户验收。Workspace 可以隐式建立，Repository 关联可选；任务推进不依赖 AI、Assignment 或 Runtime。
 
 ```mermaid
-flowchart TB
-    Start([产生任务想法或工作请求])
-
-    Capture[通过 TUI 或 GUI 快速录入]
-    Inbox[进入 Inbox]
-    Triage[Task Manager 整理任务]
-
-    CompleteInfo{信息是否足够}
-    Refine[补充目标、说明和 Workspace/Repo 上下文]
-
-    Structure[设置优先级、依赖和父子关系]
-    Acceptance[定义验收条件]
-    Assign[指定 Task Owner]
-    Next[确定唯一下一步]
-    Ready[进入 Ready]
-
-    StartWork[Task Owner 开始任务]
-    InProgress[进入 In Progress]
-    Work[执行当前 Next Action]
-
-    Blocked{是否被阻塞}
-    BlockState[进入 Blocked]
-    RecordBlocker[记录阻塞原因和解除条件]
-    Resolve[Task Manager 或 Owner 处理阻塞]
-    Resolved{阻塞是否解除}
-
-    Result{是否产生可验收结果}
-    Continue[更新进度并确定下一步]
-    Review[创建版本化 ReviewSubmission<br/>进入 Review]
-    Check[按已绑定 Task/criteria/evidence 版本验收]
-    Accepted{是否验收通过}
-
-    Rework[原子写 changes_requested Decision<br/>退回 In Progress]
-    Done[原子写 accepted Decision<br/>进入 Done]
-    Archive[设置 archiveState = archived]
-    SelectNext[Task Manager 选择下一任务]
-    End([进入下一轮])
-
-    Start --> Capture
-    Capture --> Inbox
-    Inbox --> Triage
-    Triage --> CompleteInfo
-
-    CompleteInfo -->|否| Refine
-    Refine --> Triage
-    CompleteInfo -->|是| Structure
-
-    Structure --> Acceptance
-    Acceptance --> Assign
-    Assign --> Next
-    Next --> Ready
-
-    Ready --> StartWork
-    StartWork --> InProgress
-    InProgress --> Work
-    Work --> Blocked
-
-    Blocked -->|是| BlockState
-    BlockState --> RecordBlocker
-    RecordBlocker --> Resolve
-    Resolve --> Resolved
-
-    Resolved -->|否| BlockState
-    Resolved -->|是| Next
-
-    Blocked -->|否| Result
-    Result -->|尚未完成| Continue
-    Continue --> Next
-
-    Result -->|完成候选| Review
-    Review --> Check
-    Check --> Accepted
-
-    Accepted -->|否| Rework
-    Rework --> InProgress
-
-    Accepted -->|是| Done
-    Done --> Archive
-    Done --> SelectNext
-    SelectNext --> End
+stateDiagram-v2
+  state "In Progress" as InProgress
+  [*] --> Inbox: 创建任务
+  Inbox --> Ready: 明确目标与下一步
+  Ready --> InProgress: 指定 owner 并开始
+  InProgress --> Blocked: 记录阻塞原因
+  Blocked --> InProgress: 恢复执行
+  InProgress --> Review: 固定版本与证据并提交
+  Review --> InProgress: 用户要求返工
+  Review --> Done: 用户验收通过
+  Done --> InProgress: 用户重新打开
+  Inbox --> Cancelled: 用户取消
+  Ready --> Cancelled: 用户取消
+  InProgress --> Cancelled: 用户取消
+  Blocked --> Cancelled: 用户取消
+  Review --> Cancelled: 用户取消并终结当前提交
 ```
 
-## 默认状态
+此图表示候选主要转换，精确前置条件在 D-013/D-020 冻结；尤其要确定 Blocked 的恢复状态、Review 期间编辑/撤回，以及取消时 Submission 的原子处理。
 
-```text
-Inbox → Ready → In Progress → Blocked → Review → Done
-```
+## 接续不改变生命周期
 
-`Cancelled` 是业务终态。归档是与生命周期正交的收纳属性：它设置 `archiveState=archived` 和 archivedAt，但保留 Done、Cancelled 等原 status；恢复归档后仍从保留的 status 继续。AI 执行者未来也必须遵循同一 Task 生命周期，不能建立另一套 AI 专用任务状态。
+- 任一允许记录的非终态任务可以保存 TaskCheckpoint；保存后保持原状态。
+- 会话结束、模型窗口丢失或工具重启不产生 Done/Cancelled。
+- 恢复先读取当前 Task、owner、证据与 Git，再参考最近 Checkpoint；缺失引用显式标注。
+- 恢复旧 Checkpoint 不等于恢复旧权限，也不意味着回滚 Task 版本。
 
-每次进入 Review 都使用新的 reviewCycle；submit 为每个 source evidence 创建由 ReviewSubmission 独立持有的 active `review_evidence` Link，并固定 submittedTaskVersion、acceptanceCriteriaHash 和 evidence set。accept/request-changes 同时校验 Task 与 Submission 版本；accept 另外校验 submission-owned Link/version/contentHash，request-changes 可把证据缺失作为返工理由。两者都在同一事务写 Decision 和状态转换；Done 重新打开固定回到 In Progress，历史 accepted Decision 不得用于再次完成任务。
+## Review 与归档
+
+submit 为每个证据创建 Submission 独立持有的 review_evidence Link，固定 Task/criteria/evidence 版本；用户 accept/request-changes 原子写 Decision 和状态转换。Review 期间版本变化后的撤回与重提路径必须先关闭 D-020，不能仅靠严格版本检查而使任务无法返工。
+
+Done 重新打开后新建 reviewCycle，旧验收只保留历史。归档设置 archiveState 并保留原 lifecycle；允许归档的状态与恢复规则在 D-013 冻结。首版允许用户推进并显式验收自己的普通任务，不强制引入多角色审批系统。

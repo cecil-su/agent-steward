@@ -1,75 +1,58 @@
 # 产品定位
 
-## 1. 产品定义
+## 产品定义
 
-Agent Steward 是一个本地优先的个人开发 Workspace 工作管家。它的产品价值按以下顺序建立：
+Agent Steward 是一个本地优先、面向个人开发者的任务接续与交付工具。
 
-1. 建立工作边界：注册 Workspace，可靠识别其中的 Repository、Worktree、Branch、HEAD 和只读工作区状态；
-2. 管好任务：让 Task 归属 Workspace，并按需关联 Repo/Worktree，完成收集、推进、验收和复盘；
-3. 接入 AI：让 AI 与人类共享同一任务、owner、状态、产物和验收流程；
-4. 建立长期认知：沉淀业务事实、实现快照和映射，再提出流程、Prompt 和 Skill 优化候选。
+核心承诺：**随时知道任务做到哪里、依据是什么、下一步是什么，并能让另一个会话接着做。**
 
-它不是一个以 Agent 编排为前提的控制台，也不是另一个要求用户先建立抽象 Project 层级的项目管理器。即使完全关闭 AI，首期也能作为可靠的本地 Workspace/Repo Registry 使用；任务能力上线后仍不依赖 AI 才能成立。
+首条路径从当前工作目录开始：建立任务，识别关联 Repository/Worktree，记录进度和关键决策，保存 Checkpoint，在下一次工作时恢复上下文，最后由用户检查证据并确认完成。
 
-## 2. 核心用户与场景
+## 首要用户与问题
 
-V1 首先面向同时维护一个或多个本地 Repository/Worktree 的个人开发者：
+面向经常中断工作、跨 AI 会话推进任务、同时使用多个 Worktree 的个人开发者，优先解决：
 
-- 创建或打开 Workspace，自动发现并确认其中的 Repository/Worktree；
-- 查看 canonical path、remote identity、Branch、HEAD、dirty/missing 状态，而不修改 Git 现场；
-- 在第二阶段把想法、问题和承诺收进 Workspace Inbox，并将 Task 关联相关 Repo/Worktree；
-- 明确优先级、依赖、owner、验收标准和唯一下一步；
-- 在 TUI 中快速操作，在 GUI 中浏览全局、关系和历史；
-- 从 Blocked、Review 和逾期任务中找出真正需要处理的事项；
-- 后续把适合的任务交给 AI，同时保留人工验收和完整证据；
-- 长期积累 Workspace 业务事实和个人偏好，但避免未经确认的自动推断污染正式规则。
+- 隔一天回来，无法快速判断真实进度和唯一下一步；
+- 新会话需要重复解释目标、限制、已经尝试的方案和待处理问题；
+- 聊天中的完成声明无法对应可复核的产物和代码现场；
+- 历史摘要与当前 Task、授权或 Git 状态不一致。
 
-## 3. 产品形态
+不依赖 AI 也能建立、推进、恢复和验收任务。AI 接入用于减少交接成本；自动控制 Agent 需要另行证明价值。
+
+## 最小使用体验
 
 ```text
-Human ── TUI / GUI / CLI ── Command · Query · Event ── taskd ── SQLite
-                                                     │
-Task / Review ───────────────────────────────────────┤  第二阶段
-AI ───── MCP / Runtime Adapter ──────────────────────┤  第三阶段
-                                                     │
-Knowledge / Optimization ◀── Domain Event History ───┘  后续阶段
+在当前目录建任务
+ → 自动识别工作上下文
+ → 记录进度、决策、证据与下一步
+ → 保存 Checkpoint / 中断
+ → 读取当前任务并复查 Git 现场
+ → 继续执行
+ → 提交证据
+ → 用户验收或要求返工
 ```
 
-- `taskd`：Workspace/Repo Registry、任务状态、业务规则、查询、事件和持久化的唯一权威。
-- `steward-tui`：键盘优先的 Workspace/Repo 查看，以及后续任务捕获、筛选和推进界面。
-- `steward-gui`：面向 Workspace/Repo 概览，以及后续依赖关系、时间线和审查的桌面界面。
-- `stewardctl`：面向脚本和自动化的命令接口。
-- `steward-mcp` / Runtime Adapter：第三阶段把 AI 接入现有任务系统。
-- Optimization Steward：后续阶段在任务循环外生成待确认的改进候选。
+Workspace 可以由系统自动建立，Task.workspaceId 保持必填，但创建 Workspace 和纳管所有 Repository 不成为用户前置步骤。任务也可以没有 Repo/Worktree 绑定。
 
-## 4. 角色边界
+## 产品边界
 
-- **Human Director**：决定目标、优先级和最终验收。
-- **Task Manager**：只负责管理任务池，进行分流、排序、分配、跟踪和升级阻塞。
-- **Task Owner**：对一个具体任务的推进、下一步和交付负责。
-- **Worker**：执行具体工作，可以是人、AI 或自动化。
-- **Context Steward**：循环外整理需求、偏好和优化候选，不直接改变任务结论。
+- Task 是交付主对象；Workspace/Repository/Worktree 提供归属与证据上下文。
+- 首版 CLI 覆盖闭环，一个薄界面按日用需求补充浏览和验收。
+- 保存视图、复杂依赖图、看板、提醒、周期任务和自动选任务均由真实需求驱动。
+- 现有 AI 会话先通过受控 CLI/MCP 读取上下文、写入进度与 Checkpoint；首期不接管宿主生命周期或模型上下文窗口。
+- 约束、决策和操作说明先用带来源的简单记录表达，不预建完整业务知识系统。
+- BusinessFact、代码映射、漂移检测、完整会话采集和 Optimizer 是后续探索，不是 V1 完成条件。
 
-Task Manager 不应同时承担“亲自完成所有任务”的职责；Task Owner 也不能凭执行者的完成声明跳过 Review。
+## 架构与信任原则
 
-## 5. 差异化价值
+1. 领域状态只有一个权威，所有入口复用同一业务规则。
+2. Task 当前状态、用户确认和 Git 实际现场的权威各自明确；摘要不能覆盖它们。
+3. Checkpoint 引用任务版本、证据和观察时刻，不生成第二份可独立推进的任务状态。
+4. Worker 提交完成候选；用户验收才产生 Done，不自动关闭任务。
+5. 只读 Git 识别不执行 checkout、clean、reset、push，也不删除用户目录。
+6. Standard 模式明确限于防误操作和协作完整性；对抗性隔离需要另行实现 Hardened。
+7. 数据默认保留在本地；采集范围以恢复任务所需信息为限。
 
-- **Actor-neutral**：同一 Task 可以由人、AI 或自动化拥有和执行。
-- **Context before workflow**：先确定 Workspace/Repo/Worktree 身份，再把任务、证据和执行绑定到真实工作上下文。
-- **双界面同状态**：TUI 与 GUI 不是两套产品，任何一端的变更都会通过事件同步。
-- **事件化历史**：状态、owner、阻塞、验收和产物变化都有可恢复的时间线。
-- **执行与验收分离**：Worker 完成意味着进入 Review，不等于任务已经 Done。
-- **渐进式 AI**：AI 是增强层，不侵入任务管理核心，也不制造第二套状态真相。
-- **候选式学习**：需求、偏好和 Prompt 优化先提供证据与差异，再由用户确认。
+## 价值验证
 
-## 6. 产品原则
-
-1. **Workspace first**：先建立 Workspace、Repository 和 Worktree 的稳定本地身份，再增加 Task 与 AI。
-2. **Local-first**：无云端或 AI 依赖也能完整工作。
-3. **Single authority**：SQLite 是运行时唯一权威。
-4. **One core, many clients**：TUI、GUI、CLI 和 MCP 共享业务规则。
-5. **Read-only discovery first**：注册、扫描和解除关联不修改 Git，也不删除用户目录。
-6. **Explicit ownership**：每个活跃任务都有明确 owner 和下一步。
-7. **Evidence before done**：验收依据优先于执行者自述。
-8. **Progressive trust**：AI 和高风险操作逐步授权。
-9. **Proposal before mutation**：需求、偏好和系统优化未经确认不生效。
+使用真实任务验证恢复时间、重复解释次数、交接成功率和证据可复核性。阶段推进既需要契约正确，也需要用户实际更容易接续和完成工作；模块数量和实体覆盖率不能代替这些结果。

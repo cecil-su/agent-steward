@@ -1,6 +1,6 @@
 # 安全与权限模型
 
-> 阶段说明：Phase 1 的 Workspace/Repo Registry 先落实本地数据、canonical path 防混淆、只读 Git 边界和基本身份；Phase 2 增加 Task/Artifact 权限。完整威胁模型在接入 AI、高风险 Git 操作和外部 Runtime 前成为发布门槛，不阻塞前两层本地闭环。
+> 阶段说明：A/B 落实本地身份、Task/证据权限和只读 Git；C 接入现有 AI 会话时冻结身份绑定、Task scope 和用户验收边界。Standard 只承诺防误操作与协作完整性；需要对抗同身份 Agent 时，Hardened 隔离必须先实现。Runtime 控制、高风险 Git 和完整审批协议按能力启用，不阻塞不使用这些能力的任务闭环。本文 taskd 表示可信应用核心，不预设常驻进程。
 
 ## 1. 威胁模型
 
