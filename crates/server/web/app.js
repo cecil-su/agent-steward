@@ -4,7 +4,7 @@
   const statuses = {open:'待开始',in_progress:'进行中',blocked:'有阻塞',closed:'已关闭'};
   let warningText='', listRevision=0;
   let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
-  let connected=false, view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
+  let localAccess=false, connected=false, view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
   function el(tag,text,cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
   function button(text,action,cls='') { const b=el('button',text,cls);b.type='button';b.onclick=action;return b; }
   function clear(node){node.replaceChildren();}
@@ -133,9 +133,9 @@
     $('login-error').textContent='';$('credential').value='';stopLive();
     try{
       if(value)await api('/api/login',{}, {'X-Steward-Token':value});
-      const access=await api('/api/access');canWrite=access.role==='admin';await loadList();
+      const access=await api('/api/access');localAccess=access.local===true;canWrite=access.role==='admin';await loadList();
     }catch(e){$('login-error').textContent=!value&&e.code==='UNAUTHORIZED'?'':e.message;return;}
-    connected=true;$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('access-role').textContent=canWrite?'管理员':'只读';
+    connected=true;$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('logout').hidden=localAccess;$('access-role').textContent=localAccess?'本机 · 管理员':canWrite?'管理员':'只读';
     $('login').hidden=true;$('workspace').hidden=false;
     if(rows.length)try{await selectTask(rows[0].id);}catch(e){notify(e.message);}
     if(connected)startLive();
@@ -143,7 +143,7 @@
   async function logout(){await api('/api/logout',{});resetConnection();}
   $('connect-form').onsubmit=async event=>{event.preventDefault();const b=event.submitter;if(b)b.disabled=true;try{await connect($('credential').value.trim());}finally{if(b)b.disabled=false;}};
   $('logout').onclick=safely(logout);
-  $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有浏览器授权（包括当前浏览器）？管理员和只读凭据文件不会改变。')){await api('/api/browser-sessions/revoke',{});resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');await loadList();if(selected)await selectTask(selected);});
+  $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有已保存的浏览器授权？不影响本机免登录和凭据文件。')){await api('/api/browser-sessions/revoke',{});if(localAccess)notify('已撤销保存的浏览器授权。');else resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');await loadList();if(selected)await selectTask(selected);});
   $('create').onclick=()=>openAction('task-create','新建任务',taskFields(null),'可以先创建最小任务，随后补充目标、范围和验收条件。');
   $('search-form').onsubmit=event=>{event.preventDefault();query=$('search').value.trim();safely(()=>loadList())();};$('more').onclick=safely(()=>loadList(true));
   for(const b of document.querySelectorAll('[data-view]'))b.onclick=safely(async()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));await loadList();});

@@ -8,7 +8,7 @@ if(process.platform!=='win32')fs.chmodSync(temp,0o700);
 const database=path.join(temp,'test.db');
 // Let taskd create and protect this directory using the platform's ACL API.
 const runtime=path.join(temp,'runtime');
-const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime,'--no-open','--port','0'],{stdio:['ignore','pipe','pipe']});
+const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime,'--no-open','--require-local-auth','--port','0'],{stdio:['ignore','pipe','pipe']});
 let stdout='',stderr='';daemon.stdout.on('data',b=>stdout+=b);daemon.stderr.on('data',b=>stderr+=b);
 let browser,page;
 const cli=(...args)=>JSON.parse(execFileSync(path.join(root,'target/debug/taskctl'),['--database',database,'--json',...args],{encoding:'utf8'}));

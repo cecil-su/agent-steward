@@ -49,6 +49,8 @@ flowchart LR
 | Session 观测 | [`crates/application/src/hooks.rs`](crates/application/src/hooks.rs) | 一次性绑定、独立事件接收、去重、分页、容量与清除 |
 | 共用权限告警 | [`crates/application/src/permissions.rs`](crates/application/src/permissions.rs) | CLI/HTTP 共用数据库目录及 WAL/SHM 权限检查 |
 | 本地 Daemon | [`crates/server/src/lib.rs`](crates/server/src/lib.rs) | 同源 HTTP、管理员/只读授权、一次性自动连接、严格 Command DTO、Application 调用 |
+| Windows 本地更新 | [`distribution/windows/update-local.ps1`](distribution/windows/update-local.ps1) | 当前源码独立缓存编译、唯一构建 ID、复用受管服务正常停止与失败恢复；入口 Update-Local.cmd |
+| Windows 启动器 | [`distribution/windows/steward.ps1`](distribution/windows/steward.ps1) | 固定配置、PID/启动时间/路径校验、正常停止、发布包校验与切换；不接管用户进程 |
 | 本机身份 | [`crates/server/src/credentials.rs`](crates/server/src/credentials.rs) | 首次创建私有管理员/只读凭据、跨重启复用、拒绝损坏或不安全文件 |
 | 浏览器授权 | [`crates/server/src/browser_auth.rs`](crates/server/src/browser_auth.rs) | 持久 HttpOnly Cookie 授权哈希、角色/凭据/origin 绑定、过期和撤销；不改业务库 Schema |
 | 实时通知 | [`crates/server/src/events.rs`](crates/server/src/events.rs) | 有界认证 SSE、SQLite data_version 观察、CLI/Hook 提交通知、退出释放订阅 |

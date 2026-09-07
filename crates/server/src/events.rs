@@ -3,6 +3,7 @@
 use std::{convert::Infallible, time::Duration};
 
 use axum::{
+    Extension,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{
@@ -23,9 +24,14 @@ struct Subscription {
     _permit: OwnedSemaphorePermit,
     state: ServerState,
     headers: HeaderMap,
+    local: bool,
 }
 
-pub(crate) async fn subscribe(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+pub(crate) async fn subscribe(
+    State(state): State<ServerState>,
+    Extension(access): Extension<crate::Access>,
+    headers: HeaderMap,
+) -> Response {
     let Ok(permit) = state.event_slots.clone().try_acquire_owned() else {
         return failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -45,6 +51,7 @@ pub(crate) async fn subscribe(State(state): State<ServerState>, headers: HeaderM
             _permit: permit,
             state,
             headers,
+            local: access.local,
         })
     })
     .await;
@@ -74,7 +81,7 @@ pub(crate) async fn subscribe(State(state): State<ServerState>, headers: HeaderM
             {
                 return None;
             }
-            if subscription.state.role(&subscription.headers).is_none() {
+            if !subscription.local && subscription.state.role(&subscription.headers).is_none() {
                 return Some((
                     Ok(Event::default().event("unauthorized").data("logout")),
                     None,

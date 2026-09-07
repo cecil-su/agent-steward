@@ -20,16 +20,24 @@ function fixture(browser={authorized:false,role:'admin'},hash='',exchangeFails=f
       requests.push({path,headers:options.headers||{},credentials:options.credentials,hash:location.hash});
       if(path==='/api/connect')browser.authorized=!exchangeFails;
       if(path==='/api/login')browser.authorized=options.headers['X-Steward-Token']==='synthetic';
-      let status=browser.authorized?200:401;
+      let status=browser.authorized||browser.local?200:401;
       if(path==='/api/logout'||path==='/api/browser-sessions/revoke'){browser.authorized=false;status=200;}
       if(path==='/api/events'&&status===200)return {ok:true,status,body:new ReadableStream({start(c){eventController=c;options.signal.addEventListener('abort',()=>{try{c.close();}catch{}},{once:true});}})};
-      const data=path==='/api/access'?{role:browser.role}:path.includes('/context')?{task,checkpoint:null}:path.endsWith('/notes')?{notes:[]}:{tasks:[task],hasMore:false,nextCursor:null};
+      const data=path==='/api/access'?{role:browser.role,local:browser.local}:path.includes('/context')?{task,checkpoint:null}:path.endsWith('/notes')?{notes:[]}:{tasks:[task],hasMore:false,nextCursor:null};
       return {ok:status===200,status,json:async()=>({ok:status===200,data,error:status===200?null:{code:'UNAUTHORIZED',message:'synthetic'}})};
     }
   });
   return {get,requests,browser,storage,location,change:()=>eventController.enqueue(new TextEncoder().encode('event: changed\ndata: refresh\n\n')),
     login:async()=>{await settle();get('credential').value='synthetic';await get('connect-form').onsubmit({preventDefault(){},submitter:node()});}};
 }
+test('local ordinary address opens directly without a credential, cookie or connection code',async()=>{
+  const f=fixture({authorized:false,role:'admin',local:true});await settle();
+  assert.equal(f.get('workspace').hidden,false);assert.equal(f.get('logout').hidden,true);
+  assert.equal(f.get('access-role').textContent,'本机 · 管理员');
+  assert(f.requests.every(r=>!r.headers['X-Steward-Token']&&r.path!=='/api/connect'&&r.path!=='/api/login'));
+  await f.get('revoke-browsers').onclick();assert.equal(f.get('workspace').hidden,false);
+  await f.get('logout').onclick(); // Stop the fixture stream via its otherwise hidden handler.
+});
 test('automatic link exchanges once, clears fragment, and never retains a readable credential',async()=>{
   const f=fixture(undefined,'#connect='+'a'.repeat(64));await settle();
   assert.equal(f.requests[0].path,'/api/connect');assert.equal(f.requests[0].hash,'');assert.equal(f.storage.size,0);

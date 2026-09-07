@@ -4,7 +4,7 @@
 <body>
 <div id="login" class="login-shell">
   <section class="login-card"><span class="brand-mark">S</span><p class="eyebrow">AGENT STEWARD / V0</p><h1>接着上次的工作。</h1><p class="muted">连接本机工作台，查看任务进展、会话记录和下一步。</p>
-  <form id="connect-form"><label for="credential">本次服务的连接凭据</label><input id="credential" type="password" autocomplete="off" required placeholder="粘贴凭据文件中的内容"><p class="hint">首次本机启动自动授权浏览器；之后打开普通网址或新标签页即可使用，授权有效期 30 天。其他设备首次使用只读凭据连接。选择退出登录可撤销本浏览器授权。</p><button type="submit" class="primary">连接工作台 <span aria-hidden="true">→</span></button><p id="login-error" role="alert"></p></form></section>
+  <form id="connect-form"><label for="credential">本次服务的连接凭据</label><input id="credential" type="password" autocomplete="off" required placeholder="粘贴凭据文件中的内容"><p class="hint">默认本机直接访问免登录，包括通过配置的本机网卡 IP 访问。其他设备或严格认证模式首次使用凭据连接，浏览器授权保留 30 天。</p><button type="submit" class="primary">连接工作台 <span aria-hidden="true">→</span></button><p id="login-error" role="alert"></p></form></section>
   <p class="login-foot">本地数据 · 明确的下一步 · 连续的工作上下文</p>
 </div>
 <div id="workspace" hidden>

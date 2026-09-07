@@ -1,0 +1,57 @@
+name: Windows release
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: node --test integrations/tests/native.test.mjs crates/server/tests/browser/connection.test.cjs
+      - run: cargo build --workspace --release --locked
+      - name: Test launcher and package
+        shell: powershell
+        run: |
+          ./distribution/windows/test.ps1 -Taskd target/release/taskd.exe
+          ./distribution/windows/test-local.ps1
+      - name: Build release archive
+        shell: powershell
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: ./distribution/windows/package.ps1 -Version $env:RELEASE_VERSION -Output "$env:RUNNER_TEMP/steward-release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            ${{ runner.temp }}/steward-release/*.zip
+            ${{ runner.temp }}/steward-release/*.sha256
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: release
+      - name: Publish immutable version assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release/* --verify-tag --generate-notes --title "$TAG"

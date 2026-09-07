@@ -2,9 +2,9 @@
 mod browser_auth;
 mod events;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::{Bytes, to_bytes},
-    extract::{Path, Query, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -26,6 +26,8 @@ use tokio::sync::Semaphore;
 pub struct ServerState {
     pub service: Service,
     host: String,
+    local_address: std::net::IpAddr,
+    trust_local: bool,
     origin: String,
     token: Arc<str>,
     browser_auth: Arc<browser_auth::BrowserAuth>,
@@ -45,6 +47,8 @@ impl ServerState {
         Self {
             service,
             host: address.to_string(),
+            local_address: address.ip(),
+            trust_local: false,
             origin: format!("http://{address}"),
             token: token.into(),
             browser_auth: Arc::new(browser_auth::BrowserAuth::memory()),
@@ -55,6 +59,25 @@ impl ServerState {
             slots: Arc::new(Semaphore::new(8)),
             connection_code: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Trust direct local TCP callers. Do not expose this mode through a proxy.
+    pub fn with_local_access(mut self) -> Self {
+        self.trust_local = true;
+        self
+    }
+
+    fn local_request(&self, request: &Request) -> bool {
+        self.trust_local
+            && !request.headers().contains_key("x-steward-token")
+            && !request
+                .headers()
+                .keys()
+                .any(|k| k.as_str() == "forwarded" || k.as_str().starts_with("x-forwarded-"))
+            && request
+                .extensions()
+                .get::<ConnectInfo<std::net::SocketAddr>>()
+                .is_some_and(|peer| peer.0.ip().is_loopback() || peer.0.ip() == self.local_address)
     }
 
     pub fn stop_event_streams(&self) {
@@ -178,7 +201,14 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
     }
     difference == 0
 }
-async fn boundary(State(state): State<ServerState>, request: Request, next: Next) -> Response {
+#[derive(Clone, Copy)]
+struct Access {
+    role: Option<&'static str>,
+    local: bool,
+}
+
+async fn boundary(State(state): State<ServerState>, mut request: Request, next: Next) -> Response {
+    let local = state.local_request(&request);
     let headers = request.headers();
     let host_ok = headers.get_all("host").iter().count() == 1
         && headers.get("host").and_then(|v| v.to_str().ok()) == Some(state.host.as_str());
@@ -193,7 +223,11 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
     // Use one authorization snapshot; concurrent revocation must not turn a reader
     // into an unclassified request between authentication and the write gate.
     let role = if api && host_ok && origin_ok && fetch_ok {
-        state.role(headers)
+        if local {
+            Some("admin")
+        } else {
+            state.role(headers)
+        }
     } else {
         None
     };
@@ -204,7 +238,7 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
             "request host or origin is not permitted",
         )
     } else if api
-        && headers.contains_key("cookie")
+        && (local || headers.contains_key("cookie"))
         && !matches!(*request.method(), Method::GET | Method::HEAD)
         && (headers.get_all("x-steward-csrf").iter().count() != 1
             || headers.get("x-steward-csrf").is_none_or(|v| v != "1")
@@ -258,6 +292,7 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
             1024 * 1024
         };
         // Bound both body size and slow body uploads before handlers touch storage.
+        request.extensions_mut().insert(Access { role, local });
         let (parts, body) = request.into_parts();
         match tokio::time::timeout(std::time::Duration::from_secs(10), to_bytes(body, limit)).await
         {
@@ -413,8 +448,8 @@ async fn revoke_browsers(State(state): State<ServerState>) -> Response {
     browser_result(&state, None, None)
 }
 
-async fn access(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":state.role(&headers)},"warnings":[],"error":null})).into_response()
+async fn access(Extension(access): Extension<Access>) -> Response {
+    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":access.role,"local":access.local},"warnings":[],"error":null})).into_response()
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {

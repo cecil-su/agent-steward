@@ -71,7 +71,7 @@ cargo build --workspace --locked
 cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/steward.db
 ```
 
-启动后默认自动打开 `http://127.0.0.1:43123` 并授权本机浏览器；之后打开普通网址或新标签页即可恢复 30 天内的登录，支持退出和管理员撤销浏览器授权。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。首次创建的私有凭据跨重启保留，SSE 自动同步 CLI/Hook 和页面提交，正在编辑的表单不被覆盖。GUI 支持任务编辑、会话交接、Checkpoint、History、Hook 观测与安全 Worktree 操作；无需单独安装前端依赖。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
+启动后默认自动打开 `http://127.0.0.1:43123`。本机直接访问免凭据，包括通过 `--bind` 指定的本机网卡 IP 访问；严格认证模式用 `--require-local-auth`。本机免登录信任所有本地用户/程序，不可通过代理或隧道暴露。远程/严格模式的浏览器授权保留 30 天。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。Windows 本地编译更新可双击 [`distribution/windows/Update-Local.cmd`](distribution/windows/Update-Local.cmd)，首次设置后保留 IP、端口和数据路径；不自动拉代码，编译成功后才切换受管服务。详见 [启动与更新指南](distribution/windows/README.md)。首次创建的私有凭据跨重启保留，SSE 自动同步 CLI/Hook 和页面提交，正在编辑的表单不被覆盖。GUI 支持任务编辑、会话交接、Checkpoint、History、Hook 观测与安全 Worktree 操作；无需单独安装前端依赖。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
 
 当前数据库格式为 schema 2，不迁移旧 schema 1；旧数据库保留给原构建，启动新功能请使用新数据库。CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`。
 

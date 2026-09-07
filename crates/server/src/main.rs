@@ -23,6 +23,12 @@ struct Args {
     /// Do not open the local browser (headless or automated use).
     #[arg(long)]
     no_open: bool,
+    /// Require credentials even from this machine (mandatory behind a proxy).
+    #[arg(long)]
+    require_local_auth: bool,
+    /// Launcher-owned stop marker. Exits gracefully; never kills in-flight work.
+    #[arg(long)]
+    shutdown_file: Option<PathBuf>,
     /// Private directory containing persistent local administrator and reader credentials.
     #[arg(long)]
     runtime_dir: Option<PathBuf>,
@@ -50,6 +56,13 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args
+        .shutdown_file
+        .as_ref()
+        .is_some_and(|path| path.exists())
+    {
+        return Err("shutdown marker already exists; use a fresh launcher marker".into());
+    }
     if args.bind.is_unspecified() || args.bind.is_multicast() || args.bind.is_broadcast() {
         return Err("--bind must be a specific local unicast IPv4 address".into());
     }
@@ -83,14 +96,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "Local browser connects as administrator. Share only the read-only credential with other devices. Credentials persist across restarts."
     );
-    let state = ServerState::with_address(service, address, credentials.admin)
+    let mut state = ServerState::with_address(service, address, credentials.admin)
         .with_readonly_token(credentials.reader)
         .with_browser_store(&credentials.directory.join("browser-sessions.db"))?;
-    if !args.no_open {
-        let url = state.browser_connection_url();
-        println!(
-            "Opening the local browser with a one-time connection link (valid for 2 minutes)."
+    if !args.require_local_auth {
+        state = state.with_local_access();
+        eprintln!(
+            "Local direct requests are trusted as administrator. Do not forward/proxy this listener; use --require-local-auth for that deployment."
         );
+    }
+    if !args.no_open {
+        let url = if args.require_local_auth {
+            state.browser_connection_url()
+        } else {
+            format!("http://{address}")
+        };
+        println!("Opening the local browser.");
         std::thread::spawn(move || {
             if open_browser(&url).is_err() {
                 eprintln!(
@@ -100,11 +121,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let shutdown = state.clone();
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            shutdown.stop_event_streams();
-        })
-        .await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = async {
+                if let Some(path) = args.shutdown_file {
+                    loop {
+                        if path.exists() { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                } else { std::future::pending::<()>().await; }
+            } => {},
+        }
+        shutdown.stop_event_streams();
+    })
+    .await?;
     Ok(())
 }
