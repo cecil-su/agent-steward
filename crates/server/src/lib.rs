@@ -3,14 +3,18 @@ use axum::{
     Json, Router,
     body::{Bytes, to_bytes},
     extract::{Path, Query, Request, State},
-    http::{HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{path::Path as FsPath, sync::Arc};
+use std::{
+    path::Path as FsPath,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use steward_application::{
     AppError, AppResult, Outcome, Service, TaskListOptions, database_permission_warning,
 };
@@ -23,16 +27,34 @@ pub struct ServerState {
     origin: String,
     token: Arc<str>,
     slots: Arc<Semaphore>,
+    connection_code: Arc<Mutex<Option<(String, Instant)>>>,
 }
 impl ServerState {
     pub fn new(service: Service, port: u16, token: String) -> Self {
+        Self::with_address(service, ([127, 0, 0, 1], port).into(), token)
+    }
+
+    pub fn with_address(service: Service, address: std::net::SocketAddr, token: String) -> Self {
         Self {
             service,
-            host: format!("127.0.0.1:{port}"),
-            origin: format!("http://127.0.0.1:{port}"),
+            host: address.to_string(),
+            origin: format!("http://{address}"),
             token: token.into(),
             slots: Arc::new(Semaphore::new(8)),
+            connection_code: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Hand this URL only to the local browser launcher; never log it.
+    pub fn browser_connection_url(&self) -> String {
+        let code = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        *self.connection_code.lock().expect("connection code lock") =
+            Some((code.clone(), Instant::now() + Duration::from_secs(120)));
+        format!("{}/#connect={code}", self.origin)
     }
 }
 
@@ -41,6 +63,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/", get(index))
         .route("/app.js", get(script))
         .route("/style.css", get(style))
+        .route("/api/connect", post(connect))
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
         .route("/api/tasks/{id}/{resource}", get(task_resource))
@@ -91,6 +114,9 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
             "request host or origin is not permitted",
         )
     } else if api
+        // The exchange endpoint authenticates with a short-lived one-use credential
+        // in its handler. It never grants access based on the caller's IP.
+        && !(request.uri().path() == "/api/connect" && request.method() == Method::POST)
         && (headers.get_all("x-steward-token").iter().count() != 1
             || !headers
                 .get("x-steward-token")
@@ -201,6 +227,26 @@ async fn run(
         Ok((status,body))=>(status,Json(body)).into_response(),
         Err(_)=>failure(StatusCode::INTERNAL_SERVER_ERROR,"INTERNAL_ERROR","operation result is unconfirmed; refresh before further writes"),
     }
+}
+
+async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let supplied = headers.get("x-steward-connect");
+    let mut pending = state.connection_code.lock().expect("connection code lock");
+    let valid = headers.get_all("x-steward-connect").iter().count() == 1
+        && pending.as_ref().is_some_and(|(code, expires)| {
+            Instant::now() < *expires
+                && supplied
+                    .is_some_and(|value| constant_time_equal(value.as_bytes(), code.as_bytes()))
+        });
+    if !valid {
+        return failure(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "connection link is invalid or expired; use the credential file or restart taskd",
+        );
+    }
+    pending.take();
+    Json(json!({"schemaVersion":2,"ok":true,"data":{"token":state.token.as_ref()},"warnings":[],"error":null})).into_response()
 }
 
 async fn index() -> impl IntoResponse {
@@ -717,4 +763,34 @@ async fn command(
         );
     };
     run(state, move |s| execute(s, command)).await
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn expired_and_disabled_connection_codes_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = ServerState::new(
+            Service::new(temp.path().join("unused.db")),
+            1234,
+            "synthetic".into(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-steward-connect", HeaderValue::from_static("expired"));
+        assert_eq!(
+            connect(State(state.clone()), headers.clone())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        *state.connection_code.lock().unwrap() =
+            Some(("expired".into(), Instant::now() - Duration::from_secs(1)));
+        assert_eq!(
+            connect(State(state), headers).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(!temp.path().join("unused.db").exists());
+    }
 }

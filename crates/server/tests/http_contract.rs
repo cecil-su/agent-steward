@@ -51,6 +51,132 @@ async fn request(
 }
 
 #[tokio::test]
+async fn browser_connection_code_is_one_use_and_does_not_authorize_other_endpoints() {
+    let (_temp, service, _) = fixture();
+    let state = ServerState::new(service, 43123, TOKEN.into());
+    let url = state.browser_connection_url();
+    assert!(!url.contains(TOKEN));
+    let code = url.split("#connect=").nth(1).unwrap();
+    let app = router(state);
+    let make = |path: &str, code: &str, origin: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "127.0.0.1:43123")
+            .header("origin", origin)
+            .header("content-type", "application/json")
+            .header("x-steward-connect", code)
+            .body(Body::from("{}"))
+            .unwrap()
+    };
+    for (path, value, origin, expected) in [
+        (
+            "/api/connect",
+            "wrong",
+            "http://127.0.0.1:43123",
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "/api/connect",
+            code,
+            "http://evil.invalid",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/api/commands/task-create",
+            code,
+            "http://127.0.0.1:43123",
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(make(path, value, origin))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    let (a, b) = tokio::join!(
+        app.clone()
+            .oneshot(make("/api/connect", code, "http://127.0.0.1:43123")),
+        app.clone()
+            .oneshot(make("/api/connect", code, "http://127.0.0.1:43123"))
+    );
+    let mut responses = [a.unwrap(), b.unwrap()];
+    responses.sort_by_key(|response| response.status().as_u16());
+    let [success, refused] = responses;
+    assert_eq!(success.status(), StatusCode::OK);
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(success.headers()["cache-control"], "no-store");
+    let data: Value =
+        serde_json::from_slice(&to_bytes(success.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(data["data"]["token"], TOKEN);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tasks")
+                .header("host", "127.0.0.1:43123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn explicit_address_keeps_exact_host_origin_and_authentication_checks() {
+    let (_temp, service, _) = fixture();
+    let app = router(ServerState::with_address(
+        service,
+        "172.19.10.185:43123".parse().unwrap(),
+        TOKEN.into(),
+    ));
+    for (host, origin, token, expected) in [
+        (
+            "172.19.10.185:43123",
+            "http://172.19.10.185:43123",
+            TOKEN,
+            StatusCode::OK,
+        ),
+        (
+            "127.0.0.1:43123",
+            "http://172.19.10.185:43123",
+            TOKEN,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "172.19.10.185:43123",
+            "http://localhost:43123",
+            TOKEN,
+            StatusCode::FORBIDDEN,
+        ),
+        ("172.19.10.185:43123", "null", TOKEN, StatusCode::FORBIDDEN),
+        (
+            "172.19.10.185:43123",
+            "http://172.19.10.185:43123",
+            "invalid",
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .header("host", host)
+                    .header("origin", origin)
+                    .header("x-steward-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
 async fn authentication_origin_and_csrf_fail_before_storage_changes() {
     let (_temp, s, app) = fixture();
     for (host, origin, token, content, expected) in [

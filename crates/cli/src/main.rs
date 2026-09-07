@@ -33,6 +33,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum TopCommand {
+    /// Explicit offline import; never changes or upgrades the source database.
+    Database {
+        #[command(subcommand)]
+        command: DatabaseCommand,
+    },
     Hook {
         #[command(subcommand)]
         command: HookCommand,
@@ -53,6 +58,15 @@ enum TopCommand {
         task_id: String,
     },
     Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+enum DatabaseCommand {
+    /// Copy a legacy v7 closed-task archive into a new schema 2 database.
+    ImportV7 {
+        #[arg(long)]
+        source: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -376,6 +390,17 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
     match &cli.command {
+        TopCommand::Database {
+            command: DatabaseCommand::ImportV7 { source },
+        } => {
+            if cli.database.is_none() {
+                return Err(AppError::invalid(
+                    "database",
+                    "explicit destination --database is required",
+                ));
+            }
+            service.import_legacy_v7(source, cli.yes)
+        }
         TopCommand::Hook { command } => match command {
             HookCommand::Ingest => {
                 let path = cli

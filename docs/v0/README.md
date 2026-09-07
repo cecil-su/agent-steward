@@ -39,7 +39,7 @@
 - 最小 Task 可无描述创建，随后通过带 CAS 的 JSON Merge Patch 增量补全；描述一旦设置不能清空，`completed` 关闭前必须补齐；
 - `--json --input -` 可安全读取 stdin UTF-8 JSON，机器输出合同为 `schemaVersion: 2`；
 - Task list 支持 status/taskKey/文本筛选、固定长度筛选摘要游标分页和字段投影；人类模式提供表格及单字段 lines 输出；
-- SQLite 由 CLI 进程直接访问，不依赖独立数据库服务，也不支持多台机器共享同一数据库；只支持新建数据库，不迁移旧 schema；
+- SQLite 由 CLI 进程直接访问，不依赖独立数据库服务，也不支持多台机器共享同一数据库；普通连接只支持新建数据库，不隐式迁移旧 schema；旧 v7 闭合任务归档可使用独立的 [离线迁移命令](13-v7归档迁移.md) 复制到新库；
 - Git 和文件系统实时状态不写成数据库权威事实；
 - 除没有旧状态可比较的 create 外，所有面向已有 Task 的 mutation 携带调用方最近读取的 version，使用 compare-and-swap 防止旧快照覆盖；
 - Git 与 SQLite 部分完成时只允许显式、非破坏性的 Worktree 引用 adopt/detach；

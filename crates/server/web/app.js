@@ -11,7 +11,11 @@
   function showWarnings(warnings){if(warnings?.length){warningText=warnings.map(w=>`${w.code}：${w.message}`).join('\n');notify(warningText);}}
   function date(value){return value?new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';}
   function badge(status){return el('span',statuses[status]||status,'badge '+status);}
-  function logout(){token='';warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
+  const credentialKey='steward.connection-token';
+  function savedCredential(){try{return sessionStorage.getItem(credentialKey)||'';}catch{return '';}}
+  function storeCredential(value){try{if(value)sessionStorage.setItem(credentialKey,value);else sessionStorage.removeItem(credentialKey);}catch{/* Storage may be disabled; in-memory connection still works. */}}
+  function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
+  function logout(){token='';storeCredential('');warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
   async function api(path,body) {
     let response;
     try { response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Steward-Token':token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
@@ -45,8 +49,8 @@
     const actions=el('div',undefined,'actions');actions.append(button('复制交接上下文',safely(copyContext)));
     if(t.status!=='closed'){
       actions.append(action('编辑任务','task-update',taskFields(t),'只提交修改过的字段。若版本发生冲突，填写内容会保留。'));
-      if(t.status==='open')actions.append(action('开始任务','task-claim',[text('sessionId','新执行 Session ID','session-'+crypto.randomUUID())],'显式领取任务并记录当前执行会话。'));
-      if(t.status==='in_progress'||t.status==='blocked')actions.append(action('换会话继续','task-resume',[text('sessionId','新执行 Session ID','session-'+crypto.randomUUID()),text('fromSession','来源 Session ID',t.currentSessionId),...(t.currentSessionId?[check('takeOver','确认接管当前执行会话 '+t.currentSessionId)]:[])],'创建新的本地执行会话，保留原会话和 Checkpoint。'));
+      if(t.status==='open')actions.append(action('开始任务','task-claim',[text('sessionId','新执行 Session ID',sessionId())],'显式领取任务并记录当前执行会话。'));
+      if(t.status==='in_progress'||t.status==='blocked')actions.append(action('换会话继续','task-resume',[text('sessionId','新执行 Session ID',sessionId()),text('fromSession','来源 Session ID',t.currentSessionId),...(t.currentSessionId?[check('takeOver','确认接管当前执行会话 '+t.currentSessionId)]:[])],'创建新的本地执行会话，保留原会话和 Checkpoint。'));
       actions.append(action('记录进展','task-note',[choose('noteType','记录类型',[['progress','进展'],['decision','决策'],['risk','风险']]),area('text','内容')]));
       if(t.status==='blocked')actions.append(action('解除阻塞','task-unblock',[area('nextStep','恢复后的下一步',t.nextStep)]));
       else actions.append(action('记录阻塞','task-block',[area('reason','阻塞原因'),area('recovery','恢复条件')]));
@@ -124,10 +128,35 @@
       }else submit.disabled=false;
     }
   };
-  $('connect-form').onsubmit=async event=>{event.preventDefault();token=$('credential').value.trim();$('login-error').textContent='';const b=event.submitter;b.disabled=true;try{await loadList();$('credential').value='';$('login').hidden=true;$('workspace').hidden=false;if(rows.length)await selectTask(rows[0].id);}catch(e){token='';$('login-error').textContent=e.message;}finally{b.disabled=false;}};
+  async function connect(value){
+    token=value;$('login-error').textContent='';
+    try{await loadList();}catch(e){$('login-error').textContent=e.message;return;}
+    storeCredential(token);$('credential').value='';$('login').hidden=true;$('workspace').hidden=false;
+    if(rows.length)try{await selectTask(rows[0].id);}catch(e){notify(e.message);}
+  }
+  $('connect-form').onsubmit=async event=>{event.preventDefault();const b=event.submitter;if(b)b.disabled=true;try{await connect($('credential').value.trim());}finally{if(b)b.disabled=false;}};
   $('logout').onclick=logout;$('refresh').onclick=safely(async()=>{notify('');await loadList();if(selected)await selectTask(selected);});
   $('create').onclick=()=>openAction('task-create','新建任务',taskFields(null),'可以先创建最小任务，随后补充目标、范围和验收条件。');
   $('search-form').onsubmit=event=>{event.preventDefault();query=$('search').value.trim();safely(()=>loadList())();};$('more').onclick=safely(()=>loadList(true));
   for(const b of document.querySelectorAll('[data-view]'))b.onclick=safely(async()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));await loadList();});
   for(const id of ['cancel','cancel-bottom'])$(id).onclick=()=>$('action-dialog').close();$('action-dialog').addEventListener('close',()=>{modal=null;});
+  async function autoConnect(code){
+    logout();
+    const controls=Array.from($('connect-form').querySelectorAll('input,button'));
+    controls.forEach(control=>control.disabled=true);
+    try{
+      if(!/^[a-f0-9]{64}$/.test(code))throw new Error('invalid connection code');
+      const response=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Steward-Connect':code},body:'{}',signal:AbortSignal.timeout(15000),cache:'no-store'});
+      const result=await response.json();
+      if(!response.ok||!result.ok||typeof result.data?.token!=='string')throw new Error('connection exchange failed');
+      await connect(result.data.token);
+    }catch{$('login-error').textContent='自动连接未完成或连接链接已失效。请使用终端提示的凭据文件手动连接，或重新启动工作台。';}
+    finally{controls.forEach(control=>control.disabled=false);}
+  }
+  const code=new URLSearchParams(location.hash.slice(1)).get('connect');
+  if(code!==null){
+    // Remove the one-use secret before any exchange; never send it in a query string.
+    history.replaceState(null,'',location.pathname+location.search);
+    void autoConnect(code);
+  }else{const saved=savedCredential();if(saved)void connect(saved);}
 })();

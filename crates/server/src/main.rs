@@ -19,6 +19,12 @@ struct Args {
     database: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     port: u16,
+    /// Explicit local IPv4 address. Non-loopback addresses expose HTTP to the network.
+    #[arg(long, default_value = "127.0.0.1")]
+    bind: std::net::Ipv4Addr,
+    /// Do not open the local browser (headless or automated use).
+    #[arg(long)]
+    no_open: bool,
     /// Private runtime directory. A fresh credential subdirectory is created per launch.
     #[arg(long)]
     runtime_dir: Option<PathBuf>,
@@ -69,9 +75,36 @@ fn credential(root: PathBuf, token: &str) -> std::io::Result<Credential> {
     file.sync_all()?;
     Ok(guard)
 }
+fn open_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let program = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let program = "xdg-open";
+    let status = std::process::Command::new(program)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("browser launcher failed"))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args.bind.is_unspecified() || args.bind.is_multicast() || args.bind.is_broadcast() {
+        return Err("--bind must be a specific local unicast IPv4 address".into());
+    }
+    if !args.bind.is_loopback() {
+        eprintln!(
+            "Warning: non-loopback HTTP listener; credentials and task data are not encrypted in transit. Restrict network access using your firewall."
+        );
+    }
     let database = args
         .database
         .or_else(|| steward_core::default_data_dir().map(|p| p.join("steward.db")))
@@ -79,24 +112,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = Service::new(database);
     // Fail before advertising a service or credential for an incompatible database.
     service.task_list(Some("active"))?;
-    let listener =
-        tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, args.port)).await?;
-    let port = listener.local_addr()?.port();
+    let listener = tokio::net::TcpListener::bind((args.bind, args.port)).await?;
+    let address = listener.local_addr()?;
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let root = args
         .runtime_dir
         .or_else(|| steward_core::default_data_dir().map(|p| p.join("runtime")))
         .ok_or("cannot resolve runtime directory")?;
     let credential = credential(root, &token)?;
-    println!("Agent Steward: http://127.0.0.1:{port}");
+    println!("Agent Steward: http://{address}");
     println!(
         "Credential file: {}",
         credential.directory.join("credential").display()
     );
     println!(
-        "Paste its contents into the connection screen. Restart or refresh requires reconnecting."
+        "Reload keeps this tab connected. Other devices or manual connection: use the credential file above."
     );
-    axum::serve(listener, router(ServerState::new(service, port, token)))
+    let state = ServerState::with_address(service, address, token);
+    if !args.no_open {
+        let url = state.browser_connection_url();
+        println!(
+            "Opening the local browser with a one-time connection link (valid for 2 minutes)."
+        );
+        // No shell expansion, and never include the secret URL in diagnostics.
+        std::thread::spawn(move || {
+            if open_browser(&url).is_err() {
+                eprintln!(
+                    "Could not open the browser. Open the displayed address and use the credential file; use --no-open on headless systems."
+                );
+            }
+        });
+    }
+    axum::serve(listener, router(state))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

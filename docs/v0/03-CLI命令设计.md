@@ -16,6 +16,10 @@ taskctl [global-options] <domain> <action> [subaction] [arguments] [options]
 
 默认数据库位于当前操作系统的用户级应用数据目录下，文件名为 `agent-steward/steward.db`。初版不提供远程 Git 写入命令，也不连接远程数据库服务。
 
+### 显式离线归档迁移
+
+`taskctl --database <不存在的新库绝对路径> --json --yes database import-v7 --source <旧v7快照绝对路径>` 只读源库，保留闭合任务的 ID、版本、时间戳及全部业务记录。拒绝活动任务、Worktree 绑定和既有目标。它不是 Task mutation，不生成新业务 History、不切换默认库。完整限制和验收见 [v7归档迁移](13-v7归档迁移.md)。
+
 ## 2. Task
 
 ```bash

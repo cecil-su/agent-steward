@@ -4,7 +4,7 @@
 <body>
 <div id="login" class="login-shell">
   <section class="login-card"><span class="brand-mark">S</span><p class="eyebrow">AGENT STEWARD / V0</p><h1>接着上次的工作。</h1><p class="muted">连接本机工作台，查看任务进展、会话记录和下一步。</p>
-  <form id="connect-form"><label for="credential">本次服务的连接凭据</label><input id="credential" type="password" autocomplete="off" required placeholder="粘贴凭据文件中的内容"><p class="hint">文件路径显示在启动终端中。凭据仅保留在当前页面，刷新后需重新连接。</p><button type="submit" class="primary">连接工作台 <span aria-hidden="true">→</span></button><p id="login-error" role="alert"></p></form></section>
+  <form id="connect-form"><label for="credential">本次服务的连接凭据</label><input id="credential" type="password" autocomplete="off" required placeholder="粘贴凭据文件中的内容"><p class="hint">本机启动后会自动打开并连接。若自动连接失败，或从其他设备访问，请粘贴启动终端所示凭据文件的内容。凭据保存在当前标签页，刷新可恢复；断开或凭据失效时清除。</p><button type="submit" class="primary">连接工作台 <span aria-hidden="true">→</span></button><p id="login-error" role="alert"></p></form></section>
   <p class="login-foot">本地数据 · 明确的下一步 · 连续的工作上下文</p>
 </div>
 <div id="workspace" hidden>

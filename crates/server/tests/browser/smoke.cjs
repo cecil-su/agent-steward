@@ -8,7 +8,7 @@ if(process.platform!=='win32')fs.chmodSync(temp,0o700);
 const database=path.join(temp,'test.db');
 // Let taskd create and protect this directory using the platform's ACL API.
 const runtime=path.join(temp,'runtime');
-const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime],{stdio:['ignore','pipe','pipe']});
+const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime,'--no-open'],{stdio:['ignore','pipe','pipe']});
 let stdout='',stderr='';daemon.stdout.on('data',b=>stdout+=b);daemon.stderr.on('data',b=>stderr+=b);
 let browser,page;
 const cli=(...args)=>JSON.parse(execFileSync(path.join(root,'target/debug/taskctl'),['--database',database,'--json',...args],{encoding:'utf8'}));
@@ -57,9 +57,18 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   await page.context().grantPermissions(['clipboard-read','clipboard-write']);await page.getByRole('button',{name:'复制交接上下文'}).click();await page.locator('#notice').filter({hasText:'已复制'}).waitFor();assert((await page.evaluate(()=>navigator.clipboard.readText())).includes('browser-session-b'));
   fs.mkdirSync(path.join(root,'.local'),{recursive:true});await page.screenshot({path:path.join(root,'.local/m5-desktop.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'mobile layout overflows');await page.screenshot({path:path.join(root,'.local/m5-mobile.png'),fullPage:true});
   await page.getByRole('button',{name:'关闭任务',exact:true}).click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});assert.equal(cli('task','show','1').data.task.status,'closed');
-  assert.equal(await page.evaluate(()=>localStorage.length),0);assert.equal(await page.evaluate(()=>sessionStorage.length),0);assert.equal((await page.context().cookies()).length,0);
-  await page.reload();await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.getByLabel('本次服务的连接凭据').inputValue(),'');
-  assert.deepEqual(errors,[]);console.log('PASS: browser create/claim/checkpoint/resume, CAS, Hook bind/clear, Import, block/unblock, lost-response no replay, Worktree dirty safety, copy, explicit close, responsive UI and memory-only auth');
+  assert.equal(await page.evaluate(()=>localStorage.length),0);assert.equal((await page.context().cookies()).length,0);
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),token);
+  await page.reload();await page.locator('#workspace').waitFor({state:'visible'});assert.equal(await page.getByLabel('本次服务的连接凭据').inputValue(),'');
+  await page.locator('#logout').click();await page.locator('#login').waitFor({state:'visible'});
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),null);
+  await page.reload();await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
+  // A credential from a previous server instance must be discarded after 401.
+  await page.evaluate(()=>sessionStorage.setItem('steward.connection-token','synthetic-expired-token'));
+  const rejected=page.waitForResponse(r=>r.url().includes('/api/tasks')&&r.status()===401);
+  await page.reload();await rejected;await page.waitForFunction(()=>sessionStorage.getItem('steward.connection-token')===null);
+  await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
+  assert.deepEqual(errors,[]);console.log('PASS: browser create/claim/checkpoint/resume, CAS, Hook bind/clear, Import, block/unblock, lost-response no replay, Worktree dirty safety, copy, explicit close, responsive UI, reload connection and credential cleanup');
  }catch(error){if(page){await page.screenshot({path:path.join(root,'.local/m5-failure.png'),fullPage:true}).catch(()=>{});console.error('Action error:',await page.locator('#action-error').textContent().catch(()=>''));}throw error;}finally{
   if(page){if(process.exitCode)await page.screenshot({path:path.join(root,'.local/m5-failure.png'),fullPage:true}).catch(()=>{});}
   if(browser)await browser.close();daemon.kill('SIGINT');await delay(300);if(daemon.exitCode===null)daemon.kill('SIGKILL');fs.rmSync(temp,{recursive:true,force:true});

@@ -52,8 +52,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rust tests
         run: cargo test --workspace --all-targets --locked
-      - name: Native adapter tests
-        run: node --test integrations/tests/native.test.mjs
+      - name: Native adapter and browser connection tests
+        run: node --test integrations/tests/native.test.mjs crates/server/tests/browser/connection.test.cjs
       - name: Install browser test dependencies
         if: runner.os == 'Linux'
         run: |

@@ -1,5 +1,6 @@
 mod db;
 mod hooks;
+mod migration;
 pub use hooks::HookEventInput;
 mod permissions;
 pub use permissions::database_permission_warning;

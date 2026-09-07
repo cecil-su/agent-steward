@@ -16,9 +16,7 @@ sha2.workspace = true
 steward-core = { path = "../core" }
 storage-sqlite = { path = "../storage-sqlite" }
 uuid.workspace = true
+tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
