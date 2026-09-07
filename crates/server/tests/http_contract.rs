@@ -51,6 +51,78 @@ async fn request(
 }
 
 #[tokio::test]
+async fn reader_credentials_can_query_but_cannot_mutate_any_resource() {
+    let (_temp, service, _) = fixture();
+    let app = router(
+        ServerState::new(service.clone(), 43123, TOKEN.into())
+            .with_readonly_token("reader-only".into()),
+    );
+    for endpoint in ["/api/tasks", "/api/tasks/1/context", "/api/access"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(endpoint)
+                    .header("host", "127.0.0.1:43123")
+                    .header("x-steward-token", "reader-only")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        if endpoint == "/api/access" {
+            let value: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(value["data"]["role"], "reader");
+        }
+    }
+    for endpoint in [
+        "/api/commands/task-create",
+        "/api/commands/task-update",
+        "/api/commands/task-close",
+        "/api/commands/task-claim",
+        "/api/commands/task-note",
+        "/api/commands/task-retitle",
+        "/api/commands/session-bind",
+        "/api/commands/session-import-add",
+        "/api/commands/session-import-remove",
+        "/api/commands/hook-clear",
+        "/api/commands/worktree-create",
+        "/api/commands/worktree-remove",
+        "/api/hook",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("host", "127.0.0.1:43123")
+                    .header("x-steward-token", "reader-only")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{endpoint}");
+        let error: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(error["error"]["code"], "READ_ONLY");
+    }
+    assert_eq!(service.task_show("1").unwrap().data["task"]["version"], 1);
+    assert_eq!(
+        service.task_list(None).unwrap().data["tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn browser_connection_code_is_one_use_and_does_not_authorize_other_endpoints() {
     let (_temp, service, _) = fixture();
     let state = ServerState::new(service, 43123, TOKEN.into());
@@ -361,7 +433,7 @@ async fn http_observations_do_not_change_task_and_can_be_deleted_explicitly() {
     );
 }
 #[tokio::test]
-async fn static_ui_is_public_but_cannot_be_embedded_and_restart_invalidates_auth() {
+async fn static_ui_is_public_but_cannot_be_embedded_and_rotated_credentials_invalidate_auth() {
     let (_temp, s, app) = fixture();
     let response = app
         .oneshot(

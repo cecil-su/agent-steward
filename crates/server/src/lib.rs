@@ -1,4 +1,5 @@
 //! Same-origin HTTP transport. Authentication is checked before extracting bodies.
+mod events;
 use axum::{
     Json, Router,
     body::{Bytes, to_bytes},
@@ -26,6 +27,9 @@ pub struct ServerState {
     host: String,
     origin: String,
     token: Arc<str>,
+    readonly_token: Option<Arc<str>>,
+    event_slots: Arc<Semaphore>,
+    event_shutdown: Arc<std::sync::atomic::AtomicBool>,
     slots: Arc<Semaphore>,
     connection_code: Arc<Mutex<Option<(String, Instant)>>>,
 }
@@ -40,8 +44,40 @@ impl ServerState {
             host: address.to_string(),
             origin: format!("http://{address}"),
             token: token.into(),
+            readonly_token: None,
+            event_slots: Arc::new(Semaphore::new(16)),
+            event_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             slots: Arc::new(Semaphore::new(8)),
             connection_code: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn stop_event_streams(&self) {
+        self.event_shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn with_readonly_token(mut self, token: String) -> Self {
+        assert!(!token.is_empty() && token != self.token.as_ref());
+        self.readonly_token = Some(token.into());
+        self
+    }
+
+    fn role(&self, headers: &HeaderMap) -> Option<&'static str> {
+        if headers.get_all("x-steward-token").iter().count() != 1 {
+            return None;
+        }
+        let supplied = headers.get("x-steward-token")?.as_bytes();
+        if constant_time_equal(supplied, self.token.as_bytes()) {
+            Some("admin")
+        } else if self
+            .readonly_token
+            .as_ref()
+            .is_some_and(|token| constant_time_equal(supplied, token.as_bytes()))
+        {
+            Some("reader")
+        } else {
+            None
         }
     }
 
@@ -64,6 +100,8 @@ pub fn router(state: ServerState) -> Router {
         .route("/app.js", get(script))
         .route("/style.css", get(style))
         .route("/api/connect", post(connect))
+        .route("/api/access", get(access))
+        .route("/api/events", get(events::subscribe))
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
         .route("/api/tasks/{id}/{resource}", get(task_resource))
@@ -117,15 +155,21 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
         // The exchange endpoint authenticates with a short-lived one-use credential
         // in its handler. It never grants access based on the caller's IP.
         && !(request.uri().path() == "/api/connect" && request.method() == Method::POST)
-        && (headers.get_all("x-steward-token").iter().count() != 1
-            || !headers
-                .get("x-steward-token")
-                .is_some_and(|v| constant_time_equal(v.as_bytes(), state.token.as_bytes())))
+        && state.role(headers).is_none()
     {
         failure(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "connect using this Daemon's credential",
+        )
+    } else if api
+        && state.role(headers) == Some("reader")
+        && !matches!(*request.method(), Method::GET | Method::HEAD)
+    {
+        failure(
+            StatusCode::FORBIDDEN,
+            "READ_ONLY",
+            "this credential only permits reading",
         )
     } else if api
         && request.method() == Method::POST
@@ -227,6 +271,10 @@ async fn run(
         Ok((status,body))=>(status,Json(body)).into_response(),
         Err(_)=>failure(StatusCode::INTERNAL_SERVER_ERROR,"INTERNAL_ERROR","operation result is unconfirmed; refresh before further writes"),
     }
+}
+
+async fn access(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":state.role(&headers)},"warnings":[],"error":null})).into_response()
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {

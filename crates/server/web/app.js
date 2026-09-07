@@ -3,6 +3,7 @@
   const $ = id => document.getElementById(id);
   const statuses = {open:'待开始',in_progress:'进行中',blocked:'有阻塞',closed:'已关闭'};
   let warningText='', listRevision=0;
+  let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
   let token='', view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
   function el(tag,text,cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
   function button(text,action,cls='') { const b=el('button',text,cls);b.type='button';b.onclick=action;return b; }
@@ -15,7 +16,7 @@
   function savedCredential(){try{return sessionStorage.getItem(credentialKey)||'';}catch{return '';}}
   function storeCredential(value){try{if(value)sessionStorage.setItem(credentialKey,value);else sessionStorage.removeItem(credentialKey);}catch{/* Storage may be disabled; in-memory connection still works. */}}
   function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-  function logout(){token='';storeCredential('');warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
+  function logout(){stopLive();canWrite=false;token='';storeCredential('');warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
   async function api(path,body) {
     let response;
     try { response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Steward-Token':token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
@@ -37,7 +38,7 @@
   }
   async function selectTask(id){selected=id;const generation=++revision;renderList();const data=await api(`/api/tasks/${id}/context`);if(generation!==revision)return;context=data;await renderDetail();}
   function section(title,value){const node=el('section',undefined,'section');node.append(el('h3',title));if(Array.isArray(value)){const ul=el('ul');for(const line of value)ul.append(el('li',line));node.append(value.length?ul:el('p','暂无记录','muted'));}else node.append(el('p',value||'尚未填写',value?'':'muted'));return node;}
-  function action(text,name,fields,description='',extra={}){return button(text,()=>openAction(name,text,fields,description,extra));}
+  function action(text,name,fields,description='',extra={}){const b=button(text,()=>openAction(name,text,fields,description,extra));b.hidden=!canWrite;return b;}
   const text=(key,label,value='',required=true)=>({key,label,value:value??'',required});
   const area=(key,label,value='',required=true)=>({...text(key,label,value,required),type:'textarea'});
   const choose=(key,label,options,value)=>({key,label,type:'select',options,value:value??options[0][0],required:true});
@@ -100,6 +101,7 @@
   function contextText(){const t=context.task,cp=context.checkpoint;return [`# ${t.title||'未命名任务'} (#${t.id})`,`状态：${statuses[t.status]} · version ${t.version}`,'','## 目标',t.goal||'尚未填写','','## 范围',t.scope||'尚未填写','','## 验收',t.acceptanceCriteria||'尚未填写','','## 下一步',t.nextStep||'尚未填写',...(t.blockReason?['','## 阻塞',t.blockReason,'恢复条件：'+t.blockRecovery]:[]),'','## Checkpoint',cp?JSON.stringify(cp,null,2):'暂无','','## 执行会话',context.session?JSON.stringify(context.session,null,2):'暂无','','## 实时 Git 状态',context.worktreeStatus?JSON.stringify(context.worktreeStatus,null,2):'未关联或无法观察','','继续前重新读取最新 Task version；本文不授权自动关闭任务。'].join('\n');}
   async function copyContext(){await selectTask(selected);const output=contextText();try{await navigator.clipboard.writeText(output);notify('已复制最新交接上下文。',true);}catch{openAction('copy-context','交接上下文',[area('context','复制下方内容',output)],'选择并复制文本。');$('submit-action').hidden=true;}}
   function openAction(name,title,fields,description='',extra={}){
+    if(!canWrite&&name!=='copy-context'){notify('当前连接为只读，不能修改任务。');return;}
     modal={name,fields,extra,task:context?.task?structuredClone(context.task):null};$('action-title').textContent=title;$('action-description').textContent=description;clear($('action-fields'));clear($('action-error'));clear($('conflict'));$('submit-action').hidden=false;$('submit-action').disabled=false;
     for(const f of fields){const label=el('label',f.label);label.htmlFor='field-'+f.key;const input=el(f.type==='textarea'?'textarea':f.type==='select'?'select':'input');input.id='field-'+f.key;input.name=f.key;input.required=!!f.required;if(f.type==='select')for(const [value,label] of f.options){const o=el('option',label);o.value=value;input.append(o);}if(f.type==='checkbox'){input.type='checkbox';label.prepend(input);$('action-fields').append(label);}else{input.value=f.value??'';$('action-fields').append(label,input);}}
     $('action-dialog').showModal();
@@ -130,16 +132,64 @@
   };
   async function connect(value){
     token=value;$('login-error').textContent='';
-    try{await loadList();}catch(e){$('login-error').textContent=e.message;return;}
+    stopLive();
+    try{const access=await api('/api/access');canWrite=access.role==='admin';await loadList();}catch(e){$('login-error').textContent=e.message;return;}
+    $('create').hidden=!canWrite;$('access-role').textContent=canWrite?'管理员':'只读';
     storeCredential(token);$('credential').value='';$('login').hidden=true;$('workspace').hidden=false;
     if(rows.length)try{await selectTask(rows[0].id);}catch(e){notify(e.message);}
+    if(token)startLive();
   }
   $('connect-form').onsubmit=async event=>{event.preventDefault();const b=event.submitter;if(b)b.disabled=true;try{await connect($('credential').value.trim());}finally{if(b)b.disabled=false;}};
   $('logout').onclick=logout;$('refresh').onclick=safely(async()=>{notify('');await loadList();if(selected)await selectTask(selected);});
   $('create').onclick=()=>openAction('task-create','新建任务',taskFields(null),'可以先创建最小任务，随后补充目标、范围和验收条件。');
   $('search-form').onsubmit=event=>{event.preventDefault();query=$('search').value.trim();safely(()=>loadList())();};$('more').onclick=safely(()=>loadList(true));
   for(const b of document.querySelectorAll('[data-view]'))b.onclick=safely(async()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));await loadList();});
-  for(const id of ['cancel','cancel-bottom'])$(id).onclick=()=>$('action-dialog').close();$('action-dialog').addEventListener('close',()=>{modal=null;});
+  for(const id of ['cancel','cancel-bottom'])$(id).onclick=()=>$('action-dialog').close();$('action-dialog').addEventListener('close',()=>{modal=null;if(liveDirty)scheduleLiveRefresh();});
+  function stopLive(){
+    if(liveAbort)liveAbort.abort();liveAbort=null;
+    if(liveTimer)clearTimeout(liveTimer);liveTimer=null;liveDirty=false;
+    $('live-state').textContent='未连接';
+  }
+  function scheduleLiveRefresh(){
+    liveDirty=true;if(!token||liveTimer||liveRefreshing)return;
+    if(modal){$('live-state').textContent='有更新，关闭表单后刷新';return;}
+    liveTimer=setTimeout(async()=>{
+      liveTimer=null;if(!token||modal)return;
+      liveDirty=false;liveRefreshing=true;const connection=liveAbort;
+      try{await loadList();if(connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
+      catch(e){if(connection===liveAbort)notify(e.message);}
+      finally{liveRefreshing=false;if(liveDirty&&token)scheduleLiveRefresh();}
+    },250);
+  }
+  function startLive(){
+    stopLive();const controller=new AbortController();liveAbort=controller;
+    void (async()=>{
+      while(!controller.signal.aborted){
+        let reader;
+        try{
+          const response=await fetch('/api/events',{headers:{'X-Steward-Token':token},signal:controller.signal,cache:'no-store'});
+          if(controller.signal.aborted)return;
+          if(response.status===401){logout();$('login-error').textContent='连接凭据已失效，请重新连接。';return;}
+          if(!response.ok||!response.body)throw new Error('event stream unavailable');
+          $('live-state').textContent='实时同步';reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';
+          while(!controller.signal.aborted){
+            const {done,value}=await reader.read();if(done)break;
+            buffer+=decoder.decode(value,{stream:true}).replace(/\r/g,'');
+            let end;while((end=buffer.indexOf('\n\n'))!==-1){
+              const frame=buffer.slice(0,end);buffer=buffer.slice(end+2);
+              if(frame.split('\n').some(line=>line==='event: changed'))scheduleLiveRefresh();
+              if(frame.split('\n').some(line=>line==='event: unavailable'))throw new Error('event stream unavailable');
+            }
+            if(buffer.length>8192)throw new Error('invalid event stream');
+          }
+        }catch{/* Only the read-only notification channel reconnects; writes are never replayed. */}
+        finally{if(reader)await reader.cancel().catch(()=>{});}
+        if(controller.signal.aborted)return;
+        $('live-state').textContent='同步断开，正在重连';
+        await new Promise(resolve=>{const finish=()=>{clearTimeout(timer);controller.signal.removeEventListener('abort',finish);resolve();};const timer=setTimeout(finish,2000);controller.signal.addEventListener('abort',finish,{once:true});});
+      }
+    })();
+  }
   async function autoConnect(code){
     logout();
     const controls=Array.from($('connect-form').querySelectorAll('input,button'));

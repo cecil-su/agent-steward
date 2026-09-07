@@ -1,12 +1,9 @@
+mod credentials;
+
 use clap::Parser;
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    path::PathBuf,
-};
+use std::path::PathBuf;
 use steward_application::Service;
 use steward_server::{ServerState, router};
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(
@@ -25,56 +22,11 @@ struct Args {
     /// Do not open the local browser (headless or automated use).
     #[arg(long)]
     no_open: bool,
-    /// Private runtime directory. A fresh credential subdirectory is created per launch.
+    /// Private directory containing persistent local administrator and reader credentials.
     #[arg(long)]
     runtime_dir: Option<PathBuf>,
 }
-struct Credential {
-    directory: PathBuf,
-}
-impl Drop for Credential {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(self.directory.join("credential"));
-        let _ = fs::remove_dir(&self.directory);
-    }
-}
-fn credential(root: PathBuf, token: &str) -> std::io::Result<Credential> {
-    if !root.try_exists()? {
-        fs::create_dir_all(&root)?;
-        steward_core::set_private_dir(&root)?;
-    }
-    if steward_application::database_permission_warning(&root.join("credential-probe"), false)
-        .is_some()
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "runtime directory must be private to the current user",
-        ));
-    }
-    let directory = root.join(format!("taskd-{}", Uuid::new_v4()));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new().mode(0o700).create(&directory)?;
-    }
-    #[cfg(not(unix))]
-    fs::create_dir(&directory)?;
-    let guard = Credential { directory };
-    steward_core::set_private_dir(&guard.directory)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let path = guard.directory.join("credential");
-    let mut file = options.open(&path)?;
-    steward_core::set_private_file(&path)?;
-    file.write_all(token.as_bytes())?;
-    file.sync_all()?;
-    Ok(guard)
-}
+
 fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(windows)]
     let program = "explorer.exe";
@@ -110,31 +62,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| steward_core::default_data_dir().map(|p| p.join("steward.db")))
         .ok_or("cannot resolve database path")?;
     let service = Service::new(database);
-    // Fail before advertising a service or credential for an incompatible database.
     service.task_list(Some("active"))?;
     let listener = tokio::net::TcpListener::bind((args.bind, args.port)).await?;
     let address = listener.local_addr()?;
-    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let root = args
         .runtime_dir
         .or_else(|| steward_core::default_data_dir().map(|p| p.join("runtime")))
         .ok_or("cannot resolve runtime directory")?;
-    let credential = credential(root, &token)?;
+    let credentials = credentials::load(&root)?;
     println!("Agent Steward: http://{address}");
     println!(
         "Credential file: {}",
-        credential.directory.join("credential").display()
+        credentials.directory.join("credential").display()
     );
     println!(
-        "Reload keeps this tab connected. Other devices or manual connection: use the credential file above."
+        "Read-only credential file: {}",
+        credentials.directory.join("readonly-credential").display()
     );
-    let state = ServerState::with_address(service, address, token);
+    println!(
+        "Local browser connects as administrator. Share only the read-only credential with other devices. Credentials persist across restarts."
+    );
+    let state = ServerState::with_address(service, address, credentials.admin)
+        .with_readonly_token(credentials.reader);
     if !args.no_open {
         let url = state.browser_connection_url();
         println!(
             "Opening the local browser with a one-time connection link (valid for 2 minutes)."
         );
-        // No shell expansion, and never include the secret URL in diagnostics.
         std::thread::spawn(move || {
             if open_browser(&url).is_err() {
                 eprintln!(
@@ -143,43 +97,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    let shutdown = state.clone();
     axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            shutdown.stop_event_streams();
         })
         .await?;
-    drop(credential);
     Ok(())
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-    #[test]
-    fn credentials_are_private_removed_on_exit_and_do_not_chmod_shared_runtime_roots() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("private-runtime");
-        let guard = credential(root.clone(), "synthetic-test-only").unwrap();
-        let file = guard.directory.join("credential");
-        assert_eq!(
-            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(fs::read_to_string(&file).unwrap(), "synthetic-test-only");
-        drop(guard);
-        assert!(!file.exists());
-        let shared = temp.path().join("shared");
-        fs::create_dir(&shared).unwrap();
-        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(credential(shared.clone(), "synthetic").is_err());
-        assert_eq!(
-            fs::metadata(shared).unwrap().permissions().mode() & 0o777,
-            0o777
-        );
-    }
 }

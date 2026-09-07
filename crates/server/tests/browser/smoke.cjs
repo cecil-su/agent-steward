@@ -68,7 +68,17 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   const rejected=page.waitForResponse(r=>r.url().includes('/api/tasks')&&r.status()===401);
   await page.reload();await rejected;await page.waitForFunction(()=>sessionStorage.getItem('steward.connection-token')===null);
   await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
-  assert.deepEqual(errors,[]);console.log('PASS: browser create/claim/checkpoint/resume, CAS, Hook bind/clear, Import, block/unblock, lost-response no replay, Worktree dirty safety, copy, explicit close, responsive UI, reload connection and credential cleanup');
+  const readerToken=fs.readFileSync(path.join(path.dirname(credentialPath),'readonly-credential'),'utf8');
+  const viewer=await browser.newPage();
+  try{
+    await viewer.goto(url);await viewer.getByLabel('本次服务的连接凭据').fill(readerToken);await viewer.getByRole('button',{name:'连接工作台'}).click();await viewer.locator('#workspace').waitFor({state:'visible'});
+    assert.equal(await viewer.locator('#access-role').textContent(),'只读');assert.equal(await viewer.locator('#create').isHidden(),true);
+    const denied=await viewer.evaluate(async token=>(await fetch('/api/commands/task-create',{method:'POST',headers:{'X-Steward-Token':token,'Content-Type':'application/json'},body:'{"input":{}}'})).status,readerToken);assert.equal(denied,403);
+    await viewer.locator('#live-state').filter({hasText:'实时同步'}).waitFor();
+    cli('task','create','SSE-EXTERNAL');
+    await viewer.locator('.task-card').filter({hasText:'#2'}).waitFor({state:'visible'});
+  }finally{await viewer.close();}
+  assert.deepEqual(errors,[]);console.log('PASS: browser lifecycle, CAS, Worktree safety, persistent connection, reader write refusal and external CLI SSE updates');
  }catch(error){if(page){await page.screenshot({path:path.join(root,'.local/m5-failure.png'),fullPage:true}).catch(()=>{});console.error('Action error:',await page.locator('#action-error').textContent().catch(()=>''));}throw error;}finally{
   if(page){if(process.exitCode)await page.screenshot({path:path.join(root,'.local/m5-failure.png'),fullPage:true}).catch(()=>{});}
   if(browser)await browser.close();daemon.kill('SIGINT');await delay(300);if(daemon.exitCode===null)daemon.kill('SIGKILL');fs.rmSync(temp,{recursive:true,force:true});
