@@ -967,6 +967,7 @@ mod windows_permissions {
 #[cfg(all(test, windows))]
 mod windows_permission_tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn protected_acl_that_allows_everyone_is_not_private() {

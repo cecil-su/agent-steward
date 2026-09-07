@@ -80,14 +80,15 @@ test("pi spawn failure is bounded, reported once, and never aborts the host", as
   assert.equal(warnings.length, 1);
 });
 test("Codex config generator quotes shell metacharacters and sets bounded hooks", () => {
-  const path = "/tmp/a 'b $(no-execution)/task-hook";
-  const result = spawnSync("python3", ["integrations/codex/configure.py", "--binary", path,
-    "--database", "/tmp/db with spaces", "--session", "local", "--external-session", "external"], { encoding: "utf8" });
+  const path = join(tmpdir(), "a 'b $(no-execution)", "task-hook");
+  const python = process.platform === "win32" ? "python" : "python3";
+  const result = spawnSync(python, ["integrations/codex/configure.py", "--binary", path,
+    "--database", join(tmpdir(), "db with spaces"), "--session", "local", "--external-session", "external"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const hooks = JSON.parse(result.stdout).hooks;
   assert.equal(Object.keys(hooks).length, 7);
   const command = hooks.Stop[0].hooks[0];
   assert.equal(command.timeout, 3);
-  const parsed = spawnSync("python3", ["-c", "import shlex,json,sys;print(json.dumps(shlex.split(sys.argv[1])))", command.command], { encoding: "utf8" });
+  const parsed = spawnSync(python, ["-c", "import shlex,json,sys;print(json.dumps(shlex.split(sys.argv[1])))", command.command], { encoding: "utf8" });
   assert.equal(JSON.parse(parsed.stdout)[0], path);
 });

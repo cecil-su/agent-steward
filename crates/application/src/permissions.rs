@@ -1,4 +1,5 @@
 use serde_json::json;
+#[cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use steward_core::Warning;

@@ -3,9 +3,12 @@ const {chromium}=require('playwright');
 const {spawn,execFileSync}=require('node:child_process');
 const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../../../..');
-const temp=fs.mkdtempSync(path.join(os.tmpdir(),'steward-gui-'));fs.chmodSync(temp,0o700);
+const temp=fs.mkdtempSync(path.join(os.tmpdir(),'steward-gui-'));
+if(process.platform!=='win32')fs.chmodSync(temp,0o700);
 const database=path.join(temp,'test.db');
-const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',temp],{stdio:['ignore','pipe','pipe']});
+// Let taskd create and protect this directory using the platform's ACL API.
+const runtime=path.join(temp,'runtime');
+const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime],{stdio:['ignore','pipe','pipe']});
 let stdout='',stderr='';daemon.stdout.on('data',b=>stdout+=b);daemon.stderr.on('data',b=>stderr+=b);
 let browser,page;
 const cli=(...args)=>JSON.parse(execFileSync(path.join(root,'target/debug/taskctl'),['--database',database,'--json',...args],{encoding:'utf8'}));
@@ -14,7 +17,12 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
  try{
   for(let i=0;i<100&&!stdout.includes('Credential file:');i++){if(daemon.exitCode!==null)throw Error('Daemon startup failed: '+stderr);await delay(50);}
   const url=stdout.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];const credentialPath=stdout.match(/Credential file: (.+)/)?.[1];assert(url&&credentialPath,'Daemon did not advertise URL and credential path');
-  const token=fs.readFileSync(credentialPath,'utf8');assert(!stdout.includes(token));assert.equal(fs.statSync(credentialPath).mode&0o777,0o600);
+  const token=fs.readFileSync(credentialPath,'utf8');assert(!stdout.includes(token));if(process.platform==='win32'){
+    for(const target of [runtime,path.dirname(credentialPath),credentialPath]){
+      const protectedAcl=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','if ([System.IO.Directory]::Exists($env:STEWARD_TEST_ACL_PATH)) { [System.IO.Directory]::GetAccessControl($env:STEWARD_TEST_ACL_PATH).AreAccessRulesProtected } else { [System.IO.File]::GetAccessControl($env:STEWARD_TEST_ACL_PATH).AreAccessRulesProtected }'],{encoding:'utf8',env:{...process.env,STEWARD_TEST_ACL_PATH:target}}).trim();
+      assert.equal(protectedAcl,'True','credential ACL must be protected');
+    }
+  }else{assert.equal(fs.statSync(credentialPath).mode&0o777,0o600);}
   browser=await chromium.launch({headless:true, ...(process.env.STEWARD_BROWSER_CHANNEL ? {channel:process.env.STEWARD_BROWSER_CHANNEL}: {})});page=await browser.newPage({viewport:{width:1360,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(url);await page.getByLabel('本次服务的连接凭据').fill(token);await page.getByRole('button',{name:'连接工作台'}).click();await page.locator('#workspace').waitFor({state:'visible'});
   await page.getByRole('button',{name:'新建任务'}).click();await page.getByLabel('标题（MMDD｜类型｜主题）').fill('0907｜功能｜验证跨会话任务交接');await page.getByLabel('目标',{exact:true}).fill('让下一次会话知道当前进展');await page.getByLabel('范围',{exact:true}).fill('本地 CLI、浏览器与临时数据库');await page.getByLabel('验收条件',{exact:true}).fill('可查看任务、保存 Checkpoint 并继续');await page.getByLabel('下一步',{exact:true}).fill('保存第一个 Checkpoint');await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});await page.getByRole('heading',{name:'0907｜功能｜验证跨会话任务交接',exact:true,level:2}).waitFor();
