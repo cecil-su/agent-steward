@@ -27,7 +27,7 @@
   }
   function safely(action){return async()=>{try{await action();}catch(e){notify(e.message);}};}
   async function loadList(append=false){
-    const generation=++listRevision;const search=new URLSearchParams({view,pageSize:'30'});if(query)search.set('query',query);if(append&&cursor)search.set('cursor',cursor);
+    const generation=++listRevision;const search=new URLSearchParams(view==='closed'?{status:'closed',pageSize:'30'}:{view,pageSize:'30'});if(query)search.set('query',query);if(append&&cursor)search.set('cursor',cursor);
     const data=await api('/api/tasks?'+search);if(generation!==listRevision)return;rows=append?rows.concat(data.tasks):data.tasks;cursor=data.nextCursor;
     renderList();$('more').hidden=!data.hasMore;
   }
