@@ -4,7 +4,7 @@
   const statuses = {open:'待开始',in_progress:'进行中',blocked:'有阻塞',closed:'已关闭'};
   let warningText='', listRevision=0;
   let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
-  let token='', view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
+  let connected=false, view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
   function el(tag,text,cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
   function button(text,action,cls='') { const b=el('button',text,cls);b.type='button';b.onclick=action;return b; }
   function clear(node){node.replaceChildren();}
@@ -12,18 +12,17 @@
   function showWarnings(warnings){if(warnings?.length){warningText=warnings.map(w=>`${w.code}：${w.message}`).join('\n');notify(warningText);}}
   function date(value){return value?new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';}
   function badge(status){return el('span',statuses[status]||status,'badge '+status);}
-  const credentialKey='steward.connection-token';
-  function savedCredential(){try{return sessionStorage.getItem(credentialKey)||'';}catch{return '';}}
-  function storeCredential(value){try{if(value)sessionStorage.setItem(credentialKey,value);else sessionStorage.removeItem(credentialKey);}catch{/* Storage may be disabled; in-memory connection still works. */}}
+  // Remove the previous JS-readable credential; browser grants now use HttpOnly cookies.
+  try{sessionStorage.removeItem('steward.connection-token');}catch{}
   function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-  function logout(){stopLive();canWrite=false;token='';storeCredential('');warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
-  async function api(path,body) {
+  function resetConnection(){stopLive();canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
+  async function api(path,body,extraHeaders={}) {
     let response;
-    try { response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Steward-Token':token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
+    try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
     catch {const error=new Error(body===undefined?'无法读取本地服务，请检查服务是否仍在运行。':'结果未确认：请求中断或超时。请刷新任务和现场，核对是否已执行；不要直接重复提交。');error.uncertain=body!==undefined;throw error;}
     let result;try{result=await response.json();}catch{const error=new Error('服务返回无法识别的结果，请刷新核对。');error.uncertain=body!==undefined;throw error;}
     showWarnings(result.warnings);
-    if(!response.ok||!result.ok){const error=new Error(`${result.error?.code||response.status}：${result.error?.message||'请求失败'}`);error.code=result.error?.code;error.details=result.error?.details;error.uncertain=body!==undefined&&(!result.error||['PARTIAL_EXTERNAL_STATE','INTERNAL_ERROR'].includes(error.code));if(response.status===401){logout();$('login-error').textContent='连接凭据已失效，请使用当前服务的凭据重新连接。';}throw error;}
+    if(!response.ok||!result.ok){const error=new Error(`${result.error?.code||response.status}：${result.error?.message||'请求失败'}`);error.code=result.error?.code;error.details=result.error?.details;error.uncertain=body!==undefined&&(!result.error||['PARTIAL_EXTERNAL_STATE','INTERNAL_ERROR'].includes(error.code));if(response.status===401){resetConnection();$('login-error').textContent='浏览器授权已失效，请重新连接。';}throw error;}
     return result.data;
   }
   function safely(action){return async()=>{try{await action();}catch(e){notify(e.message);}};}
@@ -131,16 +130,20 @@
     }
   };
   async function connect(value){
-    token=value;$('login-error').textContent='';
-    stopLive();
-    try{const access=await api('/api/access');canWrite=access.role==='admin';await loadList();}catch(e){$('login-error').textContent=e.message;return;}
-    $('create').hidden=!canWrite;$('access-role').textContent=canWrite?'管理员':'只读';
-    storeCredential(token);$('credential').value='';$('login').hidden=true;$('workspace').hidden=false;
+    $('login-error').textContent='';$('credential').value='';stopLive();
+    try{
+      if(value)await api('/api/login',{}, {'X-Steward-Token':value});
+      const access=await api('/api/access');canWrite=access.role==='admin';await loadList();
+    }catch(e){$('login-error').textContent=!value&&e.code==='UNAUTHORIZED'?'':e.message;return;}
+    connected=true;$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('access-role').textContent=canWrite?'管理员':'只读';
+    $('login').hidden=true;$('workspace').hidden=false;
     if(rows.length)try{await selectTask(rows[0].id);}catch(e){notify(e.message);}
-    if(token)startLive();
+    if(connected)startLive();
   }
+  async function logout(){await api('/api/logout',{});resetConnection();}
   $('connect-form').onsubmit=async event=>{event.preventDefault();const b=event.submitter;if(b)b.disabled=true;try{await connect($('credential').value.trim());}finally{if(b)b.disabled=false;}};
-  $('logout').onclick=logout;$('refresh').onclick=safely(async()=>{notify('');await loadList();if(selected)await selectTask(selected);});
+  $('logout').onclick=safely(logout);
+  $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有浏览器授权（包括当前浏览器）？管理员和只读凭据文件不会改变。')){await api('/api/browser-sessions/revoke',{});resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');await loadList();if(selected)await selectTask(selected);});
   $('create').onclick=()=>openAction('task-create','新建任务',taskFields(null),'可以先创建最小任务，随后补充目标、范围和验收条件。');
   $('search-form').onsubmit=event=>{event.preventDefault();query=$('search').value.trim();safely(()=>loadList())();};$('more').onclick=safely(()=>loadList(true));
   for(const b of document.querySelectorAll('[data-view]'))b.onclick=safely(async()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));await loadList();});
@@ -151,14 +154,14 @@
     $('live-state').textContent='未连接';
   }
   function scheduleLiveRefresh(){
-    liveDirty=true;if(!token||liveTimer||liveRefreshing)return;
+    liveDirty=true;if(!connected||liveTimer||liveRefreshing)return;
     if(modal){$('live-state').textContent='有更新，关闭表单后刷新';return;}
     liveTimer=setTimeout(async()=>{
-      liveTimer=null;if(!token||modal)return;
+      liveTimer=null;if(!connected||modal)return;
       liveDirty=false;liveRefreshing=true;const connection=liveAbort;
       try{await loadList();if(connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
       catch(e){if(connection===liveAbort)notify(e.message);}
-      finally{liveRefreshing=false;if(liveDirty&&token)scheduleLiveRefresh();}
+      finally{liveRefreshing=false;if(liveDirty&&connected)scheduleLiveRefresh();}
     },250);
   }
   function startLive(){
@@ -167,9 +170,9 @@
       while(!controller.signal.aborted){
         let reader;
         try{
-          const response=await fetch('/api/events',{headers:{'X-Steward-Token':token},signal:controller.signal,cache:'no-store'});
+          const response=await fetch('/api/events',{credentials:'same-origin',signal:controller.signal,cache:'no-store'});
           if(controller.signal.aborted)return;
-          if(response.status===401){logout();$('login-error').textContent='连接凭据已失效，请重新连接。';return;}
+          if(response.status===401){resetConnection();$('login-error').textContent='浏览器授权已失效，请重新连接。';return;}
           if(!response.ok||!response.body)throw new Error('event stream unavailable');
           $('live-state').textContent='实时同步';reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';
           while(!controller.signal.aborted){
@@ -178,6 +181,7 @@
             let end;while((end=buffer.indexOf('\n\n'))!==-1){
               const frame=buffer.slice(0,end);buffer=buffer.slice(end+2);
               if(frame.split('\n').some(line=>line==='event: changed'))scheduleLiveRefresh();
+              if(frame.split('\n').some(line=>line==='event: unauthorized')){void connect();return;}
               if(frame.split('\n').some(line=>line==='event: unavailable'))throw new Error('event stream unavailable');
             }
             if(buffer.length>8192)throw new Error('invalid event stream');
@@ -191,15 +195,13 @@
     })();
   }
   async function autoConnect(code){
-    logout();
+    resetConnection();
     const controls=Array.from($('connect-form').querySelectorAll('input,button'));
     controls.forEach(control=>control.disabled=true);
     try{
       if(!/^[a-f0-9]{64}$/.test(code))throw new Error('invalid connection code');
-      const response=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Steward-Connect':code},body:'{}',signal:AbortSignal.timeout(15000),cache:'no-store'});
-      const result=await response.json();
-      if(!response.ok||!result.ok||typeof result.data?.token!=='string')throw new Error('connection exchange failed');
-      await connect(result.data.token);
+      await api('/api/connect',{}, {'X-Steward-Connect':code});
+      await connect();
     }catch{$('login-error').textContent='自动连接未完成或连接链接已失效。请使用终端提示的凭据文件手动连接，或重新启动工作台。';}
     finally{controls.forEach(control=>control.disabled=false);}
   }
@@ -208,5 +210,5 @@
     // Remove the one-use secret before any exchange; never send it in a query string.
     history.replaceState(null,'',location.pathname+location.search);
     void autoConnect(code);
-  }else{const saved=savedCredential();if(saved)void connect(saved);}
+  }else{void connect();}
 })();

@@ -4,11 +4,11 @@
 <body>
 <div id="login" class="login-shell">
   <section class="login-card"><span class="brand-mark">S</span><p class="eyebrow">AGENT STEWARD / V0</p><h1>接着上次的工作。</h1><p class="muted">连接本机工作台，查看任务进展、会话记录和下一步。</p>
-  <form id="connect-form"><label for="credential">本次服务的连接凭据</label><input id="credential" type="password" autocomplete="off" required placeholder="粘贴凭据文件中的内容"><p class="hint">本机启动后自动以管理员连接。其他设备请使用终端所示只读凭据；只有管理员凭据可修改任务。凭据保存在当前标签页，刷新可恢复；断开或凭据失效时清除。</p><button type="submit" class="primary">连接工作台 <span aria-hidden="true">→</span></button><p id="login-error" role="alert"></p></form></section>
+  <form id="connect-form"><label for="credential">本次服务的连接凭据</label><input id="credential" type="password" autocomplete="off" required placeholder="粘贴凭据文件中的内容"><p class="hint">首次本机启动自动授权浏览器；之后打开普通网址或新标签页即可使用，授权有效期 30 天。其他设备首次使用只读凭据连接。选择退出登录可撤销本浏览器授权。</p><button type="submit" class="primary">连接工作台 <span aria-hidden="true">→</span></button><p id="login-error" role="alert"></p></form></section>
   <p class="login-foot">本地数据 · 明确的下一步 · 连续的工作上下文</p>
 </div>
 <div id="workspace" hidden>
-  <header><a href="/" class="brand"><span class="brand-mark small">S</span><span>Agent Steward<small>本地任务工作台</small></span></a><div class="header-actions"><span id="access-role" class="local-dot">未连接</span><span id="live-state" role="status">未连接</span><button id="refresh">刷新</button><button id="logout" class="quiet">断开</button></div></header>
+  <header><a href="/" class="brand"><span class="brand-mark small">S</span><span>Agent Steward<small>本地任务工作台</small></span></a><div class="header-actions"><span id="access-role" class="local-dot">未连接</span><span id="live-state" role="status">未连接</span><button id="refresh">刷新</button><button id="logout" class="quiet">退出登录</button><button id="revoke-browsers" class="quiet" hidden>撤销浏览器授权</button></div></header>
   <main class="workspace"><section class="page-heading"><div><p class="eyebrow">WORKSPACE / 任务</p><h1>把进展留在这里。</h1><p class="muted">找到任务，了解当前进展，继续下一步。</p></div><button id="create" class="primary">＋ 新建任务</button></section>
   <div id="notice" class="notice" role="status" hidden></div>
   <nav class="views" aria-label="任务视图"><button data-view="active" aria-pressed="true">未关闭</button><button data-view="in-progress" aria-pressed="false">进行中</button><button data-view="blocked" aria-pressed="false">有阻塞</button><button data-view="recent" aria-pressed="false">最近全部</button></nav>

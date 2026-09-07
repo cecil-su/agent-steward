@@ -50,6 +50,7 @@ flowchart LR
 | 共用权限告警 | [`crates/application/src/permissions.rs`](crates/application/src/permissions.rs) | CLI/HTTP 共用数据库目录及 WAL/SHM 权限检查 |
 | 本地 Daemon | [`crates/server/src/lib.rs`](crates/server/src/lib.rs) | 同源 HTTP、管理员/只读授权、一次性自动连接、严格 Command DTO、Application 调用 |
 | 本机身份 | [`crates/server/src/credentials.rs`](crates/server/src/credentials.rs) | 首次创建私有管理员/只读凭据、跨重启复用、拒绝损坏或不安全文件 |
+| 浏览器授权 | [`crates/server/src/browser_auth.rs`](crates/server/src/browser_auth.rs) | 持久 HttpOnly Cookie 授权哈希、角色/凭据/origin 绑定、过期和撤销；不改业务库 Schema |
 | 实时通知 | [`crates/server/src/events.rs`](crates/server/src/events.rs) | 有界认证 SSE、SQLite data_version 观察、CLI/Hook 提交通知、退出释放订阅 |
 | GUI | [`crates/server/web/app.js`](crates/server/web/app.js) | 原生 DOM 任务工作台；静态资源嵌入二进制，无前端构建依赖 |
 | Application 门面 | [`crates/application/src/lib.rs`](crates/application/src/lib.rs) | `Service`、`Outcome`、稳定错误映射、部分外部状态和恢复命令 |

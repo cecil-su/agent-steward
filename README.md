@@ -71,7 +71,7 @@ cargo build --workspace --locked
 cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/steward.db
 ```
 
-启动后默认自动打开本机浏览器并以管理员连接，`--no-open` 可用于无桌面环境；其他设备使用终端显示的只读凭据。首次创建的私有凭据跨重启保留，SSE 自动同步 CLI/Hook 和页面提交，正在编辑的表单不被覆盖。GUI 支持任务编辑、会话交接、Checkpoint、History、Hook 观测与安全 Worktree 操作；无需单独安装前端依赖。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
+启动后默认自动打开 `http://127.0.0.1:43123` 并授权本机浏览器；之后打开普通网址或新标签页即可恢复 30 天内的登录，支持退出和管理员撤销浏览器授权。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。首次创建的私有凭据跨重启保留，SSE 自动同步 CLI/Hook 和页面提交，正在编辑的表单不被覆盖。GUI 支持任务编辑、会话交接、Checkpoint、History、Hook 观测与安全 Worktree 操作；无需单独安装前端依赖。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
 
 当前数据库格式为 schema 2，不迁移旧 schema 1；旧数据库保留给原构建，启动新功能请使用新数据库。CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`。
 

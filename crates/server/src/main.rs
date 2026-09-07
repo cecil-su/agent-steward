@@ -14,7 +14,8 @@ use steward_server::{ServerState, router};
 struct Args {
     #[arg(long)]
     database: Option<PathBuf>,
-    #[arg(long, default_value_t = 0)]
+    /// Stable browser address; use --port 0 only for an ephemeral test listener.
+    #[arg(long, default_value_t = 43123)]
     port: u16,
     /// Explicit local IPv4 address. Non-loopback addresses expose HTTP to the network.
     #[arg(long, default_value = "127.0.0.1")]
@@ -83,7 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Local browser connects as administrator. Share only the read-only credential with other devices. Credentials persist across restarts."
     );
     let state = ServerState::with_address(service, address, credentials.admin)
-        .with_readonly_token(credentials.reader);
+        .with_readonly_token(credentials.reader)
+        .with_browser_store(&credentials.directory.join("browser-sessions.db"))?;
     if !args.no_open {
         let url = state.browser_connection_url();
         println!(

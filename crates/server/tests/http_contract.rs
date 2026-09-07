@@ -182,7 +182,8 @@ async fn browser_connection_code_is_one_use_and_does_not_authorize_other_endpoin
     assert_eq!(success.headers()["cache-control"], "no-store");
     let data: Value =
         serde_json::from_slice(&to_bytes(success.into_body(), 4096).await.unwrap()).unwrap();
-    assert_eq!(data["data"]["token"], TOKEN);
+    assert!(data["data"]["token"].is_null());
+    assert_eq!(data["data"]["role"], "admin");
     let response = app
         .oneshot(
             Request::builder()

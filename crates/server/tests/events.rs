@@ -56,6 +56,70 @@ async fn authenticated_sse_observes_external_writes_and_stops_on_shutdown() {
 }
 
 #[tokio::test]
+async fn revocation_terminates_an_existing_cookie_subscription() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = Service::new(temp.path().join("state.db"));
+    service.task_create_minimal().unwrap();
+    let app = router(ServerState::new(service, 43123, "admin".into()));
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/login")
+                .header("host", "127.0.0.1:43123")
+                .header("x-steward-token", "admin")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = login.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/events")
+                .header("host", "127.0.0.1:43123")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    assert!(stream.next().await.is_some());
+    let revoke = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/browser-sessions/revoke")
+                .header("host", "127.0.0.1:43123")
+                .header("x-steward-token", "admin")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoke.status(), StatusCode::OK);
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&frame).contains("event: unauthorized"));
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
 async fn subscriber_limit_does_not_exhaust_regular_api_slots() {
     let temp = tempfile::tempdir().unwrap();
     let service = Service::new(temp.path().join("state.db"));

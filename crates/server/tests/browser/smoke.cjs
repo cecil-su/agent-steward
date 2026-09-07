@@ -8,7 +8,7 @@ if(process.platform!=='win32')fs.chmodSync(temp,0o700);
 const database=path.join(temp,'test.db');
 // Let taskd create and protect this directory using the platform's ACL API.
 const runtime=path.join(temp,'runtime');
-const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime,'--no-open'],{stdio:['ignore','pipe','pipe']});
+const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime,'--no-open','--port','0'],{stdio:['ignore','pipe','pipe']});
 let stdout='',stderr='';daemon.stdout.on('data',b=>stdout+=b);daemon.stderr.on('data',b=>stderr+=b);
 let browser,page;
 const cli=(...args)=>JSON.parse(execFileSync(path.join(root,'target/debug/taskctl'),['--database',database,'--json',...args],{encoding:'utf8'}));
@@ -57,23 +57,24 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   await page.context().grantPermissions(['clipboard-read','clipboard-write']);await page.getByRole('button',{name:'复制交接上下文'}).click();await page.locator('#notice').filter({hasText:'已复制'}).waitFor();assert((await page.evaluate(()=>navigator.clipboard.readText())).includes('browser-session-b'));
   fs.mkdirSync(path.join(root,'.local'),{recursive:true});await page.screenshot({path:path.join(root,'.local/m5-desktop.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'mobile layout overflows');await page.screenshot({path:path.join(root,'.local/m5-mobile.png'),fullPage:true});
   await page.getByRole('button',{name:'关闭任务',exact:true}).click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});assert.equal(cli('task','show','1').data.task.status,'closed');
-  assert.equal(await page.evaluate(()=>localStorage.length),0);assert.equal((await page.context().cookies()).length,0);
-  assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),token);
+  assert.equal(await page.evaluate(()=>localStorage.length),0);assert.equal(await page.evaluate(()=>sessionStorage.length),0);
+  const cookies=await page.context().cookies();assert.equal(cookies.length,1);assert.equal(cookies[0].httpOnly,true);assert.equal(cookies[0].sameSite,'Strict');assert.notEqual(cookies[0].value,token);
+  const tab=await page.context().newPage();await tab.goto(url);await tab.locator('#workspace').waitFor({state:'visible'});await tab.close();
   await page.reload();await page.locator('#workspace').waitFor({state:'visible'});assert.equal(await page.getByLabel('本次服务的连接凭据').inputValue(),'');
   await page.locator('#logout').click();await page.locator('#login').waitFor({state:'visible'});
   assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),null);
   await page.reload();await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
-  // A credential from a previous server instance must be discarded after 401.
-  await page.evaluate(()=>sessionStorage.setItem('steward.connection-token','synthetic-expired-token'));
+  // An invalid remembered grant must never regain access.
+  await page.context().addCookies([{name:cookies[0].name,value:'synthetic-expired-token',domain:'127.0.0.1',path:'/api',httpOnly:true,sameSite:'Strict'}]);
   const rejected=page.waitForResponse(r=>r.url().includes('/api/tasks')&&r.status()===401);
-  await page.reload();await rejected;await page.waitForFunction(()=>sessionStorage.getItem('steward.connection-token')===null);
+  await page.reload();await rejected;assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),null);
   await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
   const readerToken=fs.readFileSync(path.join(path.dirname(credentialPath),'readonly-credential'),'utf8');
   const viewer=await browser.newPage();
   try{
     await viewer.goto(url);await viewer.getByLabel('本次服务的连接凭据').fill(readerToken);await viewer.getByRole('button',{name:'连接工作台'}).click();await viewer.locator('#workspace').waitFor({state:'visible'});
     assert.equal(await viewer.locator('#access-role').textContent(),'只读');assert.equal(await viewer.locator('#create').isHidden(),true);
-    const denied=await viewer.evaluate(async token=>(await fetch('/api/commands/task-create',{method:'POST',headers:{'X-Steward-Token':token,'Content-Type':'application/json'},body:'{"input":{}}'})).status,readerToken);assert.equal(denied,403);
+    const denied=await viewer.evaluate(async token=>(await fetch('/api/commands/task-create',{method:'POST',headers:{'X-Steward-Token':token,'Content-Type':'application/json','X-Steward-CSRF':'1'},body:'{"input":{}}'})).status,readerToken);assert.equal(denied,403);
     await viewer.locator('#live-state').filter({hasText:'实时同步'}).waitFor();
     cli('task','create','SSE-EXTERNAL');
     await viewer.locator('.task-card').filter({hasText:'#2'}).waitFor({state:'visible'});

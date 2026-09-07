@@ -4,7 +4,7 @@ use std::{convert::Infallible, time::Duration};
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
@@ -21,10 +21,11 @@ struct Subscription {
     version: i64,
     initial: bool,
     _permit: OwnedSemaphorePermit,
-    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    state: ServerState,
+    headers: HeaderMap,
 }
 
-pub(crate) async fn subscribe(State(state): State<ServerState>) -> Response {
+pub(crate) async fn subscribe(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     let Ok(permit) = state.event_slots.clone().try_acquire_owned() else {
         return failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -42,7 +43,8 @@ pub(crate) async fn subscribe(State(state): State<ServerState>) -> Response {
             version,
             initial: true,
             _permit: permit,
-            shutdown: state.event_shutdown,
+            state,
+            headers,
         })
     })
     .await;
@@ -66,10 +68,17 @@ pub(crate) async fn subscribe(State(state): State<ServerState>) -> Response {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if subscription
-                .shutdown
+                .state
+                .event_shutdown
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 return None;
+            }
+            if subscription.state.role(&subscription.headers).is_none() {
+                return Some((
+                    Ok(Event::default().event("unauthorized").data("logout")),
+                    None,
+                ));
             }
             let read = tokio::task::spawn_blocking(move || {
                 let version =

@@ -1,4 +1,5 @@
 //! Same-origin HTTP transport. Authentication is checked before extracting bodies.
+mod browser_auth;
 mod events;
 use axum::{
     Json, Router,
@@ -27,6 +28,8 @@ pub struct ServerState {
     host: String,
     origin: String,
     token: Arc<str>,
+    browser_auth: Arc<browser_auth::BrowserAuth>,
+    cookie_name: String,
     readonly_token: Option<Arc<str>>,
     event_slots: Arc<Semaphore>,
     event_shutdown: Arc<std::sync::atomic::AtomicBool>,
@@ -44,6 +47,8 @@ impl ServerState {
             host: address.to_string(),
             origin: format!("http://{address}"),
             token: token.into(),
+            browser_auth: Arc::new(browser_auth::BrowserAuth::memory()),
+            cookie_name: format!("steward_session_{}", address.port()),
             readonly_token: None,
             event_slots: Arc::new(Semaphore::new(16)),
             event_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -63,7 +68,44 @@ impl ServerState {
         self
     }
 
+    pub fn with_browser_store(
+        mut self,
+        path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        self.browser_auth = Arc::new(browser_auth::BrowserAuth::open(path)?);
+        Ok(self)
+    }
+
+    fn cookie<'a>(&self, headers: &'a HeaderMap) -> Option<&'a str> {
+        let mut values = headers
+            .get_all("cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(';'))
+            .filter_map(|v| v.trim().split_once('='))
+            .filter(|(name, _)| *name == self.cookie_name)
+            .map(|(_, value)| value);
+        let value = values.next()?;
+        if values.next().is_some() {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
     fn role(&self, headers: &HeaderMap) -> Option<&'static str> {
+        if headers.contains_key("x-steward-token") {
+            return self.header_role(headers);
+        }
+        self.browser_auth.role(
+            self.cookie(headers)?,
+            &self.origin,
+            &self.token,
+            self.readonly_token.as_deref(),
+        )
+    }
+
+    fn header_role(&self, headers: &HeaderMap) -> Option<&'static str> {
         if headers.get_all("x-steward-token").iter().count() != 1 {
             return None;
         }
@@ -101,6 +143,9 @@ pub fn router(state: ServerState) -> Router {
         .route("/style.css", get(style))
         .route("/api/connect", post(connect))
         .route("/api/access", get(access))
+        .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
+        .route("/api/browser-sessions/revoke", post(revoke_browsers))
         .route("/api/events", get(events::subscribe))
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
@@ -145,6 +190,13 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
         .get("sec-fetch-site")
         .is_none_or(|v| v == "same-origin" || v == "none");
     let api = request.uri().path().starts_with("/api/");
+    // Use one authorization snapshot; concurrent revocation must not turn a reader
+    // into an unclassified request between authentication and the write gate.
+    let role = if api && host_ok && origin_ok && fetch_ok {
+        state.role(headers)
+    } else {
+        None
+    };
     let mut response = if !host_ok || !origin_ok || !fetch_ok {
         failure(
             StatusCode::FORBIDDEN,
@@ -152,10 +204,22 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
             "request host or origin is not permitted",
         )
     } else if api
+        && headers.contains_key("cookie")
+        && !matches!(*request.method(), Method::GET | Method::HEAD)
+        && (headers.get_all("x-steward-csrf").iter().count() != 1
+            || headers.get("x-steward-csrf").is_none_or(|v| v != "1")
+            || headers.get("origin").and_then(|v| v.to_str().ok()) != Some(state.origin.as_str()))
+    {
+        failure(
+            StatusCode::FORBIDDEN,
+            "CSRF_REJECTED",
+            "same-origin browser write confirmation required",
+        )
+    } else if api
         // The exchange endpoint authenticates with a short-lived one-use credential
         // in its handler. It never grants access based on the caller's IP.
-        && !(request.uri().path() == "/api/connect" && request.method() == Method::POST)
-        && state.role(headers).is_none()
+        && !(matches!(request.uri().path(), "/api/connect" | "/api/logout") && request.method() == Method::POST)
+        && role.is_none()
     {
         failure(
             StatusCode::UNAUTHORIZED,
@@ -163,8 +227,12 @@ async fn boundary(State(state): State<ServerState>, request: Request, next: Next
             "connect using this Daemon's credential",
         )
     } else if api
-        && state.role(headers) == Some("reader")
+        && role == Some("reader")
         && !matches!(*request.method(), Method::GET | Method::HEAD)
+        && !matches!(
+            request.uri().path(),
+            "/api/login" | "/api/logout" | "/api/connect"
+        )
     {
         failure(
             StatusCode::FORBIDDEN,
@@ -273,6 +341,78 @@ async fn run(
     }
 }
 
+fn browser_result(state: &ServerState, role: Option<&str>, id: Option<&str>) -> Response {
+    let cookie = format!(
+        "{}={}; Path=/api; HttpOnly; SameSite=Strict; Max-Age={}",
+        state.cookie_name,
+        id.unwrap_or(""),
+        if id.is_some() {
+            browser_auth::MAX_AGE
+        } else {
+            0
+        }
+    );
+    // taskd currently serves HTTP only. A future HTTPS listener must add Secure.
+    let mut response =
+        Json(json!({"schemaVersion":2,"ok":true,"data":{"role":role},"warnings":[],"error":null}))
+            .into_response();
+    response.headers_mut().insert(
+        "set-cookie",
+        HeaderValue::from_str(&cookie).expect("generated cookie"),
+    );
+    response
+}
+fn grant_browser(state: &ServerState, headers: &HeaderMap, role: &str) -> Response {
+    let credential = if role == "admin" {
+        state.token.as_ref()
+    } else {
+        state.readonly_token.as_deref().unwrap_or("")
+    };
+    match state
+        .browser_auth
+        .issue(&state.origin, role, credential, state.cookie(headers))
+    {
+        Ok(id) => browser_result(state, Some(role), Some(&id)),
+        Err(_) => failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AUTH_STORE_UNAVAILABLE",
+            "cannot create browser authorization; storage unavailable or grant limit reached",
+        ),
+    }
+}
+async fn login(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    match state.header_role(&headers) {
+        Some(role) => grant_browser(&state, &headers, role),
+        None => failure(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "a valid credential is required for first browser authorization",
+        ),
+    }
+}
+async fn logout(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if let Some(id) = state.cookie(&headers)
+        && state.browser_auth.revoke(id).is_err()
+    {
+        return failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AUTH_STORE_UNAVAILABLE",
+            "could not revoke browser authorization; retry logout",
+        );
+    }
+    browser_result(&state, None, None)
+}
+async fn revoke_browsers(State(state): State<ServerState>) -> Response {
+    if state.browser_auth.revoke_origin(&state.origin).is_err() {
+        return failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AUTH_STORE_UNAVAILABLE",
+            "could not revoke browser authorizations",
+        );
+    }
+    browser_result(&state, None, None)
+}
+
 async fn access(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     Json(json!({"schemaVersion":2,"ok":true,"data":{"role":state.role(&headers)},"warnings":[],"error":null})).into_response()
 }
@@ -294,7 +434,7 @@ async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Respon
         );
     }
     pending.take();
-    Json(json!({"schemaVersion":2,"ok":true,"data":{"token":state.token.as_ref()},"warnings":[],"error":null})).into_response()
+    grant_browser(&state, &headers, "admin")
 }
 
 async fn index() -> impl IntoResponse {
