@@ -14,6 +14,9 @@ use steward_server::{ServerState, router};
 struct Args {
     #[arg(long)]
     database: Option<PathBuf>,
+    /// Local UI package store. Pure UI activation needs no daemon restart.
+    #[arg(long)]
+    ui_root: Option<PathBuf>,
     /// Stable browser address; use --port 0 only for an ephemeral test listener.
     #[arg(long, default_value_t = 43123)]
     port: u16,
@@ -57,6 +60,13 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     if args
+        .ui_root
+        .as_ref()
+        .is_some_and(|root| !root.is_absolute())
+    {
+        return Err("--ui-root must be an absolute path".into());
+    }
+    if args
         .shutdown_file
         .as_ref()
         .is_some_and(|path| path.exists())
@@ -99,6 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ServerState::with_address(service, address, credentials.admin)
         .with_readonly_token(credentials.reader)
         .with_browser_store(&credentials.directory.join("browser-sessions.db"))?;
+    if let Some(root) = args.ui_root {
+        state = state.with_ui_root(root);
+    }
     if !args.require_local_auth {
         state = state.with_local_access();
         eprintln!(

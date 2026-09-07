@@ -3,6 +3,7 @@
   const $ = id => document.getElementById(id);
   const statuses = {open:'待开始',in_progress:'进行中',blocked:'有阻塞',closed:'已关闭'};
   let warningText='', listRevision=0;
+  let pendingWrites=0, uncertainWrite=false;
   let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
   let localAccess=false, connected=false, view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
   function el(tag,text,cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
@@ -17,8 +18,14 @@
   function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
   function resetConnection(){stopLive();canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
   async function api(path,body,extraHeaders={}) {
+    if(body!==undefined)pendingWrites++;
+    try{return await apiRequest(path,body,extraHeaders);}
+    catch(error){if(error.uncertain)uncertainWrite=true;throw error;}
+    finally{if(body!==undefined)pendingWrites--;}
+  }
+  async function apiRequest(path,body,extraHeaders={}) {
     let response;
-    try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
+    try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'X-Steward-UI-Contract':'1',...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
     catch {const error=new Error(body===undefined?'无法读取本地服务，请检查服务是否仍在运行。':'结果未确认：请求中断或超时。请刷新任务和现场，核对是否已执行；不要直接重复提交。');error.uncertain=body!==undefined;throw error;}
     let result;try{result=await response.json();}catch{const error=new Error('服务返回无法识别的结果，请刷新核对。');error.uncertain=body!==undefined;throw error;}
     showWarnings(result.warnings);
@@ -170,7 +177,7 @@
       while(!controller.signal.aborted){
         let reader;
         try{
-          const response=await fetch('/api/events',{credentials:'same-origin',signal:controller.signal,cache:'no-store'});
+          const response=await fetch('/api/events',{headers:{'X-Steward-UI-Contract':'1'},credentials:'same-origin',signal:controller.signal,cache:'no-store'});
           if(controller.signal.aborted)return;
           if(response.status===401){resetConnection();$('login-error').textContent='浏览器授权已失效，请重新连接。';return;}
           if(!response.ok||!response.body)throw new Error('event stream unavailable');
@@ -205,6 +212,35 @@
     }catch{$('login-error').textContent='自动连接未完成或连接链接已失效。请使用终端提示的凭据文件手动连接，或重新启动工作台。';}
     finally{controls.forEach(control=>control.disabled=false);}
   }
+  // UI activation is separate from data invalidations. Never replay a write.
+  function startUiUpdates(){
+    const loaded=document.querySelector?.('meta[name="steward-ui-release"]')?.content;
+    if(!loaded)return;
+    let held=false, banner=null, checking=false;
+    const editing=()=>!!modal||!!$('credential').value||$('search').value.trim()!==query;
+    async function checkUpdate(){
+      if(checking)return;checking=true;
+      try{
+        const response=await fetch('/ui/status',{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(5000)});
+        if(!response.ok)return;
+        const status=await response.json();
+        if(status.packageFormat!==1||!Number.isInteger(status.apiContract)||typeof status.release!=='string')return;
+        if(status.release===loaded){banner?.remove();banner=null;held=false;return;}
+        if(!held&&!editing()&&!pendingWrites&&!uncertainWrite){location.reload();return;}
+        held=true;
+        if(!banner){
+          banner=el('aside',undefined,'notice');banner.setAttribute('role','status');
+          banner.append(el('span','新版 UI 已就绪。当前输入已保留；请完成编辑并核对提交结果后刷新。 '),button('刷新采用新版',()=>{
+            if(pendingWrites){alert('提交仍在进行，请等待结果。');return;}
+            if(confirm('重新加载将丢弃未提交输入。已完成编辑并核对提交结果，继续？'))location.reload();
+          }));document.body.prepend(banner);
+        }
+      }catch{/* An unavailable update check must not interrupt business work. */}
+      finally{checking=false;setTimeout(checkUpdate,10000);}
+    }
+    setTimeout(checkUpdate,10000);
+  }
+  startUiUpdates();
   const code=new URLSearchParams(location.hash.slice(1)).get('connect');
   if(code!==null){
     // Remove the one-use secret before any exchange; never send it in a query string.

@@ -24,6 +24,19 @@ cd E:\ai\agent-steward
 
 不要把安装位置设为源码或数据库目录。编译期间不要修改源码，以免构建混合版本。
 
+## 纯 UI 独立更新（不重启 taskd）
+
+首次需经用户授权升级一次 taskd；新启动器为声明 `uiPackageProtocol: 1` 的二进制包传入 `<InstallRoot>/ui`。之后使用源码内 `ui.ps1`，不再为纯 UI 改动运行 `Update-Local.cmd`：
+
+```powershell
+.\distribution\windows\ui.ps1 -Action Build -Version ui-20260907-1 -Output E:\steward-artifacts\ui-20260907-1
+.\distribution\windows\ui.ps1 -Action Activate -Package E:\steward-artifacts\ui-20260907-1
+.\distribution\windows\ui.ps1 -Action Status
+.\distribution\windows\ui.ps1 -Action Rollback
+```
+
+支持 `-InstallRoot`；手工启动时同时指定 `-UiRoot` 和目标 taskd 的 `-Url`。包和活动指针整体切换，旧包不自动清理；页面空闲时自动刷新，编辑或提交时提示确认，不打断输入。仅安装可信 UI 包：哈希不替代发布签名。该脚本不下载、不停启服务、不替换后端或数据。完整包合同、回退、兼容边界及隔离测试见 [UI 独立发布](../../docs/v0/14-UI独立发布.md)。
+
 ## 日常启动与配置
 
 默认程序安装在 `%LOCALAPPDATA%\agent-steward-app`：

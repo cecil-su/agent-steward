@@ -1,6 +1,7 @@
 //! Same-origin HTTP transport. Authentication is checked before extracting bodies.
 mod browser_auth;
 mod events;
+mod ui;
 use axum::{
     Extension, Json, Router,
     body::{Bytes, to_bytes},
@@ -25,6 +26,7 @@ use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub struct ServerState {
     pub service: Service,
+    ui: Arc<ui::UiStore>,
     host: String,
     local_address: std::net::IpAddr,
     trust_local: bool,
@@ -46,6 +48,7 @@ impl ServerState {
     pub fn with_address(service: Service, address: std::net::SocketAddr, token: String) -> Self {
         Self {
             service,
+            ui: Arc::new(ui::UiStore::new(None)),
             host: address.to_string(),
             local_address: address.ip(),
             trust_local: false,
@@ -59,6 +62,12 @@ impl ServerState {
             slots: Arc::new(Semaphore::new(8)),
             connection_code: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Opt in to local immutable UI packages; does not install or execute packages.
+    pub fn with_ui_root(mut self, root: std::path::PathBuf) -> Self {
+        self.ui = Arc::new(ui::UiStore::new(Some(root)));
+        self
     }
 
     /// Trust direct local TCP callers. Do not expose this mode through a proxy.
@@ -161,7 +170,9 @@ impl ServerState {
 
 pub fn router(state: ServerState) -> Router {
     Router::new()
-        .route("/", get(index))
+        .route("/", get(ui::index))
+        .route("/ui/status", get(ui::status))
+        .route("/ui/releases/{id}/{name}", get(ui::asset))
         .route("/app.js", get(script))
         .route("/style.css", get(style))
         .route("/api/connect", post(connect))
@@ -261,6 +272,18 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
             "connect using this Daemon's credential",
         )
     } else if api
+        && headers.contains_key("x-steward-ui-contract")
+        && (headers.get_all("x-steward-ui-contract").iter().count() != 1
+            || headers
+                .get("x-steward-ui-contract")
+                .is_none_or(|value| value.as_bytes() != ui::API_CONTRACT.to_string().as_bytes()))
+    {
+        failure(
+            StatusCode::CONFLICT,
+            "UI_API_INCOMPATIBLE",
+            "reload the UI before further requests",
+        )
+    } else if api
         && role == Some("reader")
         && !matches!(*request.method(), Method::GET | Method::HEAD)
         && !matches!(
@@ -321,8 +344,12 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
     {
         response = failure(response.status(), "INVALID_INPUT", "invalid HTTP request");
     }
+    if api || !response.headers().contains_key("cache-control") || !response.status().is_success() {
+        response
+            .headers_mut()
+            .insert("cache-control", HeaderValue::from_static("no-store"));
+    }
     for (name, value) in [
-        ("cache-control", "no-store"),
         (
             "content-security-policy",
             "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -472,12 +499,6 @@ async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Respon
     grant_browser(&state, &headers, "admin")
 }
 
-async fn index() -> impl IntoResponse {
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        include_str!("../web/index.html"),
-    )
-}
 async fn script() -> impl IntoResponse {
     (
         [("content-type", "text/javascript; charset=utf-8")],

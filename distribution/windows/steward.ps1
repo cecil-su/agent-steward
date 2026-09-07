@@ -83,11 +83,14 @@ function Start-Managed([string]$Version) {
     if (Get-ManagedProcess) { throw 'A managed process is already running.' }
     $settings = Read-Json (Join-Path $InstallRoot 'settings.json'); Assert-Settings $settings
     $directory = Join-Path $InstallRoot "versions\$Version"
-    Assert-Manifest (Read-Json (Join-Path $directory 'manifest.json'))
+    $manifest = Read-Json (Join-Path $directory 'manifest.json'); Assert-Manifest $manifest
     $executable = Join-Path $directory 'taskd.exe'
     $id = [guid]::NewGuid().ToString('N')
     $marker = Join-Path $InstallRoot "runs\$id.stop"
     $arguments = @('--no-open','--bind',$settings.bind,'--port',"$($settings.port)",'--database',(Quote-Argument $settings.database),'--runtime-dir',(Quote-Argument $settings.runtimeDir),'--shutdown-file',(Quote-Argument $marker))
+    if ($manifest.PSObject.Properties['uiPackageProtocol'] -and $manifest.uiPackageProtocol -eq 1) {
+        $arguments += @('--ui-root',(Quote-Argument (Join-Path $InstallRoot 'ui')))
+    }
     if ($settings.requireLocalAuth) { $arguments += '--require-local-auth' }
     $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $InstallRoot "runs\$id.out.log") -RedirectStandardError (Join-Path $InstallRoot "runs\$id.err.log")
     Write-Json (Join-Path $InstallRoot 'process.json') @{pid=$process.Id; started=$process.StartTime.ToUniversalTime().Ticks.ToString(); executable=$executable; marker=$marker; version=$Version}
