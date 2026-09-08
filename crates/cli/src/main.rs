@@ -7,7 +7,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::{Value, json};
 use steward_application::database_permission_warning;
-use steward_application::{AppError, ErrorBody, Outcome, Service, TaskListOptions};
+use steward_application::{
+    AppError, ErrorBody, Outcome, ProjectContextOptions, Service, SourceLocation, TaskListOptions,
+};
 use steward_core::Warning;
 
 #[derive(Debug, Parser)]
@@ -42,6 +44,11 @@ enum TopCommand {
         #[command(subcommand)]
         command: HookCommand,
     },
+    /// Manage business projects (##id or unique name), independently of Git ownership.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
     Task {
         #[command(subcommand)]
         command: TaskCommand,
@@ -62,10 +69,123 @@ enum TopCommand {
 
 #[derive(Debug, Subcommand)]
 enum DatabaseCommand {
-    /// Copy a legacy v7 closed-task archive into a new schema 2 database.
+    /// Copy a legacy v7 closed-task archive into a new current-schema database.
     ImportV7 {
         #[arg(long)]
         source: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    /// Live source navigation; snippets only for explicit --file requests. Never a reusable authority snapshot.
+    Context {
+        project: String,
+        #[arg(long)]
+        source: i64,
+        #[arg(long)]
+        worktree: Option<PathBuf>,
+        #[arg(long = "file")]
+        files: Vec<String>,
+        #[arg(long = "dependency")]
+        dependencies: Vec<String>,
+        /// Compact JSON data bytes, not tokens or full CLI output bytes.
+        #[arg(long, default_value_t = 8000)]
+        budget_bytes: usize,
+    },
+    /// Only returns candidates; never selects a project or claims a task.
+    Here {
+        #[arg(long)]
+        directory: Option<PathBuf>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    Component {
+        #[command(subcommand)]
+        command: ComponentCommand,
+    },
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
+    Create {
+        #[arg(long)]
+        name: String,
+    },
+    Show {
+        project: String,
+    },
+    List {
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    Rename {
+        project: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long = "if-revision")]
+        if_revision: i64,
+    },
+    History {
+        project: String,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ComponentCommand {
+    Add {
+        project: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long = "if-revision")]
+        if_revision: i64,
+    },
+    List {
+        project: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SourceCommand {
+    Add {
+        project: String,
+        #[arg(long = "if-revision")]
+        if_revision: i64,
+        #[arg(long)]
+        component: Option<String>,
+        #[arg(
+            long,
+            required_unless_present = "directory",
+            conflicts_with = "directory",
+            requires = "path"
+        )]
+        repo: Option<PathBuf>,
+        #[arg(long, requires = "repo", conflicts_with = "directory")]
+        path: Option<String>,
+        #[arg(long, conflicts_with_all = ["repo", "path"])]
+        directory: Option<PathBuf>,
+    },
+    List {
+        project: String,
+    },
+    Resolve {
+        project: String,
+        source_id: i64,
+        #[arg(long)]
+        worktree: Option<PathBuf>,
+    },
+    /// Remove only this metadata link; never delete any files or Git worktrees.
+    Remove {
+        project: String,
+        source_id: i64,
+        #[arg(long = "if-revision")]
+        if_revision: i64,
     },
 }
 
@@ -85,6 +205,20 @@ enum TaskListView {
 
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Select component names within the task's project (or explicitly clear the selection).
+    Components {
+        task_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+        #[arg(
+            long = "component",
+            required_unless_present = "clear",
+            conflicts_with = "clear"
+        )]
+        components: Vec<String>,
+        #[arg(long)]
+        clear: bool,
+    },
     /// Read progress, decision, and risk notes.
     Notes {
         task_id: String,
@@ -108,6 +242,8 @@ enum TaskCommand {
         #[arg(long = "task-key")]
         task_key: Option<String>,
         #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
         query: Option<String>,
         #[arg(long = "page-size")]
         page_size: Option<u32>,
@@ -123,6 +259,18 @@ enum TaskCommand {
     },
     Create {
         task_key: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Explicitly change project membership; does not claim or adopt a worktree.
+    Project {
+        task_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+        #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
+        project: Option<String>,
+        #[arg(long)]
+        clear: bool,
     },
     Claim {
         task_id: String,
@@ -464,7 +612,102 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 service.hook_clear(session_id, *if_version)
             }
         },
+        TopCommand::Project { command } => match command {
+            ProjectCommand::Context {
+                project,
+                source,
+                worktree,
+                files,
+                dependencies,
+                budget_bytes,
+            } => service.project_context(
+                project,
+                *source,
+                ProjectContextOptions {
+                    worktree: worktree.as_deref(),
+                    files,
+                    dependencies,
+                    budget_bytes: *budget_bytes,
+                },
+            ),
+            ProjectCommand::Here { directory, project } => service.project_here(
+                &directory
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(std::env::current_dir)
+                    .map_err(|error| AppError::invalid("directory", error.to_string()))?,
+                project.as_deref(),
+            ),
+            ProjectCommand::Component { command } => match command {
+                ComponentCommand::Add {
+                    project,
+                    name,
+                    if_revision,
+                } => service.project_component_add(project, *if_revision, name),
+                ComponentCommand::List { project } => service.project_components(project),
+            },
+            ProjectCommand::Source { command } => match command {
+                SourceCommand::Add {
+                    project,
+                    if_revision,
+                    component,
+                    repo,
+                    path,
+                    directory,
+                } => {
+                    let location = match (repo, path, directory) {
+                        (Some(repo), Some(path), None) => SourceLocation::Git {
+                            worktree: repo,
+                            relative_path: path,
+                        },
+                        (None, None, Some(directory)) => SourceLocation::Directory(directory),
+                        _ => {
+                            return Err(AppError::invalid(
+                                "source",
+                                "provide either --repo with --path, or --directory",
+                            ));
+                        }
+                    };
+                    service.project_source_add(
+                        project,
+                        *if_revision,
+                        component.as_deref(),
+                        location,
+                    )
+                }
+                SourceCommand::List { project } => service.project_sources(project),
+                SourceCommand::Resolve {
+                    project,
+                    source_id,
+                    worktree,
+                } => service.project_source_resolve(project, *source_id, worktree.as_deref()),
+                SourceCommand::Remove {
+                    project,
+                    source_id,
+                    if_revision,
+                } => service.project_source_remove(project, *if_revision, *source_id),
+            },
+            ProjectCommand::Create { name } => service.project_create(name),
+            ProjectCommand::Show { project } => service.project_show(project),
+            ProjectCommand::List { after, limit } => service.project_list(*after, *limit),
+            ProjectCommand::Rename {
+                project,
+                name,
+                if_revision,
+            } => service.project_rename(project, *if_revision, name),
+            ProjectCommand::History {
+                project,
+                after,
+                limit,
+            } => service.project_history(project, *after, *limit),
+        },
         TopCommand::Task { command } => match command {
+            TaskCommand::Components {
+                task_id,
+                if_version,
+                components,
+                ..
+            } => service.task_set_components(task_id, *if_version, components),
             TaskCommand::Notes { task_id } => service.task_notes(task_id),
             TaskCommand::Here => service.task_here(
                 &std::env::current_dir()
@@ -475,6 +718,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 view,
                 status,
                 task_key,
+                project,
                 query,
                 page_size,
                 cursor,
@@ -503,6 +747,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                         None => status.clone(),
                     },
                     task_key: task_key.clone(),
+                    project: project.clone(),
                     query: query.clone(),
                     page_size: *page_size,
                     cursor: cursor.clone(),
@@ -510,10 +755,20 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 })
             }
             TaskCommand::Show { task_id } => service.task_show(task_id),
-            TaskCommand::Create { task_key } => {
+            TaskCommand::Create { task_key, project } => {
                 let input = cli.input.as_deref().map(read_input).transpose()?;
-                service.task_create_with_options(task_key.as_deref(), input.as_deref())
+                service.task_create_in_project(
+                    task_key.as_deref(),
+                    input.as_deref(),
+                    project.as_deref(),
+                )
             }
+            TaskCommand::Project {
+                task_id,
+                if_version,
+                project,
+                ..
+            } => service.task_set_project(task_id, *if_version, project.as_deref()),
             TaskCommand::Claim {
                 task_id,
                 session,
@@ -842,6 +1097,7 @@ fn render_task_context(data: &Value) -> String {
         ("Goal", &task["goal"]),
         ("Scope", &task["scope"]),
         ("Acceptance criteria", &task["acceptanceCriteria"]),
+        ("Component IDs", &task["componentIds"]),
         ("Last checkpoint", &checkpoint["summary"]),
         ("Checkpoint saved at", &checkpoint["createdAt"]),
         ("Next step", &task["nextStep"]),
@@ -868,6 +1124,31 @@ fn render_task_context(data: &Value) -> String {
             }
             output.push('\n');
         }
+    }
+    if !data["project"].is_null() {
+        output.push_str(&format!(
+            "## Project\n\n{} {} · Revision: {}\n\n",
+            text(&data["project"]["id"]),
+            text(&data["project"]["name"]),
+            text(&data["project"]["revision"])
+        ));
+    }
+    if let Some(notes) = data["notesSinceCheckpoint"]
+        .as_array()
+        .filter(|notes| !notes.is_empty())
+    {
+        output.push_str("## Notes after checkpoint\n\n");
+        for note in notes {
+            output.push_str(&format!(
+                "- [{}] {}\n",
+                text(&note["noteType"]),
+                text(&note["text"])
+            ));
+        }
+        output.push('\n');
+    }
+    if data["notesTruncated"] == true {
+        output.push_str("Notes truncated to the latest 50; use task notes to read all notes.\n\n");
     }
     if task["status"] == "closed" {
         output.push_str(&format!(
@@ -1065,6 +1346,25 @@ fn humanize_task_ids(value: &mut Value) {
     match value {
         Value::Array(values) => values.iter_mut().for_each(humanize_task_ids),
         Value::Object(map) => {
+            for field in ["projectId", "previousProjectId"] {
+                if let Some(id) = map.get(field).and_then(Value::as_i64) {
+                    map.insert(field.to_owned(), Value::String(format!("##{id}")));
+                }
+            }
+            if let Some(project) = map.get_mut("project").and_then(Value::as_object_mut)
+                && let Some(id) = project.get("id").and_then(Value::as_i64)
+            {
+                project.insert("id".to_owned(), Value::String(format!("##{id}")));
+            }
+            if let Some(projects) = map.get_mut("projects").and_then(Value::as_array_mut) {
+                for project in projects {
+                    if let Some(project) = project.as_object_mut()
+                        && let Some(id) = project.get("id").and_then(Value::as_i64)
+                    {
+                        project.insert("id".to_owned(), Value::String(format!("##{id}")));
+                    }
+                }
+            }
             if let Some(id) = map.get("taskId").and_then(Value::as_i64) {
                 map.insert("taskId".to_owned(), Value::String(format!("#{id}")));
             }

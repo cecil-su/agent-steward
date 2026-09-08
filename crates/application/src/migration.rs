@@ -186,9 +186,12 @@ impl Service {
             .map_err(AppError::from_sqlite)?;
         let mut counts = serde_json::Map::new();
         for table in TABLES {
-            let fields = columns(&tx, table)?;
+            let mut fields = columns(&tx, table)?;
             let mut old_fields = columns(&snapshot, table)?;
             if table == "tasks" {
+                // Legacy archives have no project membership. Keep the new FK NULL;
+                // never infer it from old task descriptions or repository paths.
+                fields.retain(|c| c != "project_id");
                 old_fields.retain(|c| c != "worktree_path_key");
             }
             if old_fields != fields {

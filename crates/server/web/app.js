@@ -3,7 +3,8 @@
   const $ = id => document.getElementById(id);
   const statuses = {open:'待开始',in_progress:'进行中',blocked:'有阻塞',closed:'已关闭'};
   let warningText='', listRevision=0;
-  let pendingWrites=0, uncertainWrite=false;
+  let projectsSupported=false,projectPageVisible=false,projectFilter='',projectFilterRevision=0,projectRows=[],projectCursor=null,projectListRevision=0,projectDetailRevision=0,projectContext=null,selectedProject=null;
+  let pendingWrites=0, uncertainWrite=false, modalEpoch=0;
   let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
   let localAccess=false, connected=false, view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
   function el(tag,text,cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
@@ -16,7 +17,7 @@
   // Remove the previous JS-readable credential; browser grants now use HttpOnly cookies.
   try{sessionStorage.removeItem('steward.connection-token');}catch{}
   function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-  function resetConnection(){stopLive();canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
+  function resetConnection(){stopLive();projectsSupported=false;projectFilter='';projectFilterRevision++;projectListRevision++;projectDetailRevision++;projectRows=[];projectCursor=null;selectedProject=null;projectContext=null;projectPageVisible=false;$('project-filter').value='';$('projects').hidden=true;$('project-filter-form').hidden=true;$('project-page').hidden=true;$('task-page').hidden=false;clear($('project-list'));clear($('project-detail'));canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
   async function api(path,body,extraHeaders={}) {
     if(body!==undefined)pendingWrites++;
     try{return await apiRequest(path,body,extraHeaders);}
@@ -35,7 +36,7 @@
   function safely(action){return async()=>{try{await action();}catch(e){notify(e.message);}};}
   async function loadList(append=false,preserveRange=false){
     const target=preserveRange?Math.max(30,rows.length):30;
-    const generation=++listRevision;const search=new URLSearchParams(view==='closed'?{status:'closed',pageSize:'30'}:{view,pageSize:'30'});if(query)search.set('query',query);if(append&&cursor)search.set('cursor',cursor);
+    const generation=++listRevision;const search=new URLSearchParams(view==='closed'?{status:'closed',pageSize:'30'}:{view,pageSize:'30'});if(query)search.set('query',query);if(projectFilter)search.set('project',projectFilter);if(append&&cursor)search.set('cursor',cursor);
     const refreshed=[];let data;
     do{
       data=await api('/api/tasks?'+search);if(generation!==listRevision)return false;
@@ -67,6 +68,7 @@
     const heading=el('div',undefined,'detail-heading');const meta=el('div',undefined,'meta');meta.append(el('span','#'+t.id),badge(t.status),el('span','版本 '+t.version),el('span','更新 '+date(t.updatedAt)));heading.append(meta,el('h2',t.title||'未命名任务'));
     const actions=el('div',undefined,'actions');actions.append(button('复制交接上下文',safely(copyContext)));
     if(t.status!=='closed'){
+      if(projectsSupported){actions.append(action('关联项目','task-project',[text('project','项目（##编号或唯一名称；留空解除）',t.projectId?'##'+t.projectId:'',false),check('confirmed','确认变更项目归属；跨项目或解除时清空组件范围')],'只改变任务归属，不领取任务、不改变 Session 或 Worktree。'));if(t.projectId){const components=button('设置组件范围',safely(()=>editTaskComponents(t)));components.hidden=!canWrite;actions.append(components);}}
       actions.append(action('编辑任务','task-update',taskFields(t),'只提交修改过的字段。若版本发生冲突，填写内容会保留。'));
       if(t.status==='open')actions.append(action('开始任务','task-claim',[text('sessionId','新执行 Session ID',sessionId())],'显式领取任务并记录当前执行会话。'));
       if(t.status==='in_progress'||t.status==='blocked')actions.append(action('换会话继续','task-resume',[text('sessionId','新执行 Session ID',sessionId()),text('fromSession','来源 Session ID',t.currentSessionId),...(t.currentSessionId?[check('takeOver','确认接管当前执行会话 '+t.currentSessionId)]:[])],'创建新的本地执行会话，保留原会话和 Checkpoint。'));
@@ -80,6 +82,7 @@
     const tabs=el('div',undefined,'tabs');tabs.setAttribute('role','tablist');for(const [key,label] of [['overview','概览'],['sessions','会话'],['worktree','代码现场'],['history','历史']]){const b=button(label,safely(async()=>{activeTab=key;await renderDetail();}));b.setAttribute('role','tab');b.setAttribute('aria-selected',String(activeTab===key));tabs.append(b);}root.append(tabs);
     const content=el('div');root.append(content);const generation=revision,tab=activeTab;
     if(tab==='overview'){
+      if(projectsSupported)content.append(section('所属项目',context.project?`${context.project.name} (##${context.project.id})`:'未关联项目'),section('组件范围 ID',(t.componentIds||[]).map(String)));
       content.append(section('目标',t.goal),section('范围',t.scope),section('验收条件',t.acceptanceCriteria));if(t.blockReason)content.append(section('阻塞原因',t.blockReason),section('恢复条件',t.blockRecovery));
       const cp=context.checkpoint;const checkpoint=el('div',undefined,'info-box');checkpoint.append(el('strong','最近 Checkpoint'));
       if(cp){checkpoint.append(el('p',date(cp.createdAt)+' · '+cp.sessionId),section('进展摘要',cp.summary),section('已完成',cp.completed),section('决策',cp.decisions),section('待办',cp.pending),section('风险',cp.risks));}else checkpoint.append(el('p','会话切换前保存 Checkpoint，让下一次继续有据可依。'));
@@ -116,16 +119,71 @@
   }
   async function loadEvents(id,root,after=0){const data=await api(`/api/sessions/${encodeURIComponent(id)}/events?after=${after}&limit=50`);if(!after)clear(root);if(!data.events.length&&!after)root.append(el('p','暂无观测记录。Hook 仅记录事件元数据，不保存消息正文。','muted'));for(const e of data.events){const row=el('div',undefined,'timeline-item');row.append(el('small',`#${e.sequence} · 发生 ${date(e.occurredAt)} · 接收 ${date(e.receivedAt)}`),el('p',e.kind+' · '+e.eventId));root.append(row);}if(data.hasMore){const more=button('下一页观测',safely(async()=>{more.remove();await loadEvents(id,root,data.nextAfter);}));root.append(more);}if(!after&&data.events.length)root.append(action('清除观测记录','hook-clear',[check('confirmed','确认清除 '+id+' 的观测记录')],'保留最小去重标记，防止重试恢复已删除事件。不保证物理擦除。',{sessionId:id}));}
   async function loadImports(id,root){const data=await api(`/api/sessions/${encodeURIComponent(id)}/imports`);clear(root);if(!data.imports.length)root.append(el('p','暂无导入记录。','muted'));for(const item of data.imports){const node=el('div',undefined,'timeline-item');node.append(el('p',item.sourcePath),el('small',`${item.sizeBytes} 字节 · ${date(item.importedAt)} · SHA-256 ${item.sha256}`),action('删除导入副本','session-import-remove',[check('confirmed','确认删除导入副本 '+item.id)],'只删除数据库副本，不删除源文件。不保证备份或存储介质上的物理擦除。',{importId:item.id}));root.append(node);}}
-  function contextText(){const t=context.task,cp=context.checkpoint;return [`# ${t.title||'未命名任务'} (#${t.id})`,`状态：${statuses[t.status]} · version ${t.version}`,'','## 目标',t.goal||'尚未填写','','## 范围',t.scope||'尚未填写','','## 验收',t.acceptanceCriteria||'尚未填写','','## 下一步',t.nextStep||'尚未填写',...(t.blockReason?['','## 阻塞',t.blockReason,'恢复条件：'+t.blockRecovery]:[]),'','## Checkpoint',cp?JSON.stringify(cp,null,2):'暂无','','## 执行会话',context.session?JSON.stringify(context.session,null,2):'暂无','','## 实时 Git 状态',context.worktreeStatus?JSON.stringify(context.worktreeStatus,null,2):'未关联或无法观察','','继续前重新读取最新 Task version；本文不授权自动关闭任务。'].join('\n');}
+  function contextText(){const t=context.task,cp=context.checkpoint;return [`# ${t.title||'未命名任务'} (#${t.id})`,`状态：${statuses[t.status]} · version ${t.version}`,'','## 目标',t.goal||'尚未填写','','## 范围',t.scope||'尚未填写','','## 验收',t.acceptanceCriteria||'尚未填写','','## 下一步',t.nextStep||'尚未填写',...(t.blockReason?['','## 阻塞',t.blockReason,'恢复条件：'+t.blockRecovery]:[]),'','## 项目归属',context.project?`${context.project.name} (##${context.project.id})`:'未关联或后端未提供','组件 ID：'+(t.componentIds||[]).join(', '),'','## Checkpoint 后的备注（至多50条）',JSON.stringify(context.notesSinceCheckpoint||[],null,2),...(context.notesTruncated?['备注已截断；请使用完整备注查询。']:[]),'','## Checkpoint',cp?JSON.stringify(cp,null,2):'暂无','','## 执行会话',context.session?JSON.stringify(context.session,null,2):'暂无','','## 实时 Git 状态',context.worktreeStatus?JSON.stringify(context.worktreeStatus,null,2):'未关联或无法观察','','继续前重新读取最新 Task version；本文不授权自动关闭任务。'].join('\n');}
   async function copyContext(){await selectTask(selected);const output=contextText();try{await navigator.clipboard.writeText(output);notify('已复制最新交接上下文。',true);}catch{openAction('copy-context','交接上下文',[area('context','复制下方内容',output)],'选择并复制文本。');$('submit-action').hidden=true;}}
+  function sourceContextText(data){return [`# ${data.project.name} (##${data.project.id})`,`源码登记：#${data.source.id}`,`当前目录：${data.resolvedPath||'未提供'}`,`观察时间：${data.observedAt||'未提供'}`,...(data.git?[`Git 分支：${data.git.branch||'未附着分支'}`,`HEAD：${data.git.head||'尚无提交'}`,`工作区：${data.git.dirty?'有改动':'未观察到改动'}`]:['Git 状态：未提供']),'','## 文件导航',...(data.entries||[]).map(e=>e.path),`省略条目：${data.omittedEntries||0}`,'','只读导航，不登记 Worktree，不自动领取或关闭任务。'].join('\n');}
+  function showTaskPage(){projectPageVisible=false;$('project-page').hidden=true;$('task-page').hidden=false;}
+  async function applyProjectFilter(){
+    const generation=++projectFilterRevision,input=$('project-filter').value.trim();
+    const result=input?await api('/api/projects/'+encodeURIComponent(input)):null;
+    if(generation!==projectFilterRevision||!connected||$('project-filter').value.trim()!==input)return;
+    projectFilter=result?'##'+result.project.id:'';$('project-filter').value=projectFilter;
+    selected=null;context=null;revision++;clear($('detail'));cursor=null;rows=[];renderList();$('more').hidden=true;await loadList();
+  }
+  async function loadProjects(append=false,preserveRange=false,background=false){
+    const generation=++projectListRevision,target=preserveRange?Math.max(50,projectRows.length):50;
+    let after=append?projectCursor:0,data;const fetched=[];
+    do{data=await api(`/api/projects?after=${after||0}&limit=50`);if(generation!==projectListRevision||!connected)return false;if(background&&modal){liveDirty=true;return false;}fetched.push(...data.projects);after=data.nextAfter;}while(preserveRange&&data.hasMore&&fetched.length<target);
+    projectRows=append?projectRows.concat(fetched):fetched;projectCursor=data.nextAfter;
+    renderProjects();$('project-more').hidden=!data.hasMore;return true;
+  }
+  function renderProjects(){const root=$('project-list'),panel=root.parentElement,top=panel.scrollTop,items=[];if(!projectRows.length)items.push(section('暂无项目','项目用于归类任务；源码登记可以稍后再做。'));for(const p of projectRows){const b=button('',safely(()=>selectProject(p.id)),'task-card'+(selectedProject===p.id?' selected':''));b.setAttribute('aria-current',String(selectedProject===p.id));b.append(el('small',`##${p.id} · revision ${p.revision}`),el('h3',p.name));items.push(b);}root.replaceChildren(...items);panel.scrollTop=top;}
+  async function selectProject(id){
+    if(selectedProject!==id){projectContext=null;clear($('project-detail'));$('project-detail').append(el('p','正在读取项目…','muted'));}
+    selectedProject=id;const generation=++projectDetailRevision;renderProjects();
+    const [info,components,sources]=await Promise.all([api(`/api/projects/${id}`),api(`/api/projects/${id}/components`),api(`/api/projects/${id}/sources`)]);
+    if(generation!==projectDetailRevision||!connected)return;
+    if(info.project.revision!==components.project.revision||info.project.revision!==sources.project.revision)throw new Error('项目在读取期间发生变化，请刷新后重试。');
+    projectContext={project:info.project,components:components.components,sources:sources.sources,repositories:sources.repositories};
+    const p=info.project,root=$('project-detail');clear(root);const heading=el('div',undefined,'detail-heading');heading.append(el('p',`##${p.id} · revision ${p.revision}`),el('h2',p.name));
+    const controls=el('div',undefined,'actions');controls.append(button('查看该项目任务',safely(async()=>{$('project-filter').value='##'+p.id;showTaskPage();await applyProjectFilter();})));
+    controls.append(action('修改项目名称','project-rename',[text('name','项目名称',p.name)],'项目 ID 不变，关联任务保留；使用项目 revision 校验。',{projectId:p.id}));
+    controls.append(action('添加组件','project-component-add',[text('name','组件名称')],'例如 backend、android；组件只是项目内的范围标记。',{projectId:p.id}));
+    const component=()=>({...choose('component','所属组件（可不选）',[['','项目公共源码'],...components.components.map(c=>[c.name,c.name])],''),required:false});
+    controls.append(action('登记 Git 源码','project-source-add',[text('worktree','现有 Git 工作区绝对路径'),text('relativePath','源码相对工作区路径','.'),component()],'路径属于服务所在机器；只登记元数据，不上传/复制代码或创建仓库。查询时仍需明确提供工作区路径。',{projectId:p.id,kind:'git'}));
+    controls.append(action('登记普通目录','project-source-add',[text('path','非 Git 目录绝对路径'),component()],'路径属于服务所在机器，仅用于非 Git 目录；不会修改目录中的文件。',{projectId:p.id,kind:'directory'}));heading.append(controls);root.append(heading);
+    root.append(section('组件',components.components.map(c=>`${c.name} (#${c.id})`)));
+    const sourceArea=el('section',undefined,'section');sourceArea.append(el('h3','源码登记'));if(!sources.sources.length)sourceArea.append(el('p','尚未登记源码；不影响项目任务管理。','muted'));
+    for(const source of sources.sources){const box=el('div',undefined,'info-box');const repo=(sources.repositories||[]).find(r=>r.id===source.repositoryId);box.append(el('strong','源码 #'+source.id),el('p',source.repositoryId?`Git Repository #${source.repositoryId} · ${repo?.commonDir||'—'}\n相对路径：${source.relativePath}`:source.directoryPath),el('p','组件：'+(components.components.find(c=>c.id===source.componentId)?.name||'项目公共源码')));
+      const actions=el('div',undefined,'actions');actions.append(button('查看源码上下文',()=>openAction('project-context','查询项目源码导航',source.repositoryId?[text('worktree','此次查询的 Git 工作区绝对路径')]:[],'只读导航，不读取源码正文。Git 路径须与登记 Repository 的 git worktree list 中本机 checkout 路径一致，不接受网络/设备路径，不从旧 Task 或上次输入推断。',{projectId:p.id,sourceId:source.id})));
+      actions.append(action('解除源码登记','project-source-remove',[check('confirmed','确认只解除源码 #'+source.id+' 的登记，不删除文件')],'保留目录与 Git 内容，使用项目 revision 校验。',{projectId:p.id,sourceId:source.id}));box.append(actions);sourceArea.append(box);
+    }root.append(sourceArea);
+  }
+  async function editTaskComponents(task){
+    const epoch=modalEpoch,taskRevision=revision;
+    const data=await api(`/api/projects/${task.projectId}/components`);
+    if(epoch!==modalEpoch||modal||taskRevision!==revision||context?.task.id!==task.id||context.task.version!==task.version||projectPageVisible)return;
+    const selectedNames=data.components.filter(c=>(task.componentIds||[]).includes(c.id)).map(c=>c.name).join('\n');
+    openAction('task-components','设置组件范围',[area('components','组件名称（每行一项；留空清空）',selectedNames,false),check('confirmed','确认替换组件范围，不改变执行会话或 Worktree')],'可选组件：'+data.components.map(c=>c.name).join('、'));
+  }
+  $('projects').onclick=safely(async()=>{if(!projectsSupported)return;projectPageVisible=true;$('task-page').hidden=true;$('project-page').hidden=false;await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);});
+  $('back-tasks').onclick=showTaskPage;
+  $('create-project').onclick=()=>openAction('project-create','新建项目',[text('name','项目名称')],'只创建项目记录；登记源码、关联任务均为后续显式操作。');
+  $('project-more').onclick=safely(()=>loadProjects(true));
+  $('project-filter-form').onsubmit=event=>{event.preventDefault();safely(applyProjectFilter)();};
+  $('clear-project-filter').onclick=safely(async()=>{$('project-filter').value='';await applyProjectFilter();});
   function openAction(name,title,fields,description='',extra={}){
-    if(!canWrite&&name!=='copy-context'){notify('当前连接为只读，不能修改任务。');return;}
-    modal={name,fields,extra,task:context?.task?structuredClone(context.task):null};$('action-title').textContent=title;$('action-description').textContent=description;clear($('action-fields'));clear($('action-error'));clear($('conflict'));$('submit-action').hidden=false;$('submit-action').disabled=false;
+    if(!canWrite&&!['copy-context','project-context'].includes(name)){notify('当前连接为只读，不能修改任务。');return;}
+    modalEpoch++;
+    modal={name,fields,extra,task:context?.task?structuredClone(context.task):null,project:extra.projectId&&projectContext?structuredClone(projectContext.project):null};$('action-title').textContent=title;$('action-description').textContent=description;clear($('action-fields'));clear($('action-error'));clear($('conflict'));$('submit-action').hidden=false;$('submit-action').disabled=false;
     for(const f of fields){const label=el('label',f.label);label.htmlFor='field-'+f.key;const input=el(f.type==='textarea'?'textarea':f.type==='select'?'select':'input');input.id='field-'+f.key;input.name=f.key;input.required=!!f.required;if(f.type==='select')for(const [value,label] of f.options){const o=el('option',label);o.value=value;input.append(o);}if(f.type==='checkbox'){input.type='checkbox';label.prepend(input);$('action-fields').append(label);}else{input.value=f.value??'';$('action-fields').append(label,input);}}
     $('action-dialog').showModal();
   }
   function values(){const v={};for(const f of modal.fields){const input=$('field-'+f.key);v[f.key]=f.type==='checkbox'?input.checked:input.value.trim();}return v;}
   function bodyFor(v){const {name,task,extra}=modal;const base=task?{taskId:task.id,expectedVersion:task.version}:{};
+    if(name.startsWith('project-')){const projectBase=name==='project-create'?{}:{projectId:modal.project.id,expectedRevision:modal.project.revision};if(name==='project-source-add')return{...projectBase,component:v.component||null,location:extra.kind==='git'?{kind:'git',worktree:v.worktree,relativePath:v.relativePath}:{kind:'directory',path:v.path}};return{...projectBase,...v,...(name==='project-source-remove'?{sourceId:extra.sourceId}:{})};}
+    if(name==='task-project')return{...base,project:v.project||null,clear:!v.project,confirmed:v.confirmed};
+    if(name==='task-components')return{...base,components:v.components.split('\n').map(x=>x.trim()).filter(Boolean),confirmed:v.confirmed};
     if(name==='task-close'&&!v.reason)v.reason=null;
     if(name==='task-create')return{input:Object.fromEntries(Object.entries(v).filter(([,x])=>x!==''))};
     if(name==='task-update'){const patch=Object.fromEntries(Object.entries(v).filter(([k,x])=>x!==(task[k]??'')));return{...base,patch};}
@@ -136,15 +194,16 @@
   $('action-form').onsubmit=async event=>{
     event.preventDefault();if(!modal)return;const current=modal;const submit=$('submit-action');submit.disabled=true;clear($('action-error'));clear($('conflict'));
     try{
-      const result=await api('/api/commands/'+current.name,bodyFor(values()));const id=result.task?.id??selected;
-      try { await loadList();if(id)await selectTask(id);notify('已保存。',true); } catch(readError) {notify('提交已成功，但刷新失败。请手动刷新，不要重复提交。\n'+readError.message);}
-      $('action-dialog').close();modal=null;
+      if(current.name==='project-context'){const v=values(),q=new URLSearchParams({sourceId:current.extra.sourceId});if(v.worktree)q.set('worktree',v.worktree);const result=await api(`/api/projects/${current.extra.projectId}/context?${q}`);if(modal!==current)return;openAction('copy-context','项目源码导航',[area('context','源码目录与文件导航（只读）',sourceContextText(result))],'实时读取登记源码的导航信息；不修改代码，不改变任务执行状态。');$('submit-action').hidden=true;return;}
+      const result=await api('/api/commands/'+current.name,bodyFor(values()));if(modal!==current)return;const id=result.task?.id??selected;
+      try { if(current.name.startsWith('project-')){await loadProjects(false,true);if(modal!==current)return;if(result.project)await selectProject(result.project.id);}else{await loadList();if(modal!==current)return;if(id)await selectTask(id);}notify('已保存。',true); } catch(readError) {notify('提交已成功，但刷新失败。请手动刷新，不要重复提交。\n'+readError.message);}
+      if(modal===current){$('action-dialog').close();modal=null;}
     }catch(error){
       if(modal!==current)return;$('action-error').textContent=error.message;
       if(error.code==='VERSION_CONFLICT'){
-        try{const latest=await api('/api/tasks/'+current.task.id);const box=el('div',undefined,'notice');box.append(el('p','你的填写内容已保留。请对照服务中的最新内容，调整后再提交。'),el('pre',JSON.stringify(latest.task,null,2)));box.append(button('采用此版本，重新审查后提交',()=>{current.task=latest.task;box.remove();$('action-error').textContent='已采用版本 '+latest.task.version+'。请审查填写内容，然后再次点击确认提交。';submit.disabled=false;}));$('conflict').append(box);}catch(e){$('action-error').append(el('p',e.message));}
+        try{const isProject=!!current.project;const latest=await api(isProject?'/api/projects/'+current.project.id:'/api/tasks/'+current.task.id);if(modal!==current)return;const box=el('div',undefined,'notice');box.append(el('p','你的填写内容已保留。请对照服务中的最新内容，调整后再提交。'),el('pre',JSON.stringify(isProject?latest.project:latest.task,null,2)));box.append(button('采用此版本，重新审查后提交',()=>{if(isProject)current.project=latest.project;else current.task=latest.task;box.remove();$('action-error').textContent='已采用版本 '+(isProject?latest.project.revision:latest.task.version)+'。请审查填写内容，然后再次点击确认提交。';submit.disabled=false;}));$('conflict').append(box);}catch(e){$('action-error').append(el('p',e.message));}
       } else if(error.uncertain){
-        const box=el('div',undefined,'notice');if(error.details)box.append(el('pre',JSON.stringify(error.details,null,2)));box.append(button('刷新列表和现场',safely(async()=>{await loadList();if(selected)await selectTask(selected);})),button('已核对执行结果，允许再次提交',()=>{submit.disabled=false;box.remove();}));$('conflict').append(box);
+        const box=el('div',undefined,'notice');if(error.details)box.append(el('pre',JSON.stringify(error.details,null,2)));box.append(button('刷新列表和现场',safely(async()=>{if(current.project||current.name==='project-create'){await loadProjects(false,true);if(current.project)await selectProject(current.project.id);}else{await loadList();if(selected)await selectTask(selected);}})),button('已核对执行结果，允许再次提交',()=>{submit.disabled=false;box.remove();}));$('conflict').append(box);
       }else submit.disabled=false;
     }
   };
@@ -152,7 +211,7 @@
     $('login-error').textContent='';$('credential').value='';stopLive();
     try{
       if(value)await api('/api/login',{}, {'X-Steward-Token':value});
-      const access=await api('/api/access');localAccess=access.local===true;canWrite=access.role==='admin';await loadList();
+      const access=await api('/api/access');localAccess=access.local===true;canWrite=access.role==='admin';projectsSupported=access.projectManagement===true;$('projects').hidden=!projectsSupported;$('project-filter-form').hidden=!projectsSupported;$('create-project').hidden=!canWrite;await loadList();
     }catch(e){$('login-error').textContent=!value&&e.code==='UNAUTHORIZED'?'':e.message;return;}
     connected=true;$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('logout').hidden=localAccess;$('access-role').textContent=localAccess?'本机 · 管理员':canWrite?'管理员':'只读';
     $('login').hidden=true;$('workspace').hidden=false;
@@ -162,11 +221,11 @@
   async function logout(){await api('/api/logout',{});resetConnection();}
   $('connect-form').onsubmit=async event=>{event.preventDefault();const b=event.submitter;if(b)b.disabled=true;try{await connect($('credential').value.trim());}finally{if(b)b.disabled=false;}};
   $('logout').onclick=safely(logout);
-  $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有已保存的浏览器授权？不影响本机免登录和凭据文件。')){await api('/api/browser-sessions/revoke',{});if(localAccess)notify('已撤销保存的浏览器授权。');else resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');await loadList();if(selected)await selectTask(selected);});
-  $('create').onclick=()=>openAction('task-create','新建任务',taskFields(null),'可以先创建最小任务，随后补充目标、范围和验收条件。');
+  $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有已保存的浏览器授权？不影响本机免登录和凭据文件。')){await api('/api/browser-sessions/revoke',{});if(localAccess)notify('已撤销保存的浏览器授权。');else resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');if(projectPageVisible){await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);}else{await loadList();if(selected)await selectTask(selected);}});
+  $('create').onclick=()=>openAction('task-create','新建任务',[...taskFields(null),...(projectsSupported?[text('project','项目（##编号或唯一名称，可留空）',projectFilter,false)]:[])],'可以先创建最小任务，随后补充目标、范围和验收条件。');
   $('search-form').onsubmit=event=>{event.preventDefault();query=$('search').value.trim();safely(()=>loadList())();};$('more').onclick=safely(()=>loadList(true));
   for(const b of document.querySelectorAll('[data-view]'))b.onclick=safely(async()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));await loadList();});
-  for(const id of ['cancel','cancel-bottom'])$(id).onclick=()=>$('action-dialog').close();$('action-dialog').addEventListener('close',()=>{modal=null;if(liveDirty)scheduleLiveRefresh();});
+  for(const id of ['cancel','cancel-bottom'])$(id).onclick=()=>$('action-dialog').close();$('action-dialog').addEventListener('close',()=>{if($('action-dialog').open)return;modal=null;if(liveDirty)scheduleLiveRefresh();});
   function stopLive(){
     if(liveAbort)liveAbort.abort();liveAbort=null;
     if(liveTimer)clearTimeout(liveTimer);liveTimer=null;liveDirty=false;
@@ -178,7 +237,7 @@
     liveTimer=setTimeout(async()=>{
       liveTimer=null;if(!connected||modal)return;
       liveDirty=false;liveRefreshing=true;const connection=liveAbort;
-      try{if(!await loadList(false,true)||connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
+      try{if(projectPageVisible){if(await loadProjects(false,true,true)&&connection===liveAbort&&selectedProject&&!modal)await selectProject(selectedProject);return;}if(!await loadList(false,true)||connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
       catch(e){if(connection===liveAbort)notify(e.message);}
       finally{liveRefreshing=false;if(liveDirty&&connected)scheduleLiveRefresh();}
     },250);
@@ -229,7 +288,7 @@
     const loaded=document.querySelector?.('meta[name="steward-ui-release"]')?.content;
     if(!loaded)return;
     let held=false, banner=null, checking=false;
-    const editing=()=>!!modal||!!$('credential').value||$('search').value.trim()!==query;
+    const editing=()=>!!modal||!!$('credential').value||$('search').value.trim()!==query||$('project-filter').value.trim()!==projectFilter;
     async function checkUpdate(){
       if(checking)return;checking=true;
       try{

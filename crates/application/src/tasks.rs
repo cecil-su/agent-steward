@@ -29,6 +29,15 @@ impl Service {
         task_key: Option<&str>,
         input_json: Option<&str>,
     ) -> AppResult<Outcome> {
+        self.task_create_in_project(task_key, input_json, None)
+    }
+
+    pub fn task_create_in_project(
+        &self,
+        task_key: Option<&str>,
+        input_json: Option<&str>,
+        project: Option<&str>,
+    ) -> AppResult<Outcome> {
         let input = input_json
             .map(|value| {
                 serde_json::from_str::<TaskCreateInput>(value)
@@ -59,13 +68,31 @@ impl Service {
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
+        let argument_project = project
+            .map(|value| crate::projects::resolve_project_id(&tx, value))
+            .transpose()?;
+        let input_project = input
+            .project
+            .as_deref()
+            .map(|value| crate::projects::resolve_project_id(&tx, value))
+            .transpose()?;
+        if argument_project.is_some()
+            && input_project.is_some()
+            && argument_project != input_project
+        {
+            return Err(AppError::invalid(
+                "project",
+                "argument and input must refer to the same project",
+            ));
+        }
+        let project_id = argument_project.or(input_project);
         tx.execute(
             "INSERT INTO tasks(
                 task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
-                created_at,updated_at
-             ) VALUES (?1,?2,'open',1,?3,?4,?5,?6,?7,?7)",
+                created_at,updated_at,project_id
+             ) VALUES (?1,?2,'open',1,?3,?4,?5,?6,?7,?7,?8)",
             params![
-                task_key, title, goal, scope, acceptance, next_step, timestamp
+                task_key, title, goal, scope, acceptance, next_step, timestamp, project_id
             ],
         )
         .map_err(AppError::from_sqlite)?;
@@ -76,7 +103,7 @@ impl Service {
             "task.created",
             None,
             "task created",
-            json!({"title": title, "taskKey": task_key}),
+            json!({"title": title, "taskKey": task_key, "projectId": project_id}),
             &timestamp,
         )?;
         let response_task = load_task(&tx, id)?;
@@ -136,8 +163,20 @@ impl Service {
             .map(|value| required("query", value))
             .transpose()?;
         let fields = validate_list_fields(&options.fields)?;
-        let filter_digest =
-            task_list_filter_digest(status.as_deref(), task_key.as_deref(), query.as_deref());
+        let mut connection = self.connection()?;
+        let tx = connection.transaction().map_err(AppError::from_sqlite)?;
+        let project_id = options
+            .project
+            .as_deref()
+            .map(|value| crate::projects::resolve_project_id(&tx, value))
+            .transpose()?;
+        let project_key = project_id.map(|id| id.to_string());
+        let filter_digest = task_list_filter_digest(
+            status.as_deref(),
+            task_key.as_deref(),
+            query.as_deref(),
+            project_key.as_deref(),
+        );
         let page_size = options.page_size.unwrap_or(DEFAULT_TASK_PAGE_SIZE);
         if !(1..=MAX_TASK_PAGE_SIZE).contains(&page_size) {
             return Err(AppError::invalid(
@@ -163,11 +202,16 @@ impl Service {
             "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
                     block_reason,block_recovery,current_session_id,repository_path,
                     repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
-                    closure_outcome,closure_reason,closed_at,created_at,updated_at
+                    closure_outcome,closure_reason,closed_at,created_at,updated_at,project_id,
+                    (SELECT json_group_array(component_id) FROM (SELECT component_id FROM task_components WHERE task_id=tasks.id ORDER BY component_id))
              FROM tasks",
         );
         let mut conditions = Vec::new();
         let mut values = Vec::<SqlValue>::new();
+        if let Some(project_id) = project_id {
+            conditions.push("project_id=?");
+            values.push(SqlValue::Integer(project_id));
+        }
         if let Some(status) = &status {
             if status == "active" {
                 conditions.push("status != 'closed'");
@@ -200,13 +244,14 @@ impl Service {
         sql.push_str(" ORDER BY updated_at DESC,id ASC LIMIT ?");
         values.push(SqlValue::Integer(i64::from(page_size) + 1));
 
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(&sql).map_err(AppError::from_sqlite)?;
+        let mut statement = tx.prepare(&sql).map_err(AppError::from_sqlite)?;
         let mut tasks = statement
             .query_map(params_from_iter(values.iter()), task_from_row)
             .map_err(AppError::from_sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::from_sqlite)?;
+        drop(statement);
+        tx.commit().map_err(AppError::from_sqlite)?;
         let has_more = tasks.len() > page_size as usize;
         if has_more {
             tasks.truncate(page_size as usize);
@@ -798,8 +843,10 @@ impl Service {
 
 const DEFAULT_TASK_PAGE_SIZE: u32 = 50;
 const MAX_TASK_PAGE_SIZE: u32 = 200;
-const TASK_LIST_FIELDS: [&str; 22] = [
+const TASK_LIST_FIELDS: [&str; 24] = [
     "id",
+    "projectId",
+    "componentIds",
     "taskKey",
     "title",
     "status",
@@ -869,9 +916,10 @@ fn task_list_filter_digest(
     status: Option<&str>,
     task_key: Option<&str>,
     query: Option<&str>,
+    project: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
-    for value in [status, task_key, query] {
+    for value in [status, task_key, query, project] {
         match value {
             Some(value) => {
                 hasher.update([1]);

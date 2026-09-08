@@ -1,3 +1,14 @@
+mod read_process;
+#[cfg(test)]
+mod source_identity_tests;
+mod sources;
+pub use read_process::GitReadControl;
+pub use sources::{
+    ContextGitState, checkout_info, context_git_state, directory_has_git_marker,
+    observe_recorded_identity, verify_existing_identity,
+};
+pub use sources::{local_worktree_path, registered_worktree_path};
+
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -16,6 +27,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GitError {
+    #[error("read-only Git resource limit: {0}")]
+    ReadLimit(&'static str),
     #[error("path identity cannot be established: {0}")]
     PathIdentity(String),
     #[error("git command failed during {operation}: {summary}")]
@@ -40,10 +53,33 @@ pub struct RepositoryInfo {
     common_dir_identity: ExistingPathIdentity,
 }
 
+/// A live observation. Linux clones share a metadata-only pin; never deserialize a live handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExistingPathIdentity {
     pub canonical_path: PathBuf,
     object: FileObjectIdentity,
+}
+
+/// A persisted comparison record, NOT proof of continuity since a prior process/observation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExistingPathIdentityRecord {
+    pub canonical_path: PathBuf,
+    object: FileObjectIdentityRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileObjectIdentityRecord {
+    first: u64,
+    second: u64,
+}
+
+// Preserve the existing on-disk/hash representation, without serializing process resources.
+impl serde::Serialize for ExistingPathIdentity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.record(), serializer)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -697,7 +733,12 @@ fn git_output<const N: usize>(
     args: [&str; N],
     operation: &str,
 ) -> Result<Output, GitError> {
-    let output = git_command(cwd).args(args).output()?;
+    let output = read_process::output_if_scoped(
+        git_command(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["-c", "core.fsmonitor=false"])
+            .args(args),
+    )?;
     if output.status.success() {
         Ok(output)
     } else {

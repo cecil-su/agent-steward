@@ -1,3 +1,12 @@
+mod host_evidence;
+pub use host_evidence::{
+    HostBinding, HostEvidence, RuleFileEvidence, ToolAvailability, ToolEvidence,
+};
+mod projects;
+pub use projects::{ProjectReference, ProjectView, normalize_project_name};
+mod sources;
+pub use sources::{ComponentView, SourceRootView, validate_source_relative_path};
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +50,10 @@ impl TryFrom<&str> for TaskStatus {
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
     pub id: i64,
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    #[serde(default)]
+    pub component_ids: Vec<i64>,
     pub task_key: Option<String>,
     pub title: Option<String>,
     pub status: TaskStatus,
@@ -149,6 +162,9 @@ pub struct HistoryEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskCreateInput {
+    /// An explicit project reference (numeric id, ##id, or unique name).
+    #[serde(default)]
+    pub project: Option<String>,
     #[serde(default)]
     pub task_key: Option<String>,
     #[serde(default)]

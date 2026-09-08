@@ -6,7 +6,8 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 2;
+// Schema 4 is initialized only in empty databases; older builds are never upgraded here.
+pub const SCHEMA_VERSION: i64 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -167,8 +168,64 @@ pub fn canonical_database_path(path: &Path) -> Result<PathBuf, StorageError> {
 }
 
 const SCHEMA: &str = r#"
+CREATE TABLE projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+    name_key TEXT NOT NULL UNIQUE CHECK(length(name_key) > 0),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE project_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    change_type TEXT NOT NULL CHECK(change_type IN ('project.created','project.renamed','component.created','source.added','source.removed')),
+    occurred_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    UNIQUE(project_id, revision)
+);
+CREATE TRIGGER projects_id_immutable
+BEFORE UPDATE OF id ON projects WHEN NEW.id != OLD.id
+BEGIN
+    SELECT RAISE(ABORT, 'project id is immutable');
+END;
+
+CREATE TABLE components (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id,name_key),
+    UNIQUE(id,project_id)
+);
+CREATE TABLE repositories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    common_dir TEXT NOT NULL UNIQUE,
+    common_identity_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE source_roots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    component_id INTEGER NULL,
+    repository_id INTEGER NULL REFERENCES repositories(id),
+    relative_path TEXT NULL,
+    directory_path TEXT NULL,
+    directory_identity_json TEXT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(component_id,project_id) REFERENCES components(id,project_id),
+    CHECK ((repository_id IS NOT NULL AND relative_path IS NOT NULL AND directory_path IS NULL AND directory_identity_json IS NULL)
+        OR (repository_id IS NULL AND relative_path IS NULL AND directory_path IS NOT NULL AND directory_identity_json IS NOT NULL))
+);
+CREATE UNIQUE INDEX idx_source_git ON source_roots(project_id,coalesce(component_id,0),repository_id,relative_path) WHERE repository_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_source_directory ON source_roots(project_id,coalesce(component_id,0),directory_path) WHERE directory_path IS NOT NULL;
+CREATE INDEX idx_sources_repository ON source_roots(repository_id);
+
 CREATE TABLE tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NULL REFERENCES projects(id),
     task_key TEXT NULL UNIQUE CHECK(task_key IS NULL OR length(trim(task_key)) > 0),
     title TEXT NULL CHECK(title IS NULL OR length(trim(title)) > 0),
     status TEXT NOT NULL CHECK(status IN ('open','in_progress','blocked','closed')),
@@ -297,6 +354,17 @@ CREATE TABLE session_events (
 );
 CREATE INDEX idx_session_events_sequence ON session_events(session_id, sequence);
 
+CREATE UNIQUE INDEX idx_tasks_project_identity ON tasks(id,project_id);
+CREATE TABLE task_components (
+    task_id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    component_id INTEGER NOT NULL,
+    PRIMARY KEY(task_id,component_id),
+    FOREIGN KEY(task_id,project_id) REFERENCES tasks(id,project_id),
+    FOREIGN KEY(component_id,project_id) REFERENCES components(id,project_id)
+);
+
+CREATE INDEX idx_tasks_project_updated ON tasks(project_id, updated_at, id);
 CREATE INDEX idx_tasks_status_updated ON tasks(status, updated_at);
 CREATE INDEX idx_tasks_repo_updated ON tasks(repository_common_dir, updated_at);
 CREATE INDEX idx_sessions_task_started ON sessions(task_id, started_at);

@@ -6,6 +6,7 @@
 
 - 当前可运行实现是 Cargo workspace 中的 V0 `taskctl`、通用元数据适配器 `task-hook` 和本地 HTTP/GUI `taskd`。
 - `docs/v0/` 是 V0 独立合同和当前参考实现的行为依据。
+- #34 新增轻量 Project 名称/`##ID`、独立 revision/History 与 Task projectId；当前开发数据库 Schema 4 仅初始化空库，拒绝旧 Schema 2/3。组件/源码根登记、Task 组件范围及项目候选定位已实现，事实缓存尚未实现，见 [`docs/v0/16-项目与上下文复用.md`](docs/v0/16-项目与上下文复用.md)。
 - `docs/v1/` 是 Workspace、Repository Registry、Task Review、Daemon、TUI/GUI 和 MCP 等独立设计，尚未对应到当前代码模块。
 - V0、V1 以及未来可能出现的 V2 不是连续升级链；代码、合同和完成度不得跨版本自动继承，只有专项文档明确声明时才存在特定复用或迁移关系。
 - V0 `taskd` 是独立的本地 HTTP 入口，不代表 V1 同名组件已经实现。不要把 V1 文档中的 `steward-tui`、`steward-gui`、`stewardctl` 或 `steward-mcp` 当作已经存在的组件。
@@ -56,6 +57,16 @@ flowchart LR
 | 实时通知 | [`crates/server/src/events.rs`](crates/server/src/events.rs) | 有界认证 SSE、SQLite data_version 观察、CLI/Hook 提交通知、退出释放订阅 |
 | GUI | [`crates/server/web/app.js`](crates/server/web/app.js) | 原生 DOM 任务工作台；静态资源嵌入二进制，无前端构建依赖 |
 | Application 门面 | [`crates/application/src/lib.rs`](crates/application/src/lib.rs) | `Service`、`Outcome`、稳定错误映射、部分外部状态和恢复命令 |
+| 项目用例 | [`crates/application/src/projects.rs`](crates/application/src/projects.rs) | Project create/show/list/rename/history、Task 项目归属 CAS；不操作 Git 或 Session |
+| 项目合同 | [`crates/core/src/projects.rs`](crates/core/src/projects.rs) | ProjectView、名称 NFC/ASCII 大小写唯一键、数字/##ID/名称解析 |
+| 组件与源码关联 | [`crates/application/src/sources.rs`](crates/application/src/sources.rs) | Project 组件/SourceRoot CAS、Repository 身份登记、Task 组件范围、目录候选与显式 Worktree 路径解析；不执行 Git 写入 |
+| Pi 实验采集器 | [`integrations/pi/context-evidence.mjs`](integrations/pi/context-evidence.mjs) | 公开 API 的分阶段加载文本/工具元数据摘要；无自动入口、无注入/持久化，不自动转换 Rust HostEvidence；隔离真实 Pi 测试见 integrations/tests/pi-context.test.mjs |
+| 宿主证据应用绑定 | [`crates/application/src/host_context.rs`](crates/application/src/host_context.rs) | 从当前数据库 Task/Session 与实时项目上下文独立派生请求范围，核验前后重算；不从报告自证、不授予复用 |
+| 宿主证据基础库 | [`crates/core/src/host_evidence.rs`](crates/core/src/host_evidence.rs)、[`crates/application/src/host_evidence.rs`](crates/application/src/host_evidence.rs) | 严格协议/绑定/有效期与规则文件复核；只校验宿主报告，不认证宿主、不授予复用，不接入 CLI/Pi |
+| 项目管理 HTTP/页面 | [`crates/server/src/projects.rs`](crates/server/src/projects.rs)、[`crates/server/web/app.js`](crates/server/web/app.js) | 项目/组件/源码只读路由及导航、独立Project/Task CAS命令、管理页面和任务筛选；access.projectManagement能力协商，reader不可写；人工验收见第17篇 |
+| 显式项目上下文 | [`crates/application/src/project_context.rs`](crates/application/src/project_context.rs) | 实时导航/显式片段、Git 前后证据、来源指纹、复用 blocker 与 JSON data 预算；按单轮父目录合并边界核验，不跨调用缓存 |
+| 源码合同 | [`crates/core/src/sources.rs`](crates/core/src/sources.rs) | Component/SourceRoot DTO 与便携相对路径校验 |
+| 源目录观察 | [`crates/git-adapter/src/sources.rs`](crates/git-adapter/src/sources.rs) | checkout 根解析、Git 标记识别、活跃身份与持久记录分离、新观察匹配与别名比较；context_git_state 提供 unborn/detached/dirty porcelain-v2 证据 |
 | Task 用例 | [`crates/application/src/tasks.rs`](crates/application/src/tasks.rs) | Task create/show/list 筛选与游标分页/字段投影、update/retitle/note/block/unblock/close/claim/checkpoint |
 | Session 用例 | [`crates/application/src/sessions.rs`](crates/application/src/sessions.rs) | Session show/list/attach/close、Task here/context/resume、Session Import、History 和 doctor |
 | Worktree 用例 | [`crates/application/src/worktrees.rs`](crates/application/src/worktrees.rs) | Worktree status/create/remove/adopt/detach，以及 Git 与 SQLite 的部分完成处理 |
@@ -64,6 +75,7 @@ flowchart LR
 | v7 归档迁移 | [`crates/application/src/migration.rs`](crates/application/src/migration.rs) | 显式只读 v7 归档、闭合任务范围校验、逐字段复制核验、新库不覆盖发布；`database import-v7` |
 | SQLite 基础设施 | [`crates/storage-sqlite/src/lib.rs`](crates/storage-sqlite/src/lib.rs) | 数据库打开、busy timeout、外键、WAL、单一 Schema 原子初始化和数据库路径规范化 |
 | Git 基础设施 | [`crates/git-adapter/src/lib.rs`](crates/git-adapter/src/lib.rs) | CanonicalPath、含实时 common-dir 关联复核的 Repository identity、任务级 advisory lock、Worktree 命令和实时状态 |
+| Git 读取资源边界 | [`crates/git-adapter/src/read_process.rs`](crates/git-adapter/src/read_process.rs) | 流式双输出上限、共享读截止时间/取消作用域、Windows Job / Unix 进程组清理；HTTP Source resolve/context、Task context/worktree-status、doctor 共用，不套用普通 Worktree 写取消 |
 
 ### 实际持久化边界
 
@@ -73,6 +85,7 @@ Application 当前会直接使用 `rusqlite` 编写事务和 SQL；`storage-sqli
 
 | 事实 | 权威来源 | 读取入口 |
 | --- | --- | --- |
+| Project、组件、SourceRoot、Repository 登记、项目 History、Task 项目/组件范围 | SQLite | `projects.rs`、`sources.rs`、`tasks.rs`；项目 revision 与 Task version 独立，登记的路径身份只作实时复核基准 |
 | Task、Session、Checkpoint、Note、Import、History | SQLite | Application Service 和 `db.rs` |
 | Task version 与当前 Session 引用 | SQLite | `Service::task_*`、`Service::session_*` |
 | Repository、Branch、Worktree 的登记引用 | SQLite | Task 的 repository/worktree 字段 |
@@ -115,7 +128,7 @@ taskctl 参数（12 / #12 / taskKey）
 
 ### 只读定位与交接
 
-`Service::task_here` 从当前目录与实时 common-dir 查找已登记任务，返回候选；`Service::task_context` 在读事务中取得 Task、最新 Checkpoint 和当前 Session，释放事务后观察 Git。两者不修改 Task/Session/History。CLI 以表格展示 here，以 Markdown 展示 context；resume 复用摘要渲染。
+`Service::task_here` 从当前目录与实时 common-dir 查找已登记任务，返回候选；`Service::task_context` 在读事务中取得 Task、Project、最新 Checkpoint、当前 Session 和检查点之后的新 Notes（按 History sequence，最多最新 50 条，超限明确告警），释放事务后观察 Git。两者不修改 Task/Session/History。CLI 以表格展示 here，以 Markdown 展示 context；resume 复用摘要渲染。
 
 ### Session resume
 
@@ -195,6 +208,12 @@ Git 命令不得在 SQLite 写事务中执行。`create/remove/adopt/detach` 持
 | --- | --- |
 | [`crates/application/tests/v0_flow.rs`](crates/application/tests/v0_flow.rs) | Task 数字/字面 taskKey 引用、CAS/Merge Patch、Session/Checkpoint/Import/Worktree 的跨模块业务流程和故障场景 |
 | [`crates/cli/tests/cli_contract.rs`](crates/cli/tests/cli_contract.rs) | CLI JSON v2 envelope、Task list 筛选/分页/投影/终端格式、stdin、Task 引用、退出码、并发启动、敏感内容确认和权限警告 |
+| [`crates/application/tests/projects.rs`](crates/application/tests/projects.rs)、[`crates/cli/tests/projects.rs`](crates/cli/tests/projects.rs) | 项目名/编号、两项目任务归属、CAS、History 回滚、分页、context Notes、源码 CLI 和旧 Schema 拒绝 |
+| [`crates/application/tests/project_context.rs`](crates/application/tests/project_context.rs) | 项目/Worktree 内容隔离、规则/依赖变化、原生对象替换、UTF-8/转义预算、Git HEAD/状态变化、未观察 ignored 内容复用拒绝及边界核验计数 |
+| [`crates/application/tests/sources.rs`](crates/application/tests/sources.rs) | 多仓/monorepo/共享源码、Task 组件范围、临时 Worktree/clone/链接隔离、目录对象替换失效、并发及原子回滚 |
+| [`crates/application/tests/http_checkout.rs`](crates/application/tests/http_checkout.rs)、[`crates/git-adapter/src/read_process/tests.rs`](crates/git-adapter/src/read_process/tests.rs) | HTTP 路径词法拒绝先于数据库 IO；Git 双流限额、共享预算、取消、后代 pipe 清理；[`crates/server/src/read_tests.rs`](crates/server/src/read_tests.rs) 另验真实 Task/doctor HTTP 路由取消慢 Git filter 后恢复并发槽，Task/History 不变 |
+| [`crates/git-adapter/src/source_identity_tests.rs`](crates/git-adapter/src/source_identity_tests.rs)、[`crates/application/src/host_evidence_pin_tests.rs`](crates/application/src/host_evidence_pin_tests.rs)、[`crates/application/src/project_context_pin_tests.rs`](crates/application/src/project_context_pin_tests.rs) | 记录字节格式/严格字段、两轮观察的文件与缺失祖先替换；Linux pin 克隆/释放与删除重建回归（需 Linux 执行） |
+| [`crates/server/tests/projects.rs`](crates/server/tests/projects.rs)、[`crates/server/tests/browser/projects.test.cjs`](crates/server/tests/browser/projects.test.cjs) | 项目全流程HTTP/DOM契约、Project CAS、只读、显式Git路径、冲突保留输入/未知结果不重放及旧后端能力降级；不是实浏览器验收 |
 | `crates/*/src/lib.rs` 内的 `#[cfg(test)]` | SQLite 初始化/读写并发/不兼容数据库拒绝/ID 不复用、Git 路径与锁、Windows ACL、局部错误合同 |
 
 常用验证命令：

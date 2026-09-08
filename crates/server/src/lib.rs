@@ -1,6 +1,9 @@
 //! Same-origin HTTP transport. Authentication is checked before extracting bodies.
 mod browser_auth;
 mod events;
+mod projects;
+#[cfg(test)]
+mod read_tests;
 mod ui;
 use axum::{
     Extension, Json, Router,
@@ -46,13 +49,16 @@ impl ServerState {
     }
 
     pub fn with_address(service: Service, address: std::net::SocketAddr, token: String) -> Self {
+        let host = address.to_string();
+        // Browsers serialize HTTP's default port without :80 in Origin.
+        let origin = format!("http://{}", host.strip_suffix(":80").unwrap_or(&host));
         Self {
             service,
             ui: Arc::new(ui::UiStore::new(None)),
-            host: address.to_string(),
+            host,
             local_address: address.ip(),
             trust_local: false,
-            origin: format!("http://{address}"),
+            origin,
             token: token.into(),
             browser_auth: Arc::new(browser_auth::BrowserAuth::memory()),
             cookie_name: format!("steward_session_{}", address.port()),
@@ -181,6 +187,16 @@ pub fn router(state: ServerState) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/browser-sessions/revoke", post(revoke_browsers))
         .route("/api/events", get(events::subscribe))
+        .route("/api/projects", get(projects::list))
+        .route("/api/projects/{id}", get(projects::show))
+        .route("/api/projects/{id}/history", get(projects::history))
+        .route("/api/projects/{id}/components", get(projects::components))
+        .route("/api/projects/{id}/sources", get(projects::sources))
+        .route(
+            "/api/projects/{id}/sources/{source}",
+            get(projects::resolve),
+        )
+        .route("/api/projects/{id}/context", get(projects::context))
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
         .route("/api/tasks/{id}/{resource}", get(task_resource))
@@ -222,7 +238,10 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
     let local = state.local_request(&request);
     let headers = request.headers();
     let host_ok = headers.get_all("host").iter().count() == 1
-        && headers.get("host").and_then(|v| v.to_str().ok()) == Some(state.host.as_str());
+        && headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|host| host == state.host || state.host.strip_suffix(":80") == Some(host));
     let origin_ok = headers.get_all("origin").iter().count() <= 1
         && headers
             .get("origin")
@@ -366,6 +385,31 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
     response
 }
 
+// Only read handlers install cancellation. Dropping the HTTP future cancels the
+// worker's Git group/job; run() keeps its slot until that worker has cleaned up.
+async fn run_read(
+    state: ServerState,
+    operation: impl FnOnce(&Service) -> AppResult<Outcome> + Send + 'static,
+) -> Response {
+    struct CancelOnDrop(steward_application::GitReadControl);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+    let control = steward_application::GitReadControl::default();
+    let _cancel = CancelOnDrop(control.clone());
+    run(state, move |s| {
+        control.within(|| {
+            control
+                .check()
+                .map_err(|error| AppError::from_git(error, None))?;
+            operation(s)
+        })
+    })
+    .await
+}
+
 async fn run(
     state: ServerState,
     operation: impl FnOnce(&Service) -> AppResult<Outcome> + Send + 'static,
@@ -391,7 +435,7 @@ async fn run(
                     "INVALID_INPUT"|"UNSUPPORTED_SCHEMA_VERSION"=>StatusCode::BAD_REQUEST,
                     "NOT_FOUND"=>StatusCode::NOT_FOUND,
                     "VERSION_CONFLICT"|"SESSION_CONFLICT"|"CONSTRAINT_VIOLATION"|"HOOK_EVENT_CONFLICT"|"HOOK_CAPACITY_REACHED"|"WORKTREE_SAFETY_REFUSED"=>StatusCode::CONFLICT,
-                    "DATABASE_BUSY"|"WORKTREE_OPERATION_BUSY"=>StatusCode::SERVICE_UNAVAILABLE,
+                    "DATABASE_BUSY"|"WORKTREE_OPERATION_BUSY"|"GIT_READ_LIMIT"=>StatusCode::SERVICE_UNAVAILABLE,
                     _=>StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 (status,json!({"schemaVersion":2,"ok":false,"data":null,"warnings":warnings,"error":error.body}))
@@ -476,7 +520,7 @@ async fn revoke_browsers(State(state): State<ServerState>) -> Response {
 }
 
 async fn access(Extension(access): Extension<Access>) -> Response {
-    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":access.role,"local":access.local},"warnings":[],"error":null})).into_response()
+    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true},"warnings":[],"error":null})).into_response()
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -515,6 +559,7 @@ async fn style() -> impl IntoResponse {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ListQuery {
+    project: Option<String>,
     status: Option<String>,
     view: Option<String>,
     task_key: Option<String>,
@@ -547,6 +592,7 @@ async fn tasks(
             Some(_) => return Err(AppError::invalid("view", "unknown view")),
         };
         s.task_list_with_options(&TaskListOptions {
+            project: query.project,
             status,
             task_key: query.task_key,
             query: query.query,
@@ -567,7 +613,7 @@ async fn task_resource(
     State(state): State<ServerState>,
     Path((id, resource)): Path<(String, String)>,
 ) -> Response {
-    run(state, move |s| match resource.as_str() {
+    run_read(state, move |s| match resource.as_str() {
         "context" => s.task_context(&id),
         "history" => s.history(&id),
         "notes" => s.task_notes(&id),
@@ -628,7 +674,7 @@ async fn session_resource(
     .await
 }
 async fn doctor(State(state): State<ServerState>) -> Response {
-    run(state, Service::doctor).await
+    run_read(state, Service::doctor).await
 }
 async fn hook(State(state): State<ServerState>, body: Bytes) -> Response {
     let Ok(input) = String::from_utf8(body.to_vec()) else {
@@ -645,6 +691,45 @@ async fn hook(State(state): State<ServerState>, body: Bytes) -> Response {
     deny_unknown_fields
 )]
 enum Command {
+    ProjectCreate {
+        name: String,
+    },
+    ProjectRename {
+        project_id: i64,
+        expected_revision: i64,
+        name: String,
+    },
+    ProjectComponentAdd {
+        project_id: i64,
+        expected_revision: i64,
+        name: String,
+    },
+    ProjectSourceAdd {
+        project_id: i64,
+        expected_revision: i64,
+        component: Option<String>,
+        location: projects::SourceInput,
+    },
+    ProjectSourceRemove {
+        project_id: i64,
+        expected_revision: i64,
+        source_id: i64,
+        confirmed: bool,
+    },
+    TaskProject {
+        task_id: i64,
+        expected_version: i64,
+        project: Option<String>,
+        #[serde(default)]
+        clear: bool,
+        confirmed: bool,
+    },
+    TaskComponents {
+        task_id: i64,
+        expected_version: i64,
+        components: Vec<String>,
+        confirmed: bool,
+    },
     TaskCreate {
         input: steward_core::TaskCreateInput,
     },
@@ -786,6 +871,57 @@ fn absolute(value: &str) -> AppResult<&FsPath> {
 }
 fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
     match command {
+        Command::ProjectCreate { name } => s.project_create(&name),
+        Command::ProjectRename {
+            project_id,
+            expected_revision,
+            name,
+        } => s.project_rename(&format!("##{project_id}"), expected_revision, &name),
+        Command::ProjectComponentAdd {
+            project_id,
+            expected_revision,
+            name,
+        } => s.project_component_add(&format!("##{project_id}"), expected_revision, &name),
+        Command::ProjectSourceAdd {
+            project_id,
+            expected_revision,
+            component,
+            location,
+        } => location.add(s, project_id, expected_revision, component.as_deref()),
+        Command::ProjectSourceRemove {
+            project_id,
+            expected_revision,
+            source_id,
+            confirmed,
+        } => {
+            confirm(confirmed)?;
+            s.project_source_remove(&format!("##{project_id}"), expected_revision, source_id)
+        }
+        Command::TaskProject {
+            task_id,
+            expected_version,
+            project,
+            clear,
+            confirmed,
+        } => {
+            confirm(confirmed)?;
+            if project.is_some() == clear {
+                return Err(AppError::invalid(
+                    "project",
+                    "provide a project OR explicit clear=true",
+                ));
+            }
+            s.task_set_project(&format!("#{task_id}"), expected_version, project.as_deref())
+        }
+        Command::TaskComponents {
+            task_id,
+            expected_version,
+            components,
+            confirmed,
+        } => {
+            confirm(confirmed)?;
+            s.task_set_components(&format!("#{task_id}"), expected_version, &components)
+        }
         Command::TaskCreate { input } => {
             s.task_create_with_options(None, Some(&serde_json::to_string(&input).unwrap()))
         }

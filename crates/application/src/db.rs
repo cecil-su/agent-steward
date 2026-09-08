@@ -75,7 +75,8 @@ pub(crate) fn load_task(connection: &Connection, id: i64) -> AppResult<TaskView>
             "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
                     block_reason,block_recovery,current_session_id,repository_path,
                     repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
-                    closure_outcome,closure_reason,closed_at,created_at,updated_at
+                    closure_outcome,closure_reason,closed_at,created_at,updated_at,project_id,
+                    (SELECT json_group_array(component_id) FROM (SELECT component_id FROM task_components WHERE task_id=tasks.id ORDER BY component_id))
              FROM tasks WHERE id=?1",
             [id],
             task_from_row,
@@ -120,6 +121,8 @@ pub(crate) fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskView> {
         closed_at: row.get(19)?,
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
+        project_id: row.get(22)?,
+        component_ids: json_from_column(23, "task_components", &row.get::<_, String>(23)?)?,
     })
 }
 

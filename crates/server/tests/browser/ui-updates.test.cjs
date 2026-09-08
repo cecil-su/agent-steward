@@ -7,8 +7,8 @@ const app=fs.readFileSync(path.join(__dirname,'../../web/app.js'),'utf8');
 const updater=app.slice(app.indexOf('  function startUiUpdates(){'),app.indexOf('  const code=new URLSearchParams'));
 function fixture(){
   let timer, reloads=0, button, banner, status={packageFormat:1,apiContract:1,release:'new'};
-  const nodes={credential:{value:''},search:{value:''}};
-  const context={modal:null,pendingWrites:0,uncertainWrite:false,query:'',
+  const nodes={credential:{value:''},search:{value:''},'project-filter':{value:''}};
+  const context={modal:null,pendingWrites:0,uncertainWrite:false,query:'',projectFilter:'',
     document:{querySelector:()=>({content:'old'}),body:{prepend:n=>banner=n}},
     $:id=>nodes[id],el:()=>({setAttribute(){},append(){},remove(){banner=null;}}),
     button:(_text,fn)=>{button=fn;return {};},location:{reload:()=>reloads++},
@@ -29,7 +29,7 @@ test('pending write blocks both automatic and explicitly requested reload',async
   f.context.pendingWrites=0;await f.tick();assert.equal(f.reloads(),0);f.click();assert.equal(f.reloads(),1);
 });
 test('uncertain write, login input and unapplied search are protected',async()=>{
-  for(const mode of ['uncertain','credential','search']){
+  for(const mode of ['uncertain','credential','search','project-filter']){
     const f=fixture();if(mode==='uncertain')f.context.uncertainWrite=true;else f.nodes[mode].value='unsaved';
     await f.tick();assert.equal(f.reloads(),0);assert(f.banner());
   }

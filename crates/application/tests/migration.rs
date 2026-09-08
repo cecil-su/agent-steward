@@ -13,6 +13,16 @@ fn legacy(path: &Path) {
     service.task_close("1", 4, "completed", None).unwrap();
     let c = Connection::open(path).unwrap();
     c.execute_batch("PRAGMA journal_mode=DELETE; DROP TABLE session_events;
+        DROP TABLE project_history;
+        DROP TABLE source_roots;
+        DROP TABLE task_components;
+        DROP INDEX idx_tasks_project_identity;
+        DROP TABLE components;
+        DROP TABLE repositories;
+        DROP INDEX idx_tasks_project_updated;
+        ALTER TABLE tasks DROP COLUMN project_id;
+        DROP TABLE projects;
+        UPDATE history SET payload_json=json_remove(payload_json,'$.projectId') WHERE change_type='task.created';
         ALTER TABLE tasks ADD COLUMN worktree_path_key TEXT;
         CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,description TEXT NOT NULL,applied_at TEXT NOT NULL);
         PRAGMA user_version=0;
@@ -64,6 +74,13 @@ fn v7_archive_preserves_rows_relations_history_and_high_water_mark() {
     let task = Service::new(&target).task_show("1").unwrap();
     assert_eq!(task.data["task"]["version"], 5);
     assert_eq!(task.data["task"]["status"], "closed");
+    assert!(task.data["task"]["projectId"].is_null());
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM projects", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert_eq!(
         Service::new(&target).task_create_minimal().unwrap().data["task"]["id"],
         51

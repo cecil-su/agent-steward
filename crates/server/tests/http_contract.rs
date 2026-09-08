@@ -51,6 +51,33 @@ async fn request(
 }
 
 #[tokio::test]
+async fn project_task_filter_and_context_keep_project_isolation() {
+    let (_temp, service, app) = fixture();
+    service.project_create("Mailroom").unwrap();
+    service.project_create("Steward").unwrap();
+    service.task_set_project("1", 1, Some("##1")).unwrap();
+    service
+        .task_create_in_project(None, None, Some("##2"))
+        .unwrap();
+    let before = service.history("1").unwrap().data;
+    for path in ["/api/tasks?project=%23%231", "/api/tasks?project=MAILROOM"] {
+        let (status, body) = request(&app, "GET", path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"]["tasks"][0]["projectId"], 1);
+    }
+    let (status, body) = request(&app, "GET", "/api/tasks?project=Missing", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
+    let (status, body) = request(&app, "GET", "/api/tasks/1/context", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["project"]["name"], "Mailroom");
+    assert!(body["data"]["session"].is_null());
+    assert!(body["data"]["worktreeStatus"].is_null());
+    assert_eq!(service.history("1").unwrap().data, before);
+}
+
+#[tokio::test]
 async fn reader_credentials_can_query_but_cannot_mutate_any_resource() {
     let (_temp, service, _) = fixture();
     let app = router(
@@ -247,6 +274,135 @@ async fn explicit_address_keeps_exact_host_origin_and_authentication_checks() {
             .unwrap();
         assert_eq!(response.status(), expected);
     }
+}
+
+#[tokio::test]
+async fn default_http_port_accepts_browser_authority_without_relaxing_origin_or_csrf() {
+    let (_temp, service, _) = fixture();
+    let state = ServerState::with_address(
+        service.clone(),
+        "172.19.10.185:80".parse().unwrap(),
+        TOKEN.into(),
+    );
+    assert!(
+        state
+            .browser_connection_url()
+            .starts_with("http://172.19.10.185/#connect=")
+    );
+    let app = router(state);
+    for (host, origin, expected) in [
+        ("172.19.10.185", "http://172.19.10.185", StatusCode::OK),
+        ("172.19.10.185:80", "http://172.19.10.185", StatusCode::OK),
+        (
+            "172.19.10.185:8080",
+            "http://172.19.10.185",
+            StatusCode::FORBIDDEN,
+        ),
+        ("127.0.0.1", "http://172.19.10.185", StatusCode::FORBIDDEN),
+        ("172.19.10.185", "http://evil.test", StatusCode::FORBIDDEN),
+        (
+            "172.19.10.185",
+            "http://172.19.10.185:8080",
+            StatusCode::FORBIDDEN,
+        ),
+        ("172.19.10.185", "null", StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/access")
+                    .header("host", host)
+                    .header("origin", origin)
+                    .header("x-steward-token", TOKEN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    let duplicated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/access")
+                .header("host", "172.19.10.185")
+                .header("host", "172.19.10.185:80")
+                .header("x-steward-token", TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicated.status(), StatusCode::FORBIDDEN);
+    let anonymous = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/access")
+                .header("host", "172.19.10.185")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/login")
+                .header("host", "172.19.10.185")
+                .header("origin", "http://172.19.10.185")
+                .header("x-steward-token", TOKEN)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    for (origin, csrf, expected) in [
+        ("http://172.19.10.185", false, StatusCode::FORBIDDEN),
+        ("http://evil.test", true, StatusCode::FORBIDDEN),
+        ("http://172.19.10.185", true, StatusCode::OK),
+    ] {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/commands/task-create")
+            .header("host", "172.19.10.185")
+            .header("origin", origin)
+            .header("cookie", &cookie)
+            .header("content-type", "application/json");
+        if csrf {
+            req = req.header("x-steward-csrf", "1");
+        }
+        let response = app
+            .clone()
+            .oneshot(req.body(Body::from(r#"{"input":{}}"#)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(
+        service.task_list(None).unwrap().data["tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]

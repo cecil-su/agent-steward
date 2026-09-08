@@ -3,20 +3,30 @@ const {chromium}=require('playwright');
 const {spawn,execFileSync}=require('node:child_process');
 const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../../../..');
+const projectSmoke=require('./project-smoke.cjs');
+const bind=process.env.STEWARD_TEST_BIND??'127.0.0.1';
+const port=process.env.STEWARD_TEST_PORT??'0';
+assert(require('node:net').isIPv4(bind)&&Object.values(os.networkInterfaces()).flat().some(n=>n?.address===bind),'Test bind must be an explicit IPv4 address of this machine');
+assert(/^(0|[1-9]\d{0,4})$/.test(port)&&Number(port)<=65535,'Invalid test port');
+const target=path.resolve(process.env.CARGO_TARGET_DIR||path.join(root,'target'));
+const binary=name=>path.join(target,'debug',name+(process.platform==='win32'?'.exe':''));
+// Fail before allocating a sandbox; never fall back to an installed/global binary.
+for(const name of ['taskd','taskctl','task-hook'])fs.accessSync(binary(name),fs.constants.X_OK);
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'steward-gui-'));
 if(process.platform!=='win32')fs.chmodSync(temp,0o700);
 const database=path.join(temp,'test.db');
 // Let taskd create and protect this directory using the platform's ACL API.
 const runtime=path.join(temp,'runtime');
-const daemon=spawn(path.join(root,'target/debug/taskd'),['--database',database,'--runtime-dir',runtime,'--no-open','--require-local-auth','--port','0'],{stdio:['ignore','pipe','pipe']});
+const daemon=spawn(binary('taskd'),['--database',database,'--runtime-dir',runtime,'--no-open','--require-local-auth','--bind',bind,'--port',port],{stdio:['ignore','pipe','pipe']});
 let stdout='',stderr='';daemon.stdout.on('data',b=>stdout+=b);daemon.stderr.on('data',b=>stderr+=b);
 let browser,page;
-const cli=(...args)=>JSON.parse(execFileSync(path.join(root,'target/debug/taskctl'),['--database',database,'--json',...args],{encoding:'utf8'}));
+const cli=(...args)=>JSON.parse(execFileSync(binary('taskctl'),['--database',database,'--json',...args],{encoding:'utf8'}));
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 (async()=>{
  try{
   for(let i=0;i<100&&!stdout.includes('Credential file:');i++){if(daemon.exitCode!==null)throw Error('Daemon startup failed: '+stderr);await delay(50);}
-  const url=stdout.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];const credentialPath=stdout.match(/Credential file: (.+)/)?.[1];assert(url&&credentialPath,'Daemon did not advertise URL and credential path');
+  const url=stdout.match(/Agent Steward: (http:\/\/[\d.]+:\d+)/)?.[1];const credentialPath=stdout.match(/Credential file: (.+)/)?.[1];assert(url&&credentialPath,'Daemon did not advertise URL and credential path');
+  assert.equal(new URL(url).hostname,bind);if(port!=='0')assert.equal(Number(new URL(url).port||80),Number(port));console.log('Sandbox URL:',new URL(url).origin);
   const token=fs.readFileSync(credentialPath,'utf8');assert(!stdout.includes(token));if(process.platform==='win32'){
     for(const target of [runtime,path.dirname(credentialPath),credentialPath]){
       const protectedAcl=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','if ([System.IO.Directory]::Exists($env:STEWARD_TEST_ACL_PATH)) { [System.IO.Directory]::GetAccessControl($env:STEWARD_TEST_ACL_PATH).AreAccessRulesProtected } else { [System.IO.File]::GetAccessControl($env:STEWARD_TEST_ACL_PATH).AreAccessRulesProtected }'],{encoding:'utf8',env:{...process.env,STEWARD_TEST_ACL_PATH:target}}).trim();
@@ -35,7 +45,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   await page.getByRole('tab',{name:'会话',exact:true}).click();await page.getByText('browser-session-b · 当前执行',{exact:true}).waitFor();
   const currentBox=page.locator('.info-box').filter({has:page.getByText('browser-session-b · 当前执行',{exact:true})});
   await currentBox.getByRole('button',{name:'绑定客户端'}).click();await page.getByLabel('外部 Session ID',{exact:true}).fill('host-browser-b');await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});
-  execFileSync(path.join(root,'target/debug/task-hook'),['--database',database,'--session','browser-session-b','--source','generic','--external-session','host-browser-b'],{input:JSON.stringify({eventId:'event-b',kind:'idle',occurredAt:'2026-09-07T00:00:00Z',content:'synthetic private content dropped'}),stdio:['pipe','pipe','pipe']});
+  execFileSync(binary('task-hook'),['--database',database,'--session','browser-session-b','--source','generic','--external-session','host-browser-b'],{input:JSON.stringify({eventId:'event-b',kind:'idle',occurredAt:'2026-09-07T00:00:00Z',content:'synthetic private content dropped'}),stdio:['pipe','pipe','pipe']});
   await currentBox.getByRole('button',{name:'查看观测'}).click();await page.getByText('idle · event-b',{exact:true}).waitFor();
   await page.getByRole('button',{name:'清除观测记录',exact:true}).click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});assert.equal(cli('hook','list','browser-session-b').data.events.length,0);
   const imported=path.join(temp,'reviewed.txt');fs.writeFileSync(imported,'Synthetic reviewed session record.');
@@ -54,7 +64,12 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   fs.writeFileSync(path.join(worktree,'untracked.txt'),'synthetic');await page.getByRole('button',{name:'安全删除 Worktree',exact:true}).click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-error').filter({hasText:'WORKTREE_SAFETY_REFUSED'}).waitFor();assert.equal(fs.existsSync(worktree),true);await page.getByRole('button',{name:'取消',exact:true}).click();
   fs.unlinkSync(path.join(worktree,'untracked.txt'));await page.getByRole('button',{name:'安全删除 Worktree',exact:true}).click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});assert.equal(fs.existsSync(worktree),false);
   await page.getByRole('tab',{name:'概览',exact:true}).click();await page.getByText('浏览器未提交的内容必须保留',{exact:true}).waitFor();
-  await page.context().grantPermissions(['clipboard-read','clipboard-write']);await page.getByRole('button',{name:'复制交接上下文'}).click();await page.locator('#notice').filter({hasText:'已复制'}).waitFor();assert((await page.evaluate(()=>navigator.clipboard.readText())).includes('browser-session-b'));
+  if(await page.evaluate(()=>isSecureContext&&!!navigator.clipboard)){
+    await page.context().grantPermissions(['clipboard-read','clipboard-write']);await page.getByRole('button',{name:'复制交接上下文'}).click();await page.locator('#notice').filter({hasText:'已复制'}).waitFor();assert((await page.evaluate(()=>navigator.clipboard.readText())).includes('browser-session-b'));
+  }else{
+    // Plain HTTP LAN access uses the existing manual-copy fallback, not relaxed browser security.
+    await page.getByRole('button',{name:'复制交接上下文'}).click();await page.getByLabel('复制下方内容').waitFor();assert((await page.getByLabel('复制下方内容').inputValue()).includes('browser-session-b'));await page.locator('#cancel').click();
+  }
   fs.mkdirSync(path.join(root,'.local'),{recursive:true});await page.screenshot({path:path.join(root,'.local/m5-desktop.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'mobile layout overflows');await page.screenshot({path:path.join(root,'.local/m5-mobile.png'),fullPage:true});
   await page.getByRole('button',{name:'关闭任务',exact:true}).click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});assert.equal(cli('task','show','1').data.task.status,'closed');
   assert.equal(await page.evaluate(()=>localStorage.length),0);assert.equal(await page.evaluate(()=>sessionStorage.length),0);
@@ -65,7 +80,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),null);
   await page.reload();await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
   // An invalid remembered grant must never regain access.
-  await page.context().addCookies([{name:cookies[0].name,value:'synthetic-expired-token',domain:'127.0.0.1',path:'/api',httpOnly:true,sameSite:'Strict'}]);
+  await page.context().addCookies([{name:cookies[0].name,value:'synthetic-expired-token',domain:new URL(url).hostname,path:'/api',httpOnly:true,sameSite:'Strict'}]);
   const rejected=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/access'&&r.status()===401);
   await page.reload();await rejected;assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),null);
   await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
@@ -86,12 +101,13 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
     await viewer.waitForFunction(()=>document.querySelectorAll('.task-card').length===35);
     await viewer.locator('.task-card').filter({has:viewer.locator('.card-meta span').filter({hasText:/^#2$/})}).click();
     await viewer.locator('#detail .meta').filter({hasText:'#2'}).waitFor();
-    const panelTop=await viewer.locator('.task-panel').evaluate(node=>node.scrollTop);assert(panelTop>0);
+    const panelTop=await viewer.locator('#task-page .task-panel').evaluate(node=>node.scrollTop);assert(panelTop>0);
     cli('task','create','SSE-PAGED-REFRESH');
     await viewer.waitForFunction(()=>document.querySelectorAll('.task-card').length===36);
     assert.equal(await viewer.locator('.task-card[aria-current="true"] .card-meta span').first().textContent(),'#2');
-    assert(Math.abs((await viewer.locator('.task-panel').evaluate(node=>node.scrollTop))-panelTop)<=1,'live refresh moved the mobile task list');
+    assert(Math.abs((await viewer.locator('#task-page .task-panel').evaluate(node=>node.scrollTop))-panelTop)<=1,'live refresh moved the mobile task list');
   }finally{await viewer.close();}
+  await projectSmoke({browser,url,token,readerToken,cli,temp,root});
   assert.deepEqual(errors,[]);console.log('PASS: browser lifecycle, CAS, Worktree safety, persistent connection, reader write refusal and external CLI SSE updates');
  }catch(error){if(page){await page.screenshot({path:path.join(root,'.local/m5-failure.png'),fullPage:true}).catch(()=>{});console.error('Action error:',await page.locator('#action-error').textContent().catch(()=>''));}throw error;}finally{
   if(page){if(process.exitCode)await page.screenshot({path:path.join(root,'.local/m5-failure.png'),fullPage:true}).catch(()=>{});}

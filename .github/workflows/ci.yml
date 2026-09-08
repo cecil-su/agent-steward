@@ -52,8 +52,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rust tests
         run: cargo test --workspace --all-targets --locked
-      - name: Native adapter and browser connection tests
-        run: node --test integrations/tests/native.test.mjs crates/server/tests/browser/*.test.cjs
+      - name: Native adapters, Pi evidence and browser contract tests
+        run: node --test integrations/tests/native.test.mjs integrations/tests/pi-context.test.mjs crates/server/tests/browser/*.test.cjs
       - name: Windows launcher and update safety tests
         if: runner.os == 'Windows'
         shell: powershell

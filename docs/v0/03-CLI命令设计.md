@@ -1,5 +1,7 @@
 # CLI 命令设计
 
+Project 的 `##ID`/唯一名称、`project create/show/list/rename/history`、`task create/list --project`、`task project/components`、`project component/source/here/context` 及 context 新字段见 [项目与上下文复用合同](16-项目与上下文复用.md)。当前开发数据库 Schema 4 只初始化空库，不升级 Schema 2/3 旧库；JSON envelope 仍为 2。本文其余部分保留 Task/Session/Worktree 基础合同。
+
 ## 1. 通用约定
 
 ```bash

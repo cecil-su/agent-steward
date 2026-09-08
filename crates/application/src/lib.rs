@@ -1,9 +1,19 @@
 mod db;
+mod host_context;
+pub use host_context::{HostContextRequest, HostInstance};
+mod host_evidence;
+pub use host_evidence::{HostEvidenceAssessment, assess_host_evidence};
 mod hooks;
 mod migration;
 pub use hooks::HookEventInput;
 mod permissions;
 pub use permissions::database_permission_warning;
+mod project_context;
+mod projects;
+pub use project_context::ProjectContextOptions;
+mod sources;
+pub use git_adapter::GitReadControl;
+pub use sources::SourceLocation;
 mod sessions;
 mod tasks;
 mod worktrees;
@@ -27,6 +37,7 @@ pub struct ErrorBody {
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskListOptions {
+    pub project: Option<String>,
     pub status: Option<String>,
     pub task_key: Option<String>,
     pub query: Option<String>,
@@ -267,6 +278,7 @@ impl AppError {
 
     pub fn from_git(error: GitError, input_path: Option<&str>) -> Self {
         match error {
+            GitError::ReadLimit(reason) => Self::new("GIT_READ_LIMIT", reason, false, json!({}), 5),
             GitError::PathIdentity(reason) => Self::new(
                 "PATH_IDENTITY_UNKNOWN",
                 "path identity could not be established",

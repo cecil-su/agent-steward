@@ -6,8 +6,9 @@ import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { register } from "../pi/steward.mjs";
 
-const binary = resolve("target/debug/task-hook");
-const cli = resolve("target/debug/taskctl");
+const target = resolve(process.env.CARGO_TARGET_DIR || "target");
+const binary = join(target, "debug/task-hook");
+const cli = join(target, "debug/taskctl");
 const secret = "synthetic-private-prompt-and-token";
 function fixture(source) {
   const dir = mkdtempSync(join(tmpdir(), "steward-native-"));

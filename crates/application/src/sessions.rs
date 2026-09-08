@@ -31,9 +31,39 @@ impl Service {
             .as_deref()
             .map(|id| load_session(&tx, id))
             .transpose()?;
+        let project = task
+            .project_id
+            .map(|id| crate::projects::load_project(&tx, id))
+            .transpose()?;
+        let checkpoint_sequence: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM history WHERE task_id=?1 AND change_type='checkpoint.saved' AND json_extract(payload_json,'$.checkpointId')=?2",
+            params![task.id, task.latest_checkpoint_id], |row| row.get(0),
+        ).map_err(AppError::from_sqlite)?;
+        let mut notes = {
+            let mut statement = tx.prepare(
+                "SELECT n.id,n.task_id,n.session_id,n.note_type,n.text,n.created_at FROM task_notes n
+                 JOIN history h ON h.task_id=n.task_id AND h.change_type='task.noted' AND json_extract(h.payload_json,'$.noteId')=n.id
+                 WHERE n.task_id=?1 AND h.sequence>?2 ORDER BY h.sequence DESC LIMIT 51"
+            ).map_err(AppError::from_sqlite)?;
+            statement
+                .query_map(
+                    params![task.id, checkpoint_sequence],
+                    crate::db::note_from_row,
+                )
+                .map_err(AppError::from_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(AppError::from_sqlite)?
+        };
+        let notes_truncated = notes.len() > 50;
+        notes.truncate(50);
+        notes.reverse();
         tx.commit().map_err(AppError::from_sqlite)?;
         let mut outcome = Outcome::new(json!({"task": task, "checkpoint": checkpoint,
-            "session": session, "worktreeStatus": null}));
+            "session": session, "project": project, "notesSinceCheckpoint": notes,
+            "notesTruncated": notes_truncated, "worktreeStatus": null}));
+        if notes_truncated {
+            outcome.warnings.push(warning("CONTEXT_NOTES_TRUNCATED", "Only the latest 50 notes after the checkpoint are included; use task notes to read all notes", json!({"taskId":task.id})));
+        }
         if let (Some(repo), Some(common), Some(path), Some(branch)) = (
             task.repository_path.as_deref(),
             task.repository_common_dir.as_deref(),
@@ -721,7 +751,8 @@ impl Service {
                 "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
                         block_reason,block_recovery,current_session_id,repository_path,
                         repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
-                        closure_outcome,closure_reason,closed_at,created_at,updated_at
+                        closure_outcome,closure_reason,closed_at,created_at,updated_at,project_id,
+                        (SELECT json_group_array(component_id) FROM (SELECT component_id FROM task_components WHERE task_id=tasks.id ORDER BY component_id))
                  FROM tasks WHERE worktree_path IS NOT NULL ORDER BY id",
             )
             .map_err(AppError::from_sqlite)?;
