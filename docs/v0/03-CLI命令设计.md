@@ -1,6 +1,6 @@
 # CLI 命令设计
 
-Project 的 `##ID`/唯一名称、`project create/show/list/rename/history`、`task create/list --project`、`task project/components`、`project component/source/here/context` 及 context 新字段见 [项目与上下文复用合同](16-项目与上下文复用.md)。当前开发数据库 Schema 4 只初始化空库，不升级 Schema 2/3 旧库；JSON envelope 仍为 2。本文其余部分保留 Task/Session/Worktree 基础合同。
+Project 的 `##ID`/唯一名称、`project create/show/list/rename/history`、`task create/list --project`、`task project/components`、`project component/source/here/context` 及 context 新字段见 [项目与上下文复用合同](16-项目与上下文复用.md)。当前开发数据库 Schema 4 的普通连接只初始化空库，不隐式升级 Schema 2/3 旧库；JSON envelope 仍为 2。本文其余部分保留 Task/Session/Worktree 基础合同。
 
 ## 1. 通用约定
 
@@ -21,6 +21,10 @@ taskctl [global-options] <domain> <action> [subaction] [arguments] [options]
 ### 显式离线归档迁移
 
 `taskctl --database <不存在的新库绝对路径> --json --yes database import-v7 --source <旧v7快照绝对路径>` 只读源库，保留闭合任务的 ID、版本、时间戳及全部业务记录。拒绝活动任务、Worktree 绑定和既有目标。它不是 Task mutation，不生成新业务 History、不切换默认库。完整限制和验收见 [v7归档迁移](13-v7归档迁移.md)。
+
+### 显式 Schema 2 快照复制
+
+`taskctl --database <不存在的新库绝对路径> --json --yes database import-schema2 --source <停写Schema2快照绝对路径>` 支持活动/关闭任务、Session/Checkpoint、Import 和 Hook 墓碑。源只读，目标须有私有父目录（不存在时仅新建最后一级），禁止覆盖、合并、默认库回退或服务切换。返回七表计数/摘要与四类序列高水位；`sourceQuiescenceVerified:false` 明确不能以读事务或并发复查代替停写。Schema 3 不在支持范围。实现与 Windows 验证见 [Schema2到4迁移](18-Schema2到4迁移与隔离演练.md)。
 
 ## 2. Task
 

@@ -69,6 +69,11 @@ enum TopCommand {
 
 #[derive(Debug, Subcommand)]
 enum DatabaseCommand {
+    /// Copy a quiescent Schema 2 snapshot into a new Schema 4 database; never switches services.
+    ImportSchema2 {
+        #[arg(long)]
+        source: PathBuf,
+    },
     /// Copy a legacy v7 closed-task archive into a new current-schema database.
     ImportV7 {
         #[arg(long)]
@@ -505,6 +510,14 @@ fn main() -> ExitCode {
             );
         }
     };
+    // Offline imports must not even fall back to inspecting the default database path.
+    if matches!(cli.command, TopCommand::Database { .. }) && cli.database.is_none() {
+        return render_error(
+            AppError::invalid("database", "explicit destination --database is required"),
+            cli.json,
+            Vec::new(),
+        );
+    }
     let database = match cli.database.clone().or_else(default_database_path) {
         Some(path) => path,
         None => {
@@ -538,16 +551,19 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
     match &cli.command {
-        TopCommand::Database {
-            command: DatabaseCommand::ImportV7 { source },
-        } => {
+        TopCommand::Database { command } => {
             if cli.database.is_none() {
                 return Err(AppError::invalid(
                     "database",
                     "explicit destination --database is required",
                 ));
             }
-            service.import_legacy_v7(source, cli.yes)
+            match command {
+                DatabaseCommand::ImportV7 { source } => service.import_legacy_v7(source, cli.yes),
+                DatabaseCommand::ImportSchema2 { source } => {
+                    service.import_schema2(source, cli.yes)
+                }
+            }
         }
         TopCommand::Hook { command } => match command {
             HookCommand::Ingest => {

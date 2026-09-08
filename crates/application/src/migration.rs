@@ -1,4 +1,5 @@
-//! Explicit, offline v7 archive import. Never opens the source through the current initializer.
+//! Explicit offline database copies. Never opens sources through the current initializer.
+mod schema2;
 use std::{fs, path::Path, time::Duration};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter, types::Value};

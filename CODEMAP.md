@@ -73,6 +73,7 @@ flowchart LR
 | SQL 映射 | [`crates/application/src/db.rs`](crates/application/src/db.rs) | 数字/`#数字`/`taskKey` 引用解析、常用查询、row 到 DTO 的转换、version 检查、Task version 递增和 History 插入 |
 | 核心合同 | [`crates/core/src/lib.rs`](crates/core/src/lib.rs) | Task 状态、输入/输出 DTO、共享校验、默认数据目录和跨平台私有权限工具 |
 | v7 归档迁移 | [`crates/application/src/migration.rs`](crates/application/src/migration.rs) | 显式只读 v7 归档、闭合任务范围校验、逐字段复制核验、新库不覆盖发布；`database import-v7` |
+| Schema 2 显式复制 | [`crates/application/src/migration/schema2.rs`](crates/application/src/migration/schema2.rs) | `database import-schema2`：冻结布局、七表/四序列复制、数据/身份复查、私有暂存及不覆盖发布；不探测历史外部路径。失败/强杀测试在同名子目录，CLI 边界见 `crates/cli/tests/schema2_contract.rs`，真实启动重启见 `crates/server/tests/schema2_startup.rs`；跨版本合成脚本 `crates/cli/tests/schema2_rehearsal.py` |
 | SQLite 基础设施 | [`crates/storage-sqlite/src/lib.rs`](crates/storage-sqlite/src/lib.rs) | 数据库打开、busy timeout、外键、WAL、单一 Schema 原子初始化和数据库路径规范化 |
 | Git 基础设施 | [`crates/git-adapter/src/lib.rs`](crates/git-adapter/src/lib.rs) | CanonicalPath、含实时 common-dir 关联复核的 Repository identity、任务级 advisory lock、Worktree 命令和实时状态 |
 | Git 读取资源边界 | [`crates/git-adapter/src/read_process.rs`](crates/git-adapter/src/read_process.rs) | 流式双输出上限、共享读截止时间/取消作用域、Windows Job / Unix 进程组清理；HTTP Source resolve/context、Task context/worktree-status、doctor 共用，不套用普通 Worktree 写取消 |
@@ -180,7 +181,7 @@ Git 命令不得在 SQLite 写事务中执行。`create/remove/adopt/detach` 持
 - Task 的 title/goal/scope/acceptanceCriteria 初始可空以支持最小创建和增量补全；设置为字符串后不可清空，`close completed` 前四项必须完整。新写入的 title 必须符合 `MMDD｜类型｜主题`；closed Task 只能通过 CAS `retitle` 修正 title，不得借此重开或修改其他字段。
 - Task mutation 与对应 History 必须在同一事务中提交或回滚；Worktree 创建的数据库阶段失败时，先释放事务，再观察现场并生成恢复建议。
 - Task list 游标用固定长度 SHA-256 摘要绑定 status/taskKey/query 筛选，排序固定为 `updatedAt DESC, id ASC`；字段投影不参与游标计算，默认 JSON 仍返回完整 TaskView。
-- 普通数据库连接只支持当前单一 Schema；仅空数据库允许初始化，不提供隐式旧版本升级。独立 `database import-v7` 只读旧版已关闭任务归档，并向不存在的新库发布校验后的副本，不改源、不合并、不自动切换配置。
+- 普通数据库连接只支持当前单一 Schema；仅空数据库允许初始化，不提供隐式旧版本升级。独立 `database import-v7` 只读旧版已关闭任务归档，并向不存在的新库发布校验后的副本，不改源、不合并、不自动切换配置。`database import-schema2` 单独支持 Schema 2 停写快照（含活动任务与观测墓碑），不放宽普通连接的旧版本拒绝；一致快照与 data_version 复查不替代停止写入者。
 - Task 的 Repository、common-dir、Branch、Worktree 四个引用必须全有或全空。
 - 路径先从最近已存在祖先规范化；规范化目标完全相同时直接判等，两条路径都存在时比较文件对象身份。缺失路径只接受规范化后的精确拼写，不探测或模拟大小写及 Unicode 比较规则，也不持久化路径比较键。`create/adopt` 在写事务内扫描现有引用，确保同一实际 Worktree 只有一个 Task；中文路径可以创建、采纳和清理。
 - Repository identity 复核不仅验证原 Repository 根和 common-dir 文件对象仍存在且未被替换，还必须重新解析当前 `git rev-parse --git-common-dir` 并证明关联仍指向原 common-dir。
