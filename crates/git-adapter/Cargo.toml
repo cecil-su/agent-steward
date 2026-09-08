@@ -13,6 +13,9 @@ sha2.workspace = true
 steward-core = { path = "../core" }
 thiserror.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 

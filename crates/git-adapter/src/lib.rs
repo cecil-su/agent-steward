@@ -52,11 +52,23 @@ pub struct TargetPathIdentity {
     existing_ancestor: ExistingPathIdentity,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct FileObjectIdentity {
     first: u64,
     second: u64,
+    // Pin the object until the last identity snapshot is dropped. Without this,
+    // Linux can reuse an unlinked inode before the path is checked again.
+    #[cfg(target_os = "linux")]
+    _handle: std::sync::Arc<File>,
 }
+
+impl PartialEq for FileObjectIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        (self.first, self.second) == (other.first, other.second)
+    }
+}
+
+impl Eq for FileObjectIdentity {}
 
 #[derive(Debug, Clone)]
 pub struct ObservedWorktree {
@@ -301,12 +313,32 @@ fn verify_same_identity<T: PartialEq>(
 fn file_object_identity(path: &Path) -> Result<FileObjectIdentity, GitError> {
     use std::os::unix::fs::MetadataExt;
 
+    #[cfg(target_os = "linux")]
+    let handle = {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_PATH pins metadata without opening a FIFO/device for I/O or requiring
+        // read permission. Derive dev/ino from this handle, not another path lookup.
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|error| {
+                GitError::PathIdentity(format!("cannot pin {}: {error}", path.display()))
+            })?
+    };
+    #[cfg(target_os = "linux")]
+    let metadata = handle.metadata().map_err(|error| {
+        GitError::PathIdentity(format!("cannot inspect {}: {error}", path.display()))
+    })?;
+    #[cfg(not(target_os = "linux"))]
     let metadata = fs::metadata(path).map_err(|error| {
         GitError::PathIdentity(format!("cannot inspect {}: {error}", path.display()))
     })?;
     Ok(FileObjectIdentity {
         first: metadata.dev(),
         second: metadata.ino(),
+        #[cfg(target_os = "linux")]
+        _handle: std::sync::Arc::new(handle),
     })
 }
 
@@ -800,13 +832,63 @@ mod tests {
         fs::create_dir(&ancestor).unwrap();
         let identity = identify_target(&ancestor.join("worktree")).unwrap();
 
-        fs::remove_dir(&ancestor).unwrap();
+        // Keep the old object alive so the fixture never relies on inode allocation.
+        fs::rename(&ancestor, temp.path().join("original-ancestor")).unwrap();
         fs::create_dir(&ancestor).unwrap();
 
         assert!(matches!(
             verify_target_identity(&identity),
             Err(GitError::PathIdentity(_))
         ));
+    }
+
+    #[test]
+    fn target_identity_allows_changes_inside_same_ancestor() {
+        let temp = tempfile::tempdir().unwrap();
+        let identity = identify_target(&temp.path().join("worktree")).unwrap();
+        fs::write(temp.path().join("unrelated-file"), "updated").unwrap();
+        verify_target_identity(&identity).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deleted_ancestor_cannot_reuse_a_cloned_identity_inode() {
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path().join("ancestor");
+        fs::create_dir(&ancestor).unwrap();
+        let original = identify_target(&ancestor.join("worktree")).unwrap();
+        let identity = original.clone();
+        drop(original);
+
+        for _ in 0..128 {
+            fs::remove_dir(&ancestor).unwrap();
+            fs::create_dir(&ancestor).unwrap();
+            let current = identify_target(&ancestor.join("worktree")).unwrap();
+            assert_ne!(identity, current, "replacement reused the pinned inode");
+            assert!(matches!(
+                verify_target_identity(&identity),
+                Err(GitError::PathIdentity(_))
+            ));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identity_handles_are_metadata_only_and_close_on_exec() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("unreadable");
+        fs::write(&path, "private").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let identity = identify_existing(&path).unwrap();
+        let fd = identity.object._handle.as_raw_fd();
+        // The borrowed descriptor remains owned by identity for both fcntl calls.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0 && flags & libc::O_PATH != 0);
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
     }
 
     #[test]
@@ -817,7 +899,7 @@ mod tests {
         git_output(&repository, ["init", "-b", "main"], "test setup").unwrap();
         let info = repository_info(&repository).unwrap();
 
-        fs::remove_dir_all(&repository).unwrap();
+        fs::rename(&repository, temp.path().join("original-repository")).unwrap();
         fs::create_dir(&repository).unwrap();
         git_output(&repository, ["init", "-b", "main"], "test setup").unwrap();
 
