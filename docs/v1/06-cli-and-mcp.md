@@ -27,6 +27,10 @@
 
 principal、actingActor、session/assignment scope、causationId 和服务端 event metadata 不属于可覆盖参数。以下示例对并发敏感的核心写命令显式列出 Envelope；为保持命令族简洁而使用 `create|list|show` 等合并写法时，实际写子命令仍必须在 help、JSON schema 和服务端校验中强制适用字段。
 
+### 只读诊断（阶段 A–C，候选入口）
+
+`stewardctl doctor [--json]` 复用已授权 Query，返回问题类别、观察时间、当前事实与下一步，不自动修复或建立诊断权威表。阶段 C 接入诊断区分能力覆盖、契约验证、当前环境与真实接续；详细规则见 [第 21 篇第 8–9 节](21-continuity-and-review-contracts.md)。未实现的能力显示未支持，无法观察的状态显示 unknown；不自动连接模型或更改宿主配置。
+
 ## 2. CLI 命令族
 
 ### 身份和会话（按接入能力启用）
@@ -62,28 +66,45 @@ stewardctl worktree show|rescan <worktree-id>
 ### 任务与 Review（阶段 A/B）
 
 ```bash
-stewardctl task list [--status ...] [--json]
+stewardctl task list [--status ...] [--view needs-input] [--json]
 stewardctl task show <task-id-or-external-id>
 stewardctl task confirmations <task-id>
 stewardctl task create [--workspace <workspace-id>] [--repo <repository-id>] [--worktree <worktree-id>] --idempotency-key <key>
 stewardctl task update <task-id> --input <task-patch.json> --expected-version <n> --idempotency-key <key>
 stewardctl task comment <task-id> --input <record.json> --expected-task-version <n> --idempotency-key <key>
 stewardctl task transition <task-id> --to <status> --expected-version <n> --idempotency-key <key>
+stewardctl task block <task-id> --input <blocker.json> --expected-version <n> --idempotency-key <key>
+stewardctl task unblock <task-id> --input <resolution.json> --expected-version <n> --idempotency-key <key>
 stewardctl task assign <task-id> --actor <actor-id> --expected-version <n> --idempotency-key <key>
+stewardctl review show <submission-id>
+stewardctl review withdraw <submission-id> --reason <text> --expected-task-version <n> --expected-submission-version <n> --idempotency-key <key>
 stewardctl review submit <task-id> --evidence <artifact-link-id>@<expected-link-version>... --expected-task-version <n> --idempotency-key <key>
 stewardctl review accept <submission-id> --expected-task-version <n> --expected-submission-version <n> --idempotency-key <key>
 stewardctl review request-changes <submission-id> --expected-task-version <n> --expected-submission-version <n> --idempotency-key <key>
 stewardctl task audit [<task-id>]
 ```
 
-`task update` 只更新 schema 允许的目标、下一步、优先级、描述等字段，不接受 status/owner/actingActor 覆盖；生命周期与分配使用专用命令。`task comment` 追加进度、决策、约束或操作说明及来源，用户确认通过受控用户入口表达，AI 不能自称已获确认。具体字段与 Review 期间编辑行为在 D-020/D-024 冻结。
+`task update` 只更新 schema 允许的目标、下一步、优先级、描述等字段，不接受 status/owner/actingActor 覆盖；生命周期与分配使用专用命令。`task comment` 追加进度、决策、约束或操作说明及来源，用户确认通过受控用户入口表达，AI 不能自称已获确认。Comment 为独立追加记录，不递增 Task version；Review 中的业务编辑返回 REVIEW_LOCKED，先 withdraw 再修改。字段见第 21 篇，物理存储尚待 D-024。
 
-通用 `task transition` 不允许直接进入 Review 或 Done：这两个入口分别只由 `review submit` 和 `review accept` 提供。`review submit` 校验每个 source Link 的 expectedVersion、active 状态、权限及 Artifact contentHash，并在一个事务中为 ReviewSubmission 创建独立 active `review_evidence` Link、固定 submittedTaskVersion/acceptanceCriteriaHash/evidenceSetHash、创建新的 reviewCycle 并把 Task 推进 Review。`review accept` 同时比较 Task/Submission 版本、已固定 hash，以及每个 submission-owned evidence Link 的 active 状态、版本和 contentHash；成功时在一个事务创建 accepted ReviewDecision、结束 Submission 并推进 Done。`review request-changes` 同样原子创建 Decision 并退回 In Progress。Done 重新打开固定回到 In Progress，旧 submissionId 只能读取，下一次 submit 必须创建新的 reviewCycle。
+通用 `task transition` 不允许直接进入 Blocked、从 Blocked 恢复或从 Review 直接退出，分别使用 block/unblock 与 Review 专用命令。进入 Review 或 Done 也不允许通过通用 transition：这两个入口分别只由 `review submit` 和 `review accept` 提供。`review submit` 校验每个 source Link 的 expectedVersion、active 状态、权限及 Artifact contentHash，并在一个事务中为 ReviewSubmission 创建独立 active `review_evidence` Link、固定 submittedTaskVersion/acceptanceCriteriaHash/evidenceSetHash（含正文与 descriptor hash）、创建新的 reviewCycle 并把 Task 推进 Review。`review accept` 同时比较 Task/Submission 版本、已固定 hash，以及每个 submission-owned evidence Link 的 active 状态、版本、contentHash 和 descriptorHash；成功时在一个事务创建 accepted ReviewDecision、结束 Submission 并推进 Done。`review request-changes` 同样原子创建 Decision 并退回 In Progress。Done 重新打开固定回到 In Progress，旧 submissionId 只能读取，下一次 submit 必须创建新的 reviewCycle。
+
+`review show` 返回第 21 篇的派生交付摘要；固定的提交事实和后来 Git 观察分列，不改变 Task。withdraw 由当前 Owner 或有管理权限的用户调用，校验当前版本和唯一 pending Submission，原子退回 In Progress，保存 reason 与审计；不要求旧 submittedTaskVersion 等于当前 Task version。accept、request-changes 与 withdraw 竞争时最多一个成功。
+
+blocker 必须包含 reason、责任人或角色、requiredInput、resumeCondition；unblock 提交 resolution，不自动审批用户决定。needs-input 只读派生 Blocked/Review，不创建 Attention 状态。
+
+### 证据登记（阶段 A）
+
+```bash
+stewardctl artifact attach <task-id> --file <path> [--descriptor <descriptor.json>] --expected-task-version <n> --idempotency-key <key>
+stewardctl artifact read --link <artifact-link-id>
+```
+
+attach 在 ingest 时复制内容并生成稳定 Artifact/Link，不能只保存会变化的本地路径。descriptor 可提交 assertion、kind、报告结果与引用，origin/producer/hash 由核心派生；Agent 不得提交可信来源覆盖字段。只有已有可信采集入口的结果可被标为 system_observation/tool_result；本命令不执行报告中记载的命令。返回 artifactId/linkId/version/contentHash/descriptorHash，供 Review 固定。正文与 descriptor 一起遵守 publish-before-reference；写入 Task 证据关系会更新 Task version，因此 Review 期间先 withdraw。
 
 ### TaskCheckpoint 与恢复上下文（阶段 A；阶段 C 复用）
 
 ```bash
-stewardctl task context <task-id>
+stewardctl task context <task-id> [--max-bytes <n>]
 stewardctl task checkpoint create <task-id> --input <checkpoint.json> --expected-task-version <n> --idempotency-key <key>
 stewardctl task checkpoint list <task-id>
 stewardctl task checkpoint show <checkpoint-id>
@@ -91,7 +112,9 @@ stewardctl task checkpoint show <checkpoint-id>
 
 context 返回当前目标、状态、owner、下一步、约束与决策、最近 Checkpoint、证据引用，以及带观察时间的 Git 状态。发现过期或缺失内容时显式返回差异，不声称 SQLite 与 Git 是同一原子快照。
 
-Checkpoint schema 见第 05 篇与 D-024；不要求 sessionId、Assignment 或 Runtime。AI 使用服务端绑定 Task scope 调用同一命令；可选外部会话引用只作 provenance。
+context 的预算、必需事实、truncated/omittedSections/continuationRefs 见第 21 篇；这只限制本工具响应，不估算宿主完整窗口。核心事实放不下时返回 CONTEXT_BUDGET_TOO_SMALL。Checkpoint 追加不递增 Task version，保存失败必须返回明确错误。
+
+Checkpoint schema 见第 05/21 篇与 D-024；不要求 sessionId、Assignment 或 Runtime。AI 使用服务端绑定 Task scope 调用同一命令；可选外部会话引用只作 provenance。
 
 ### Assignment/Agent（可选阶段 D）
 
@@ -184,7 +207,7 @@ FactRevision confirm 在一个事务中比较 BusinessFact version、candidate r
 
 ## 3. MCP 工具候选
 
-阶段 C 只暴露 Task 查询、task_update/task_comment_create、task_context、task_checkpoint_create/list/get、进度/阻塞写入与 review_submit 的限定子集。review_accept/request-changes 的 AI Reviewer capability、Assignment/Agent/ContextWindow 工具均为后续能力，不能据下面完整候选表推断为阶段 C 必交付。阶段 C 的验收由用户入口执行。
+阶段 C 可先以接续 CLI Skill 验证，再按需交付 MCP。MCP 子集为 Task 查询、task_update/task_comment_create、task_block/task_unblock、task_context、task_checkpoint_create/list/get、artifact_attach/read 与 review_submit/show；当前 Owner 有权限时可 review_withdraw。review_accept/request-changes 的 AI Reviewer capability、Assignment/Agent/ContextWindow 工具均为后续能力，不能据下面完整候选表推断为阶段 C 必交付。阶段 C 的验收由用户入口执行。
 
 
 ### 只读
@@ -203,6 +226,8 @@ task_context
 task_checkpoint_list
 task_checkpoint_get
 review_submission_get
+review_show
+artifact_read
 task_get_next
 task_audit
 event_inspect
@@ -231,10 +256,14 @@ drift_finding_get
 task_create
 task_update
 task_comment_create
+task_block
+task_unblock
+artifact_attach
 task_checkpoint_create
 task_transition
 task_assign_owner
 review_submit
+review_withdraw
 review_accept
 review_request_changes
 assignment_create
@@ -280,16 +309,9 @@ History、WorkingNote 与 Mapping MCP 契约要求：
 
 ## 4. MCP Connection 绑定
 
-MCP Server 启动时由可信宿主或 taskd 绑定：
+阶段 C 由可信入口绑定 principalId、actingActor、Task scope 和适用 capability；可选外部 session reference 只作来源。阶段 D 启用受管 Runtime 后才额外绑定 sessionId、assignmentId、invocationId 与 runtime identity。普通工具参数不得覆盖这些事实。
 
-- principalId
-- sessionId
-- assignmentId
-- invocationId
-- grant/capability
-- runtime identity
-
-这些事实不能由普通 tool arguments 覆盖。
+接续 CLI Skill 只指导读取、写入与保存 Checkpoint，不签发权限或扩大 scope；交付与失败验收见第 21 篇。Skill 版本跟随 CLI JSON/schema，不另写状态规则。
 
 ## 5. 错误契约
 
@@ -316,6 +338,8 @@ MCP Server 启动时由可信宿主或 taskd 绑定：
 - IDEMPOTENCY_KEY_REUSED
 - STALE_OWNER_EPOCH
 - LEASE_CONFLICT
+- REVIEW_LOCKED
+- CONTEXT_BUDGET_TOO_SMALL
 - INVALID_TRANSITION
 - PLAN_EXPIRED
 - GIT_FACT_CHANGED

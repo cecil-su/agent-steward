@@ -57,7 +57,7 @@ exploration/knowledge 后续探索，不进入首版依赖图
 5. 恢复查询读取当前 Task、最近 Checkpoint、决策与证据，再读取 Git 现场；两种事实各自标明版本或观察时间，不声称跨 SQLite/Git 原子读取。
 6. 使用事件同步时，snapshot 与 eventWatermark 来自同一 SQLite read transaction。cursor 过期强制重取 snapshot；未知事件 schema 不得猜读。
 
-Review 期间修改与撤回、restore generation、Runtime 重试目标解析等未闭合契约见 D-020–D-022。规划调整不等于这些技术问题已经解决。
+Review 编辑采用 D-020/第 21 篇的显式撤回规则；证据元数据、派生 ReviewSummary、结构化 blocker 和有界恢复查询均复用现有核心，不引入独立 Evidence/Attention/Handoff 状态系统。restore generation 与 Runtime 重试目标仍待 D-021/D-022 关闭。
 
 ## 备份与长操作
 

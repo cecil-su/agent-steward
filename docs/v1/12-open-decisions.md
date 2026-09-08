@@ -16,7 +16,7 @@
 
 冻结创建、开始、阻塞、恢复、提交验收、返工、取消、重开及归档的合法转换和 owner/nextAction 条件。Done 只由用户显式 accept 产生，重新打开进入 In Progress。
 
-首版不要求父子任务、复杂依赖、自动选任务或周期模板。Review 期间编辑与撤回问题见 D-020，不能留待实现者猜测。
+首版不要求父子任务、复杂依赖、自动选任务或周期模板。Review 期间编辑与撤回遵循已冻结的 D-020；block/unblock 采用第 21 篇的 In Progress → Blocked → In Progress，其余生命周期细节仍需冻结。
 
 ### D-015 事件与恢复后同步
 
@@ -38,11 +38,11 @@
 
 首期采用显式维护停写备份，冻结如何排除全部 writer/worker、验证 SQLite 与可选 Blob、发布和恢复整套数据。在线备份的 operation/pin/generation 协议仅在实际需要在线服务时扩展；恢复的跨代失效问题仍必须先解决。
 
-### D-020 Review 编辑与撤回
+### D-020 Review 编辑与撤回（设计已冻结，待实现验证）
 
-未解决：accept/request-changes 要求 current Task version 等于 submittedTaskVersion；更换 owner 或编辑 Task 后可能同时无法验收和返工。
+采用显式 withdraw：Review 期间锁定 Task 业务编辑、owner/绑定变化、取消与归档；Comment/TaskCheckpoint 是不递增 Task version 的独立追加记录。withdraw 使用当前 Task/Submission 版本，由有权限的当前 Owner 或用户原子终结 pending Submission 并退回 In Progress，不要求等于旧 submittedTaskVersion。旧证据保留，新 submit 创建新 cycle。
 
-编码前选择并定义：禁止哪些 Review 期间编辑，哪些编辑原子撤回 Submission，以及显式 withdraw 如何使用当前版本退回 In Progress。旧 Submission 与证据保留，新 submit 创建新 cycle。仅有 withdrawn 枚举不算完整契约。
+完整约束与竞争验收见[第 21 篇 J-02](21-continuity-and-review-contracts.md)。D-020 设计选择已关闭，测试通过前不能标为已验证。
 
 ### D-021 Restore generation
 
@@ -54,7 +54,9 @@
 
 冻结不依赖 Assignment/Session/ContextWindow 的 TaskCheckpoint schema：Task/version、当前 owner 引用、进度说明、唯一下一步、未决问题、决策与证据引用、Git 观察时间，以及 partial/missingRefs。
 
-确定首版证据保存 SQLite 小内容还是 Artifact Blob，以及不可变、大小、读取权限、保留和维护备份要求。普通文件路径可作为定位线索，不能把会变化或丢失的文件路径宣称为已固定的 Review evidence。
+语义已补充：TaskCheckpoint/Comment 独立追加不递增 Task version；EvidenceDescriptor 为 Artifact 不可变元数据，包含来源与适用范围并随 Review 固定 hash；ReviewSummary 为只读投影，Task.blocker 为结构化当前阻塞，详见第 21 篇。
+
+仍需确定 SQLite 小内容与 Artifact Blob 的物理布局、字段大小、读取权限、保留和维护备份实现。普通文件路径可作为定位线索，不能把会变化或丢失的文件路径宣称为已固定的 Review evidence。
 
 ## 阶段 B 前
 
@@ -71,6 +73,8 @@ CLI 先覆盖完整闭环。根据实际任务样本选择一个 TUI 或 GUI 用
 ### D-016 现有 AI 会话接入
 
 冻结受控 CLI/MCP 的身份建立、Task scope、owner 变更失效、上下文查询和进度/Checkpoint/完成候选写入。AI 不能自行声明 Human 身份或自动关闭任务。
+
+第 21 篇已定义有界 context 响应、按权限展开、截断失败规则和接续 CLI Skill。先通过 CLI 验证现有会话接续，再评估 MCP；不把完整宿主 token 预算或窗口控制引入本阶段。
 
 这个阶段不要求 Runtime Adapter、Assignment、spawn/resume 或 Session importer。若需要会话关联，只保存可选外部 session reference，不将其变成 Task 的父对象。
 
@@ -98,7 +102,7 @@ CLI 先覆盖完整闭环。根据实际任务样本选择一个 TUI 或 GUI 用
 
 未解决：先解析 active Run 再计算 requestHash，会让 close 成功后的重试找不到 Run，或在新 Run 出现后解析到不同目标。
 
-冻结首次请求目标与重试匹配顺序：命中 Receipt 使用持久化 Run/Handle 并重验读取权限；只有首次请求解析 active Run，或命令显式绑定 agentRunId。必须覆盖响应丢失后 close 重试及 Run 替换测试。
+冻结首次请求目标与重试匹配顺序：命中 Receipt 使用持久化 Run/Handle 并重验读取权限；只有首次请求解析 active Run，或命令显式绑定 agentRunId。必须覆盖响应丢失后 close 重试及 Run 替换测试。第 08 篇已列出恢复不变量，但不代表本决策的命令标识/Receipt 匹配协议已冻结；该问题仅阻塞阶段 D 的控制实现。
 
 ### D-004 Git 写入策略
 

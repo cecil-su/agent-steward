@@ -25,7 +25,7 @@
 - owner 和下一步用于明确责任；普通人类任务不需要 AI grant 才能成立。
 - 提交 Review 时固定验收条件、Task 版本和证据；用户可以验收或要求返工。
 - 同一用户可以推进自己的任务并显式验收；AI 不得以完成声明自动写 Done。
-- Review 期间编辑、撤回及重新提交的规则必须在编码前关闭，避免版本变化后无法返工。
+- Review 期间锁定 Task 业务编辑；先显式 withdraw 再修改和重提。Comment/Checkpoint 追加不改变 Task 版本，详见第 21 篇与 D-020。
 
 ### FR-004 最小代码上下文与本地恢复
 
@@ -34,6 +34,18 @@
 - 登记、刷新、解除关联均不修改 Git 或删除目录；全盘发现、移动自动跟踪和多 Workspace 管理可延后。
 - SQLite 保存当前状态、版本、幂等记录和领域事件。首期采用明确停写的维护备份与隔离验证恢复。
 - 如引入 Blob 证据，发布与引用必须满足 publish-before-reference；不以简化范围为由允许悬空引用。
+
+### FR-005 最小证据语义
+
+- Artifact 可附不可变 EvidenceDescriptor，区分验证问题、适用现场、结果、观察时间、来源和正文引用。
+- origin 由可信入口分配；AI/导入声明不得自称工具观察。Review 固定正文与 descriptor hash，显示 unknown/not_run 和适用性缺失。
+- 不新增 Evidence 状态机；passed 不自动完成任务。详细字段见[接续与验收合同](21-continuity-and-review-contracts.md)。
+
+### FR-006 结构化阻塞
+
+- Task.blocker 明确 reason、责任人或角色、所需输入、恢复条件与来源；不只记录“等待用户”。
+- block/unblock 使用 Task 版本、权限与事件；当前阻塞解除后保留历史原因和 resolution。
+- needs-input 从 Blocked/Review 派生，不另建 Attention 队列。
 
 ## 阶段 B：日常接续与证据复核
 
@@ -51,6 +63,12 @@
 - 项目约束、关键决策和操作说明可以作为带来源的简单记录链接到任务；人工选择复用，不自动推断长期事实。
 - 子任务、依赖、看板、SavedView、通知和模板仅在主线稳定且有真实使用证据后安排。
 
+### FR-103 Review 交付摘要（CLI 随阶段 A，薄界面随阶段 B）
+
+- CLI review show 与薄界面按同一 Submission 投影改动、证据、未完成项和用户决定。
+- 本地修改、commit、push 分别显示来源与观察时间；未知不当作成功或未执行。
+- 摘要可重建，不保存第二套 Handoff 状态，也不反向决定 Done。
+
 ## 阶段 C：接入现有 AI 会话
 
 ### FR-201 读取与回写同一任务
@@ -60,6 +78,13 @@
 - 不要求 spawn/resume/close、AgentRun、完整 Session importer 或宿主 context transition。
 - 新会话重新读取当前任务与权限，不盲目恢复旧授权或旧摘要。
 - 仅保存交接所需记录；完整 Prompt、工具输出和会话正文采集须另行选择范围。
+
+### FR-202 上下文预算与 CLI Skill
+
+- context 响应按第 21 篇控制字节预算，保留核心事实，历史按授权引用展开，输出截断和版本变化提示。
+- CLI 稳定后提供接续 Skill，约定读取、记录、Checkpoint 与提交 Review；核心继续负责权限与状态。
+- Skill 不控制 Runtime；阶段 C 可先通过 CLI 验证，再评估 MCP。
+- 接入能力、契约测试、当前环境和真实接续分别报告；只读诊断给出可执行下一步，不把未知结果或未验收能力显示为可用。详见第 21 篇第 8–9 节。
 
 ## 可选阶段 D 与探索 X
 
@@ -93,3 +118,5 @@
 | 故障恢复 | 重启、版本冲突、missing Worktree 和备份恢复不静默丢失已确认状态或误写其他任务 |
 
 这些是试用目标，不是已完成的测试结果。是否进入下一阶段由契约验证和真实使用反馈共同决定。
+
+确定性验收补充：[J-01 重启接续、J-02 Review 撤回重提、J-03 Git 现场变化](21-continuity-and-review-contracts.md)。当前均待实现与执行，不能以文档检查代替旅程结果。

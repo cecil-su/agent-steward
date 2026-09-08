@@ -18,10 +18,10 @@ stateDiagram-v2
   Ready --> Cancelled: 用户取消
   InProgress --> Cancelled: 用户取消
   Blocked --> Cancelled: 用户取消
-  Review --> Cancelled: 用户取消并终结当前提交
+  Review --> InProgress: 有权限的 owner 或用户撤回，再编辑或取消
 ```
 
-此图表示候选主要转换，精确前置条件在 D-013/D-020 冻结；尤其要确定 Blocked 的恢复状态、Review 期间编辑/撤回，以及取消时 Submission 的原子处理。
+Review 显式撤回与 Blocked 回到 In Progress 已按第 21 篇冻结；其余生命周期前置条件由 D-013 冻结。Review 中的业务编辑、取消和归档均需先撤回，Comment/Checkpoint 独立追加不增加 Task version。
 
 ## 接续不改变生命周期
 
@@ -32,6 +32,6 @@ stateDiagram-v2
 
 ## Review 与归档
 
-submit 为每个证据创建 Submission 独立持有的 review_evidence Link，固定 Task/criteria/evidence 版本；用户 accept/request-changes 原子写 Decision 和状态转换。Review 期间版本变化后的撤回与重提路径必须先关闭 D-020，不能仅靠严格版本检查而使任务无法返工。
+submit 为每个证据创建 Submission 独立持有的 review_evidence Link，固定 Task/criteria/evidence 版本；用户 accept/request-changes 原子写 Decision 和状态转换。Review 期间撤回与重提遵循第 21 篇/D-020；撤回使用当前 Task/Submission 版本，不要求等于提交时 Task version，并以 J-02 验证异常漂移仍可退出。
 
 Done 重新打开后新建 reviewCycle，旧验收只保留历史。归档设置 archiveState 并保留原 lifecycle；允许归档的状态与恢复规则在 D-013 冻结。首版允许用户推进并显式验收自己的普通任务，不强制引入多角色审批系统。

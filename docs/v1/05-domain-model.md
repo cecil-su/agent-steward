@@ -2,7 +2,7 @@
 
 > 范围：阶段 A/B 只采用任务接续需要的 Workspace/Repo 身份、Task、Actor/Ownership、TaskCheckpoint、Review、Receipt/Event 和实际启用的证据存储。TaskRelation、SavedView 按需求启用；Assignment/AgentRun/ContextWindow 属于可选阶段 D，BusinessFact/Mapping 属于探索 X。模型存在不等于首版必须实现。
 >
-> 本文 taskd 表示可信应用核心；是否部署为常驻服务由 D-019 决定。Blob 发布协议从首次使用 Blob 起生效；在线 BackupOperation/Pin 协议按在线能力启用，首期维护备份仍必须验证整套数据。Review 编辑、restore generation、Runtime 重试目标和事实版本绑定尚待 D-020–D-023 关闭。
+> 本文 taskd 表示可信应用核心；是否部署为常驻服务由 D-019 决定。Blob 发布协议从首次使用 Blob 起生效；在线 BackupOperation/Pin 协议按在线能力启用，首期维护备份仍必须验证整套数据。Review 编辑与撤回采用第 21 篇已冻结设计，待实现验证；restore generation、Runtime 重试目标和事实版本绑定仍待 D-021–D-023 关闭。
 
 ## 1. Workspace / Repository 基础与任务核心实体
 
@@ -31,7 +31,8 @@ Repository identity 由规范化 real path 与可用时的 Git identity 共同�
 - title、description、priority
 - status、archiveState、nextAction
 - acceptanceCriteria、dueAt
-- blockedReason、reviewSummary
+- blocker（kind、reason、requiredActorId/requiredRole、requiredInput、resumeCondition、evidenceRefs、createdAt/createdBy）；无当前阻塞时为空
+- reviewSummary 为派生查询，不作为可写 Task 字段
 - createdAt、updatedAt、completedAt、archivedAt
 - `currentVersion`
 
@@ -50,7 +51,9 @@ TaskCheckpoint 是不可变恢复记录；create 使用 Task expectedVersion 和
 
 恢复时重新读取当前 Task、权限和 Git，展示它们与 Checkpoint 的差异；progressSummary、nextAction 是采集时执行者声明，不能覆盖更新后的 Task。partial 必须列出缺失证据。TaskCheckpoint 不要求 Assignment、Session、ContextWindow、AI 或 Runtime 存在；与阶段 D 的 ContextCheckpoint 分开，后者可以引用前者。
 
-证据表示与版本递增细节在 D-024 冻结；文件路径本身不能替代固定的 Review evidence。
+Checkpoint 追加不递增 Task.currentVersion，记录自己的创建事件但仍校验 Task expectedVersion；详细规则见第 21 篇。物理证据存储在 D-024 冻结，文件路径本身不能替代固定的 Review evidence。
+
+Task.blocker 的字段、block/unblock 与 needs-input 派生视图见[补充合同](21-continuity-and-review-contracts.md)。当前阻塞只有 Task 这一权威，旧原因和解除记录保留在 TaskEvent。
 
 ### TaskRelation（按需求启用）
 
@@ -107,10 +110,16 @@ schemaVersion 是必填正整数，按 eventType 标识 payload schema；生产�
 
 唯一键为 `(principalId, commandType, idempotencyKey)`。taskd 对规范化后的语义请求计算 requestHash；规范化内容包含 command schema version、target、payload、expectedVersions 和服务端绑定 scope，不包含 correlationId 或传输层噪声。同一 key + 同一 requestHash 只保证不重复执行副作用，不能绕过当前授权：返回历史 status/resultRef 前必须重新校验当前 connection、grant 以及结果对象的读取权限。授权已撤销或缩小时返回 `FORBIDDEN_SCOPE`，或仅返回不含 payload/resultRef 的脱敏终态；同一 key + 不同 requestHash 返回 `IDEMPOTENCY_KEY_REUSED`，不得执行或覆盖旧记录。DomainEvent 和外部 operation 记录保存同一 requestHash 以支持审计与恢复。Receipt 在关联 Intent/Operation 未终结时不得过期；完整结果超过 retainUntil 后仍保留 key + requestHash + terminal status/resultRef tombstone，V1 不把旧 key 静默绑定到新请求。
 
+### EvidenceDescriptor / ReviewSummary（阶段 A/B）
+
+EvidenceDescriptor 是 Artifact 的可选不可变语义元数据，字段和来源校验见第 21 篇；没有独立 Evidence ID 或状态机。descriptorHash 与 contentHash 一起固定到 ReviewSubmissionEvidence/evidenceSetHash。重新采集或更正新建 Artifact，不能修改原 descriptor。
+
+ReviewSummary 从 Submission、Evidence 和 Decision 投影，不新增 Handoff aggregate。提交时证据与当前现场分开展示，交付事实和用户决定不能由生成摘要反向写入。
+
 ### Comment / Artifact / ArtifactLink
 
 - Comment：commentId、taskId、authorActorId、kind、body、sourceRefs、confirmationStatus、createdAt；kind 候选为 progress/decision/constraint/procedure，首版追加记录，更正通过新记录引用原条目。confirmationStatus 由受控用户确认派生，AI 不能自行写 confirmed；具体字段和复用规则在 D-024 冻结。
-- Artifact：artifactId、type、mimeType、contentHash、blobHash、size、storageState、stagingName、storagePath、ingestOperationId、deletionOperationId、failureReason、provenance、createdBy、currentVersion、createdAt、finalizedAt、failedAt、deletingAt、deletedAt
+- Artifact：artifactId、type、mimeType、evidenceDescriptor（可选）、descriptorHash（可空）、contentHash、blobHash、size、storageState、stagingName、storagePath、ingestOperationId、deletionOperationId、failureReason、provenance、createdBy、currentVersion、createdAt、finalizedAt、failedAt、deletingAt、deletedAt
 - storageState：`pending` / `finalized` / `orphaned` / `failed` / `deleting` / `deleted`
 - ArtifactLink：artifactLinkId、artifactId、aggregateType、aggregateId、relationType、linkState、supersededByLinkId、currentVersion、createdBy、linkedAt、supersededAt、unlinkedBy、unlinkedAt
 - linkState：`active` / `superseded` / `unlinked`
@@ -180,17 +189,19 @@ TUI 与 GUI 共享相同筛选语义，但可以采用不同布局。
 
 ### ReviewSubmission / ReviewDecision
 
-- ReviewSubmission：submissionId、taskId、reviewCycle、submittedTaskVersion、acceptanceCriteriaHash、evidenceSetHash、status、submittedByActorId、currentVersion、submittedAt、decidedAt
+- ReviewSubmission：submissionId、taskId、reviewCycle、submittedTaskVersion、acceptanceCriteriaHash、evidenceSetHash、status、submittedByActorId、currentVersion、submittedAt、decidedAt、withdrawnBy、withdrawnAt、withdrawReason
 - status：`pending` / `accepted` / `changes_requested` / `withdrawn`
-- ReviewSubmissionEvidence：submissionId、artifactLinkId、artifactLinkVersion、sourceArtifactLinkId、sourceArtifactLinkVersion、artifactId、contentHash、ordinal
+- ReviewSubmissionEvidence：submissionId、artifactLinkId、artifactLinkVersion、sourceArtifactLinkId、sourceArtifactLinkVersion、artifactId、contentHash、descriptorHash、ordinal
 - ReviewDecision：reviewDecisionId、submissionId、taskId、reviewCycle、reviewedTaskVersion、reviewedSubmissionVersion、acceptanceCriteriaHash、evidenceSetHash、reviewerActorId、decision、comment、createdAt
 - decision：`accepted` / `changes_requested`
 
-每次进入 Review 都创建新的 ReviewSubmission；`(taskId, reviewCycle)` 唯一且 reviewCycle 单调递增。submit transaction 校验 Task expectedVersion，并对每个客户端提交的 source Link 校验其仍为 active、expected source Link version、当前读取权限，以及 Artifact 仍为 finalized 且 contentHash 匹配；随后为同一 Artifact 创建新的 active ArtifactLink：`aggregateType=review_submission`、`aggregateId=submissionId`、`relationType=review_evidence`。ReviewSubmissionEvidence.artifactLinkId/artifactLinkVersion 只引用这个由 Submission 持有的新 Link，sourceArtifactLinkId/sourceArtifactLinkVersion 仅保留提交时 provenance，原业务 Link 后续 supersede/unlink 不影响 Review evidence 的权限或保留。事务按 ordinal 和新 Link/Artifact/contentHash 计算 canonical evidenceSetHash，创建 Submission/evidence rows 和全部 review_evidence Link，将 Task 推进到 Review，并把提交后 Task.currentVersion 记录为 submittedTaskVersion；任一证据校验或 Link 创建失败则整体回滚。
+每次进入 Review 都创建新的 ReviewSubmission；`(taskId, reviewCycle)` 唯一且 reviewCycle 单调递增。submit transaction 校验 Task expectedVersion，并对每个客户端提交的 source Link 校验其仍为 active、expected source Link version、当前读取权限，以及 Artifact 仍为 finalized 且 contentHash/descriptorHash 匹配；随后为同一 Artifact 创建新的 active ArtifactLink：`aggregateType=review_submission`、`aggregateId=submissionId`、`relationType=review_evidence`。ReviewSubmissionEvidence.artifactLinkId/artifactLinkVersion 只引用这个由 Submission 持有的新 Link，sourceArtifactLinkId/sourceArtifactLinkVersion 仅保留提交时 provenance，原业务 Link 后续 supersede/unlink 不影响 Review evidence 的权限或保留。事务按 ordinal 和新 Link/Artifact/contentHash/descriptorHash 计算 canonical evidenceSetHash，创建 Submission/evidence rows 和全部 review_evidence Link，将 Task 推进到 Review，并把提交后 Task.currentVersion 记录为 submittedTaskVersion；任一证据校验或 Link 创建失败则整体回滚。
 
-accept/request-changes Command 必须同时携带 expectedTaskVersion 和 expectedSubmissionVersion，并验证 `Task.currentVersion = ReviewSubmission.submittedTaskVersion`、验收条件 hash 与 evidence set hash 未变。accept 还必须逐项验证 ReviewSubmissionEvidence 指向的 Link 仍为 active，`aggregateType/aggregateId/relationType` 正确，Link.currentVersion 与 artifactLinkVersion 相同，且关联 Artifact 仍为 finalized、artifactId/contentHash 与 evidence row 匹配；任一项不符都不得 accept。request-changes 可把证据缺失或不可读本身作为返工理由，不以 active Link 校验作为前置条件。新 Decision 的 reviewedTaskVersion/reviewedSubmissionVersion 固定为通过校验的两个版本。accept 在一个 SQLite transaction 中创建 accepted ReviewDecision、把 Submission 标为 accepted、把 Task 从 Review 推进到 Done、递增两个 aggregate 版本并写对应 DomainEvent；request-changes 以同样方式创建 Decision、把 Submission 标为 changes_requested 并把 Task 退回 In Progress。Done 重新打开后，旧 Submission/Decision 只保留为历史；再次进入 Review 必须创建更大的 reviewCycle，旧 accepted Decision 不能满足新的 Done 前置条件。
+accept/request-changes Command 必须同时携带 expectedTaskVersion 和 expectedSubmissionVersion，并验证 `Task.currentVersion = ReviewSubmission.submittedTaskVersion`、验收条件 hash 与 evidence set hash 未变。accept 还必须逐项验证 ReviewSubmissionEvidence 指向的 Link 仍为 active，`aggregateType/aggregateId/relationType` 正确，Link.currentVersion 与 artifactLinkVersion 相同，且关联 Artifact 仍为 finalized、artifactId/contentHash/descriptorHash 与 evidence row 匹配；任一项不符都不得 accept。request-changes 可把证据缺失或不可读本身作为返工理由，不以 active Link 校验作为前置条件。新 Decision 的 reviewedTaskVersion/reviewedSubmissionVersion 固定为通过校验的两个版本。accept 在一个 SQLite transaction 中创建 accepted ReviewDecision、把 Submission 标为 accepted、把 Task 从 Review 推进到 Done、递增两个 aggregate 版本并写对应 DomainEvent；request-changes 以同样方式创建 Decision、把 Submission 标为 changes_requested 并把 Task 退回 In Progress。Done 重新打开后，旧 Submission/Decision 只保留为历史；再次进入 Review 必须创建更大的 reviewCycle，旧 accepted Decision 不能满足新的 Done 前置条件。
 
 `review_evidence` Link 的普通读取权限由 ReviewSubmission → Task scope 派生，不再依赖 source aggregate。该 Link 不允许 supersede，也不得由普通 unlink Command 删除。只有受审计的 retention/delete workflow 在 Submission 及验收历史达到策略保留期后才能 unlink，之后才允许 Artifact GC；因此普通业务对象删除不会使待验收或保留期内的历史验收证据失去可读性。
+
+Review 期间 Task 业务编辑必须先 withdraw；Comment/TaskCheckpoint 为不递增 Task version 的追加记录。withdraw 校验当前 Task/Submission 版本，原子终结 pending Submission 并退回 In Progress，不以 submittedTaskVersion 相等为前提。withdrawnBy/withdrawnAt/withdrawReason 与事件保留操作事实。完整权限、唯一 pending 约束和竞争规则见第 21 篇。
 
 ## 2. 任务状态模型
 
@@ -201,9 +212,9 @@ Inbox ──triage──> Ready ──start──> In Progress ──submit─�
                                          │
                                          └──block──> Blocked
                                                      │
-                                                     └──resume──> Ready / In Progress
+                                                     └──resume──> In Progress
 
-Review ──request changes──> In Progress
+Review ──request changes / withdraw──> In Progress
 Done ──reopen──> In Progress
 
 archiveState: active ──archive──> archived ──restore──> active
@@ -213,7 +224,7 @@ archiveState: active ──archive──> archived ──restore──> active
 
 - Ready 前必须具备可理解的目标；建议具备 owner、下一步和验收标准。
 - In Progress 必须有当前 Owner。
-- Blocked 必须记录原因，可选记录依赖任务或等待对象。
+- Blocked 必须有结构化 blocker，block 从 In Progress 进入，unblock 记录 resolution 并回到 In Progress；其余前置条件见第 21 篇。
 - Worker 的完成声明必须创建绑定 Task/criteria/evidence 版本的 ReviewSubmission，不能直接写 Done。
 - Done 必须由当前 pending ReviewSubmission 的原子 accept transaction 产生；重新打开会使该 cycle 仅保留为历史，下一次验收必须使用新的 reviewCycle。
 - Archived 不是生命周期 status。归档只把 `archiveState` 改为 `archived` 并设置 archivedAt，原 status（包括 Done、Cancelled 或其他允许归档的状态）保持不变。
@@ -250,7 +261,7 @@ Assignment 报告通过 `relationType=report` 的 ArtifactLink 表达，不在 A
 - Invocation：Session 的一次实际运行；
 - AgentRun：agentRunId、assignmentId、sessionId、invocationId、runtimeId、runtimeHandleRef、status、outcome、currentVersion、startedAt、endedAt。
 
-AgentRun status 为 `starting` / `active` / `completed` / `failed` / `cancelled` / `detached`。Assignment 可以保留多个历史 AgentRun，但 V1 每个 Assignment 最多一个 `starting/active` AgentRun；数据库使用等价的 partial unique constraint 保证该不变量。spawn/resume 在调用 Runtime 前，与 prepared RuntimeOperation 同一事务创建或保留 starting 行；成功后写入 runtimeHandleRef 并改为 active，失败/reconcile 后进入对应终态。sendPrompt/status/close 由 taskd 根据 assignmentId 解析唯一 active AgentRun 和 runtimeHandleRef，零个或多个候选都返回确定性错误，不能按“最新时间”猜测目标。
+AgentRun status 为 `starting` / `active` / `completed` / `failed` / `cancelled` / `detached`。Assignment 可以保留多个历史 AgentRun，但 V1 每个 Assignment 最多一个 `starting/active` AgentRun；数据库使用等价的 partial unique constraint 保证该不变量。spawn/resume 在调用 Runtime 前，与 prepared RuntimeOperation 同一事务创建或保留 starting 行；成功后写入 runtimeHandleRef 并改为 active，失败/reconcile 后进入对应终态。首次 sendPrompt/status/close 由 taskd 根据 assignmentId 解析唯一 active AgentRun 和 runtimeHandleRef；副作用请求重试的持久目标匹配顺序仍须在 D-022 冻结，不能重新解析后作用于替代 Run。首次解析时，零个或多个候选都返回确定性错误，不能按“最新时间”猜测目标。
 
 ### RuntimeOperation
 

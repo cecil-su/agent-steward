@@ -24,7 +24,7 @@
 - 可选 D：Session/Invocation/Assignment/ContextWindow；
 - RoleGrant/Capability/Lease；
 - WorkingNote/ContextCheckpoint 元数据和版本；
-- Artifact 元数据、hash、provenance 与 ArtifactLink；
+- Artifact 元数据、hash、provenance、不可变 EvidenceDescriptor 与 ArtifactLink；
 - Prompt 版本和 hash；
 - Tool call 索引和统计；
 - Git plan/operation；
@@ -58,7 +58,7 @@
 - D：控制所选 Runtime 时，按实际需要增加 ContextCheckpoint、History、WorkingNote 和 PromptInstance；正文启用加密 Blob。
 - X：完整会话 importer、长期全文索引和 embedding 需先证明用途，再单独决定范围与保留策略。
 
-TaskCheckpoint 负责任务交接，ContextCheckpoint 负责宿主窗口转换；后者不得成为前者的必填依赖。
+TaskCheckpoint 负责任务交接，ContextCheckpoint 负责宿主窗口转换；后者不得成为前者的必填依赖。阶段 C 的 context 按第 21 篇控制本工具响应预算，保留核心事实、按权限展开历史；不据此默认采集完整会话或计算宿主完整窗口。
 
 Artifact Blob 与 SQLite 不构成一个物理事务。所有阶段共用领域模型定义的 publish-before-reference 协议：pending metadata 和 durable ArtifactFinalizeIntent 不对业务查询可见，只有 Blob 原子发布且 Intent 的请求 hash、版本、权限和 Link 计划仍有效时，才能在 finalize transaction 中创建 active ArtifactLink；冲突 Intent 终止而不永久重试。WorktreeSnapshot 的多 Artifact evidence 由 CaptureOperation 固定完整 intent 清单，全部 Blob 发布并通过 token 校验后才在一个事务中原子 promotion，不能逐项暴露。V1 每个 Artifact 独占物理 Blob，启动恢复和 GC 按 Artifact 状态处理。
 

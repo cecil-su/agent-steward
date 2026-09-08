@@ -14,6 +14,9 @@
 
 ## 2. Runtime Adapter 接口
 
+以下是阶段 D 的候选接口，不是已有可执行 API。D-005 选择具体宿主后，按第 21 篇的能力/契约验证/当前环境/真实运行维度分别验收；阶段 C 读取已有任务不依赖本接口。
+
+
 ```typescript
 interface RuntimeOperationContext {
   operationId: string;
@@ -213,3 +216,11 @@ created / active / completed / blocked / cancelled / needs_reconciliation
 - History/WorkingNote scope、幂等、版本冲突和输出边界；
 - duplicate event 幂等；
 - stale grant 拒绝。
+
+## 10. 恢复与重试的实施前检查
+
+D-022 尚未关闭：普通业务请求命中 Receipt 时应使用持久目标重新鉴权，不能重新解析 active Run 后误操作替代执行。第 05 篇的 active Run 选择仅能描述首次调用，最终请求标识和重试匹配顺序必须在实现控制命令前冻结。
+
+需要区分同一未知操作的重放、已失败操作后的显式新尝试和更换 Runtime/目标的独立执行。未知结果先 reconcile；不能以新 idempotency key 绕过同一 orderingScope 的未决操作。已终结执行不因重启扫描恢复为 active。只有未来确有多次真实调用的追溯需求，才评估如何细化既有 RuntimeOperation/AgentRun，不直接增加一套 Run/Attempt 模型。
+
+该原则参考 [Xuanwu 的恢复合同](https://github.com/williamnie/xuanwu/blob/main/docs/architecture/xuanwu/0069-restart-recovery-invariants.md)，不复制其调度、自动重试预算或通知框架。验收必须包括执行成功后回执丢失、重复重启核对、替代 Run 出现后旧请求重试，以及无法证明是否执行的停止自动动作路径。
