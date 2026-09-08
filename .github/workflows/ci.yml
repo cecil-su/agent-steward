@@ -53,7 +53,7 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --all-targets --locked
       - name: Native adapter and browser connection tests
-        run: node --test integrations/tests/native.test.mjs crates/server/tests/browser/connection.test.cjs
+        run: node --test integrations/tests/native.test.mjs crates/server/tests/browser/*.test.cjs
       - name: Windows launcher and update safety tests
         if: runner.os == 'Windows'
         shell: powershell

@@ -33,14 +33,26 @@
     return result.data;
   }
   function safely(action){return async()=>{try{await action();}catch(e){notify(e.message);}};}
-  async function loadList(append=false){
+  async function loadList(append=false,preserveRange=false){
+    const target=preserveRange?Math.max(30,rows.length):30;
     const generation=++listRevision;const search=new URLSearchParams(view==='closed'?{status:'closed',pageSize:'30'}:{view,pageSize:'30'});if(query)search.set('query',query);if(append&&cursor)search.set('cursor',cursor);
-    const data=await api('/api/tasks?'+search);if(generation!==listRevision)return;rows=append?rows.concat(data.tasks):data.tasks;cursor=data.nextCursor;
+    const refreshed=[];let data;
+    do{
+      data=await api('/api/tasks?'+search);if(generation!==listRevision)return false;
+      if(preserveRange&&modal){liveDirty=true;return false;}
+      refreshed.push(...data.tasks);
+      if(data.hasMore)search.set('cursor',data.nextCursor);
+    }while(preserveRange&&data.hasMore&&refreshed.length<target);
+    // Publish the complete refreshed range once; failures leave the visible pages and cursor intact.
+    rows=append?rows.concat(refreshed):refreshed;cursor=data.nextCursor;
     renderList();$('more').hidden=!data.hasMore;
+    return true;
   }
-  function renderList(){clear($('task-list'));$('task-count').textContent=rows.length+' 项';
-    if(!rows.length){const empty=el('div',undefined,'empty');empty.append(el('h2','这里还没有任务'),el('p','新建任务，或切换视图和搜索条件。'));$('task-list').append(empty);}
-    for(const task of rows){const b=button('',safely(()=>selectTask(task.id)),'task-card'+(selected===task.id?' selected':''));b.setAttribute('aria-current',String(selected===task.id));const meta=el('div',undefined,'card-meta');meta.append(el('span','#'+task.id),badge(task.status));b.append(meta,el('h3',task.title||'未命名任务'),el('p',task.nextStep||task.goal||'等待补充目标和下一步'));$('task-list').append(b);}
+  function renderList(){const list=$('task-list'),panel=list.parentElement,page=document.scrollingElement;
+    const panelTop=panel.scrollTop,pageTop=page.scrollTop,items=[];$('task-count').textContent=rows.length+' 项';
+    if(!rows.length){const empty=el('div',undefined,'empty');empty.append(el('h2','这里还没有任务'),el('p','新建任务，或切换视图和搜索条件。'));items.push(empty);}
+    for(const task of rows){const b=button('',safely(()=>selectTask(task.id)),'task-card'+(selected===task.id?' selected':''));b.setAttribute('aria-current',String(selected===task.id));const meta=el('div',undefined,'card-meta');meta.append(el('span','#'+task.id),badge(task.status));b.append(meta,el('h3',task.title||'未命名任务'),el('p',task.nextStep||task.goal||'等待补充目标和下一步'));items.push(b);}
+    list.replaceChildren(...items);panel.scrollTop=panelTop;page.scrollTop=pageTop;
   }
   async function selectTask(id){selected=id;const generation=++revision;renderList();const data=await api(`/api/tasks/${id}/context`);if(generation!==revision)return;context=data;await renderDetail();}
   function section(title,value){const node=el('section',undefined,'section');node.append(el('h3',title));if(Array.isArray(value)){const ul=el('ul');for(const line of value)ul.append(el('li',line));node.append(value.length?ul:el('p','暂无记录','muted'));}else node.append(el('p',value||'尚未填写',value?'':'muted'));return node;}
@@ -166,7 +178,7 @@
     liveTimer=setTimeout(async()=>{
       liveTimer=null;if(!connected||modal)return;
       liveDirty=false;liveRefreshing=true;const connection=liveAbort;
-      try{await loadList();if(connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
+      try{if(!await loadList(false,true)||connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
       catch(e){if(connection===liveAbort)notify(e.message);}
       finally{liveRefreshing=false;if(liveDirty&&connected)scheduleLiveRefresh();}
     },250);

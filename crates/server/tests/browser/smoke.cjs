@@ -23,7 +23,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
       assert.equal(protectedAcl,'True','credential ACL must be protected');
     }
   }else{assert.equal(fs.statSync(credentialPath).mode&0o777,0o600);}
-  browser=await chromium.launch({headless:true, ...(process.env.STEWARD_BROWSER_CHANNEL ? {channel:process.env.STEWARD_BROWSER_CHANNEL}: {})});page=await browser.newPage({viewport:{width:1360,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  browser=await chromium.launch({headless:true, ...(process.env.STEWARD_BROWSER_CHANNEL ? {channel:process.env.STEWARD_BROWSER_CHANNEL}: {})});const context=await browser.newContext({viewport:{width:1360,height:1000}});page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(url);await page.getByLabel('本次服务的连接凭据').fill(token);await page.getByRole('button',{name:'连接工作台'}).click();await page.locator('#workspace').waitFor({state:'visible'});
   await page.getByRole('button',{name:'新建任务'}).click();await page.getByLabel('标题（MMDD｜类型｜主题）').fill('0907｜功能｜验证跨会话任务交接');await page.getByLabel('目标',{exact:true}).fill('让下一次会话知道当前进展');await page.getByLabel('范围',{exact:true}).fill('本地 CLI、浏览器与临时数据库');await page.getByLabel('验收条件',{exact:true}).fill('可查看任务、保存 Checkpoint 并继续');await page.getByLabel('下一步',{exact:true}).fill('保存第一个 Checkpoint');await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});await page.getByRole('heading',{name:'0907｜功能｜验证跨会话任务交接',exact:true,level:2}).waitFor();
   await page.getByRole('button',{name:'开始任务',exact:true}).click();await page.getByLabel('新执行 Session ID').fill('browser-session-a');await page.getByRole('button',{name:'确认提交'}).click();await page.locator('#action-dialog').waitFor({state:'hidden'});
@@ -66,7 +66,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   await page.reload();await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
   // An invalid remembered grant must never regain access.
   await page.context().addCookies([{name:cookies[0].name,value:'synthetic-expired-token',domain:'127.0.0.1',path:'/api',httpOnly:true,sameSite:'Strict'}]);
-  const rejected=page.waitForResponse(r=>r.url().includes('/api/tasks')&&r.status()===401);
+  const rejected=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/access'&&r.status()===401);
   await page.reload();await rejected;assert.equal(await page.evaluate(()=>sessionStorage.getItem('steward.connection-token')),null);
   await page.locator('#login').waitFor({state:'visible'});assert.equal(await page.locator('#workspace').isHidden(),true);
   const readerToken=fs.readFileSync(path.join(path.dirname(credentialPath),'readonly-credential'),'utf8');
@@ -78,6 +78,19 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
     await viewer.locator('#live-state').filter({hasText:'实时同步'}).waitFor();
     cli('task','create','SSE-EXTERNAL');
     await viewer.locator('.task-card').filter({hasText:'#2'}).waitFor({state:'visible'});
+    // Keep later pages and the mobile scroll position when another writer changes the list.
+    for(let i=0;i<34;i++)cli('task','create','SSE-PAGE-'+i);
+    await viewer.waitForFunction(()=>document.querySelectorAll('.task-card').length===30);
+    await viewer.setViewportSize({width:390,height:844});
+    await viewer.getByRole('button',{name:'加载更多',exact:true}).click();
+    await viewer.waitForFunction(()=>document.querySelectorAll('.task-card').length===35);
+    await viewer.locator('.task-card').filter({has:viewer.locator('.card-meta span').filter({hasText:/^#2$/})}).click();
+    await viewer.locator('#detail .meta').filter({hasText:'#2'}).waitFor();
+    const panelTop=await viewer.locator('.task-panel').evaluate(node=>node.scrollTop);assert(panelTop>0);
+    cli('task','create','SSE-PAGED-REFRESH');
+    await viewer.waitForFunction(()=>document.querySelectorAll('.task-card').length===36);
+    assert.equal(await viewer.locator('.task-card[aria-current="true"] .card-meta span').first().textContent(),'#2');
+    assert(Math.abs((await viewer.locator('.task-panel').evaluate(node=>node.scrollTop))-panelTop)<=1,'live refresh moved the mobile task list');
   }finally{await viewer.close();}
   assert.deepEqual(errors,[]);console.log('PASS: browser lifecycle, CAS, Worktree safety, persistent connection, reader write refusal and external CLI SSE updates');
  }catch(error){if(page){await page.screenshot({path:path.join(root,'.local/m5-failure.png'),fullPage:true}).catch(()=>{});console.error('Action error:',await page.locator('#action-error').textContent().catch(()=>''));}throw error;}finally{

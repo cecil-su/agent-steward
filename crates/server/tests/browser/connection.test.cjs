@@ -8,11 +8,12 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 function fixture(browser={authorized:false,role:'admin'},hash='',exchangeFails=false){
   const nodes=new Map(),requests=[],storage=new Map([['steward.connection-token','old-secret']]);let eventController;
   const location={hash,pathname:'/',search:''};
+  const panel={scrollTop:0},page={scrollTop:0};
   function node(){const handlers=new Map();return {value:'',hidden:false,disabled:false,textContent:'',append(){},prepend(){},querySelectorAll(){return [];},replaceChildren(){},setAttribute(){},addEventListener(n,f){handlers.set(n,f);},close(){handlers.get('close')?.();},showModal(){}};}
-  function get(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id);}
+  function get(id){if(!nodes.has(id))nodes.set(id,Object.assign(node(),{parentElement:panel}));return nodes.get(id);}
   const task={id:1,status:'in_progress',title:'0907｜探索｜Connection',currentSessionId:'trial',version:2};
   vm.runInNewContext(source,{
-    document:{getElementById:get,createElement:node,querySelectorAll:()=>[]},location,
+    document:{getElementById:get,createElement:node,querySelectorAll:()=>[],scrollingElement:page},location,
     history:{replaceState(_s,_t,url){assert.equal(url,'/');location.hash='';}},
     sessionStorage:{removeItem:k=>storage.delete(k)},confirm:()=>true,
     crypto:{getRandomValues:a=>webcrypto.getRandomValues(a)},Uint8Array,URLSearchParams,AbortSignal,AbortController,TextDecoder,setTimeout,clearTimeout,structuredClone,
