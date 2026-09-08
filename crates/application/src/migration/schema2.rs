@@ -303,7 +303,7 @@ fn import(
             ) {
                 (None, None) => break,
                 (Some(a), Some(b)) => {
-                    hash.update([b'R']);
+                    hash.update(*b"R");
                     for i in 0..fields.len() {
                         let value: Value = a.get(i).map_err(AppError::from_sqlite)?;
                         if value != b.get::<_, Value>(i).map_err(AppError::from_sqlite)? {
@@ -415,22 +415,22 @@ fn import(
 
 fn hash_value(hash: &mut Sha256, value: &Value) {
     match value {
-        Value::Null => hash.update([b'N']),
+        Value::Null => hash.update(*b"N"),
         Value::Integer(v) => {
-            hash.update([b'I']);
+            hash.update(*b"I");
             hash.update(v.to_le_bytes());
         }
         Value::Real(v) => {
-            hash.update([b'F']);
+            hash.update(*b"F");
             hash.update(v.to_bits().to_le_bytes());
         }
         Value::Text(v) => {
-            hash.update([b'T']);
+            hash.update(*b"T");
             hash.update((v.len() as u64).to_le_bytes());
             hash.update(v.as_bytes());
         }
         Value::Blob(v) => {
-            hash.update([b'B']);
+            hash.update(*b"B");
             hash.update((v.len() as u64).to_le_bytes());
             hash.update(v);
         }

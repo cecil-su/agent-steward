@@ -1,5 +1,27 @@
 use super::*;
 
+#[test]
+fn schema2_typed_value_digest_keeps_the_v1_encoding() {
+    let mut hash = Sha256::new();
+    for value in [
+        Value::Null,
+        Value::Integer(-42),
+        Value::Real(-0.0),
+        Value::Text("中\0".into()),
+        Value::Blob(vec![0, 255]),
+        Value::Text(String::new()),
+        Value::Blob(Vec::new()),
+    ] {
+        hash_value(&mut hash, &value);
+    }
+    // Independently encoded N/I/F/T/B tags, little-endian values/byte lengths,
+    // and original UTF-8/BLOB bytes. Includes negative zero and empty values.
+    assert_eq!(
+        hex::encode(hash.finalize()),
+        "e3a57e5b5a4f1744e205790e450925f244707263a93e4c7b82b1d1332685b0b6"
+    );
+}
+
 pub(super) fn fixture(root: &Path) -> std::path::PathBuf {
     steward_core::set_private_dir(root).unwrap();
     let source = root.join("source.db");
