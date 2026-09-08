@@ -4,6 +4,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
+use std::path::Path;
 use steward_application::Service;
 use steward_server::{ServerState, router};
 use tower::ServiceExt;
@@ -60,6 +61,32 @@ async fn command(app: &Router, name: &str, input: Value) -> Value {
     let (status, out) = request(app, &format!("/api/commands/{name}"), Some(input), false).await;
     assert_eq!(status, StatusCode::OK, "{out}");
     out["data"].clone()
+}
+
+// HTTP selects the spelling advertised by Git, not an arbitrary filesystem alias.
+// Only this test's owned fixture paths may be canonicalized to find the intended
+// checkout; production must still reject unadvertised paths before request-path IO.
+fn advertised_checkout(repo: &Path, checkout: &Path) -> String {
+    let expected = std::fs::canonicalize(checkout).unwrap();
+    let output = std::process::Command::new("git")
+        .current_dir(std::fs::canonicalize(repo).unwrap())
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let matches: Vec<_> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|field| field.strip_prefix(b"worktree "))
+        .map(|bytes| std::str::from_utf8(bytes).unwrap())
+        .filter(|path| std::fs::canonicalize(path).unwrap() == expected)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "select the intended fixture, not a default"
+    );
+    matches[0].to_owned()
 }
 
 #[tokio::test]
@@ -246,7 +273,7 @@ async fn project_revision_and_task_version_are_separate_and_inputs_fail_closed()
 
 #[tokio::test]
 async fn git_registration_http_context_requires_an_explicit_matching_worktree() {
-    let (temp, _s, app) = fixture();
+    let (temp, s, app) = fixture();
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     assert!(
@@ -267,12 +294,9 @@ async fn git_registration_http_context_requires_an_explicit_matching_worktree() 
             .0,
         StatusCode::BAD_REQUEST
     );
-    let encoded: String = repo
-        .to_str()
-        .unwrap()
-        .bytes()
-        .map(|b| format!("%{b:02X}"))
-        .collect();
+    let history = s.project_history("1", 0, 200).unwrap().data;
+    let selected = advertised_checkout(&repo, &repo);
+    let encoded: String = selected.bytes().map(|b| format!("%{b:02X}")).collect();
     let (status, data) = request(
         &app,
         &format!("/api/projects/1/context?sourceId=1&worktree={encoded}"),
@@ -292,6 +316,20 @@ async fn git_registration_http_context_requires_an_explicit_matching_worktree() 
         temp.path().join("missing").to_string_lossy().into_owned(),
         repo.join("..").join("repo").to_string_lossy().into_owned(),
     ];
+    #[cfg(windows)]
+    {
+        // On a case-insensitive volume this resolves to the same object, but the
+        // altered component spelling is not advertised. On a case-sensitive
+        // volume it is simply an absent path; it must be refused there as well.
+        let alias = Path::new(&selected).with_file_name("REPO");
+        if alias.try_exists().unwrap() {
+            assert_eq!(
+                std::fs::canonicalize(&alias).unwrap(),
+                std::fs::canonicalize(&repo).unwrap()
+            );
+        }
+        rejected.push(alias.to_str().unwrap().to_owned());
+    }
     rejected.extend([
         r"\\untrusted.invalid\share\checkout".into(),
         r"\\?\UNC\untrusted.invalid\share\checkout".into(),
@@ -313,6 +351,7 @@ async fn git_registration_http_context_requires_an_explicit_matching_worktree() 
         std::fs::read_to_string(repo.join("README.md")).unwrap(),
         "fixture source"
     );
+    assert_eq!(s.project_history("1", 0, 200).unwrap().data, history);
 }
 
 #[tokio::test]
@@ -347,9 +386,7 @@ async fn registered_linked_checkout_is_allowed_without_a_default_worktree() {
     git(&["worktree", "add", "--detach", linked.to_str().unwrap()]);
     command(&app, "project-create", json!({"name":"linked"})).await;
     command(&app, "project-source-add", json!({"projectId":1,"expectedRevision":1,"location":{"kind":"git","worktree":repo,"relativePath":"."}})).await;
-    let encoded: String = linked
-        .to_str()
-        .unwrap()
+    let encoded: String = advertised_checkout(&repo, &linked)
         .bytes()
         .map(|b| format!("%{b:02X}"))
         .collect();
