@@ -1,11 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
 pub const SCHEMA_VERSION: i64 = 2;
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -51,18 +53,48 @@ pub fn open_database(path: &Path) -> Result<Connection, StorageError> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )?;
     steward_core::set_private_file(path)?;
-    connection.busy_timeout(std::time::Duration::from_millis(5_000))?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     initialize(&mut connection)?;
-    let journal_mode: String =
-        connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-    if journal_mode != "wal" {
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-    }
+    enable_wal(&connection)?;
     steward_core::set_private_file(&sidecar_path(path, "-wal"))?;
     steward_core::set_private_file(&sidecar_path(path, "-shm"))?;
     Ok(connection)
 }
+
+fn enable_wal(connection: &Connection) -> Result<(), StorageError> {
+    // SQLite may skip its busy handler when journal-mode lock promotion would
+    // deadlock. Retry only this startup configuration, with no live transaction
+    // or statement and one deadline; business writes are never replayed here.
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    connection.busy_timeout(Duration::ZERO)?;
+    loop {
+        let result = (|| -> rusqlite::Result<()> {
+            let journal_mode: String =
+                connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            if journal_mode != "wal" {
+                connection.pragma_update(None, "journal_mode", "WAL")?;
+            }
+            Ok(())
+        })();
+        match result {
+            Err(ref error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => {
+                connection.busy_timeout(BUSY_TIMEOUT)?;
+                return result.map_err(StorageError::from);
+            }
+        }
+    }
+}
+
 fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
@@ -324,6 +356,77 @@ END;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wal_switch_waits_for_an_existing_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wal.db");
+        let mut writer = Connection::open(&path).unwrap();
+        initialize(&mut writer).unwrap();
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(schema_version(&tx).unwrap(), SCHEMA_VERSION);
+        tx.execute(
+            "INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('open',1,'now','now')",
+            [],
+        )
+        .unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let result = open_database(&path);
+                send.send(result).unwrap();
+            });
+            assert!(matches!(
+                receive.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            tx.commit().unwrap();
+            let connection = receive
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let mode: String = connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            handle.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn concurrent_first_open_uses_one_schema_and_wal() {
+        let temp = tempfile::tempdir().unwrap();
+        for attempt in 0..8 {
+            let path = temp.path().join(format!("concurrent-{attempt}.db"));
+            let start = std::sync::Barrier::new(12);
+            std::thread::scope(|scope| {
+                let handles = (0..12)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            let connection = open_database(&path).unwrap();
+                            assert_eq!(schema_version(&connection).unwrap(), SCHEMA_VERSION);
+                            let mode: String = connection
+                                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                                .unwrap();
+                            assert_eq!(mode, "wal");
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            });
+        }
+    }
 
     #[test]
     fn opening_current_database_does_not_wait_for_a_writer() {
