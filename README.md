@@ -2,7 +2,7 @@
 
 Agent Steward 是一个本地优先、面向个人开发者的 Workspace 工作管家。它首先建立 Workspace、Repository 和 Worktree 的可靠本地边界；随后在这些真实代码上下文中管理任务、产物与验收；再让人类与 AI 共享同一套执行流程，并逐步沉淀业务事实、实现快照和优化候选。
 
-项目当前同时保存彼此独立的 V0 实现与 V1 设计：
+上述 Workspace 路线属于 V1 设计表述，不是 V0 的实现前置条件。项目当前同时保存彼此独立的 V0 实现与 V1 设计：
 
 - V0 已提供 `taskctl` 本地 Rust CLI、`task-hook` 通用元数据 Hook 和 `taskd` 本地 HTTP/GUI；覆盖 Task、Session、Checkpoint、History、Session Import、安全 Worktree 和会话观测；
 - V1 仍处于设计阶段，描述 Workspace、Actor、Review、Daemon、TUI/GUI 与 MCP 产品架构。
@@ -77,14 +77,14 @@ cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/stewa
 
 安装、绑定、事件输入、HTTP 合同和测试方法见 [M4/M5 使用与验收](docs/v0/12-M4-M5使用与验收.md)。
 
-## 产品优先级
+## V1 设计中的产品优先级
 
 1. **Workspace 与 Repository**：先可靠识别用户在哪里工作、有哪些 Repo/Worktree，以及当前只读 Git 状态。
 2. **任务与验收**：Task 归属 Workspace，并可关联 Repo/Worktree；完成必须有可复核证据。
 3. **AI 执行**：AI 作为 Actor 接入同一任务模型，不另建一套任务系统。
 4. **业务事实与优化**：在 Workspace 内沉淀事实、快照和映射，再从历史生成待确认的优化候选。
 
-## 核心原则
+## V1 设计中的核心原则
 
 - Workspace 是本地数据、Repository、Task 和长期事实的第一等边界。
 - Repository/Worktree Registry 首期只读，不把注册、扫描或解除关联解释为 Git 写操作或文件删除。
@@ -101,7 +101,7 @@ cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/stewa
 - [V1 独立设计方案](docs/v1/README.md)
 - [V0 `taskctl` 合同与参考实现](docs/v0/README.md)
 
-## 暂定组件名
+## V1 暂定组件名
 
 | 组件 | 用途 |
 |---|---|

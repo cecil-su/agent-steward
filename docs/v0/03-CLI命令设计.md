@@ -64,7 +64,7 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 
 `update --input` 是 JSON Merge Patch 风格的受限字段更新，只允许 `taskKey`、`title`、`goal`、`scope`、`acceptanceCriteria` 和 `nextStep`。省略表示不修改；`nextStep` 可显式为 `null`，字符串值必须非空白。四个描述字段初始可为 `null`，但设置为字符串后不能通过 `null` 清空；清空请求返回 `INVALID_INPUT` 且不递增 version。`taskKey` 仅允许从 `null` 设置为非空、非纯数字且不以 `#` 开头的字符串，之后不可改变；空 Patch、无实际变化的 Patch 和未知字段均拒绝。单次 Patch 无论改变多少字段，都只执行一次 CAS、递增一次 version 并写一条 `task.updated` History。状态、阻塞和关闭结果只能通过专用命令改变。
 
-`retitle` 是唯一允许修改已关闭 Task 的命令。它只接受符合命名规则的非空 title，执行一次 CAS，仅修改 `title`、`version` 和 `updatedAt`，写入一条 `task.retitled` History；不得重新打开 Task、改变关闭结果或修改其他字段。相同 title 作为无实际变化请求拒绝。未关闭 Task 也可使用该命令做 title-only 修正。
+`retitle` 是唯一允许修改已关闭 Task 描述字段的命令；Import/Hook 清理和 Worktree 管理仍按专用合同校验并可能递增 Task version，不改变关闭结果。它只接受符合命名规则的非空 title，执行一次 CAS，仅修改 `title`、`version` 和 `updatedAt`，写入一条 `task.retitled` History；不得重新打开 Task、改变关闭结果或修改其他字段。相同 title 作为无实际变化请求拒绝。未关闭 Task 也可使用该命令做 title-only 修正。
 
 `claim` 的语义是把当前 Session 记录为 Task 的执行会话，并将 `open` Task 推进到 `in_progress`。请求的 Session ID 不存在时，命令在同一事务中创建未结束 Session；它已经存在时，仅允许它是该 Task 尚未结束的当前 Session，并按下述规则返回 no-op，不能重新激活已结束 Session、复用其他 Task 的 Session 或改写既有继续关系，否则返回 `SESSION_CONFLICT`。相同当前 Session 再次领取时，Application Service 先执行 version 校验；只有调用方携带当前 version 时才返回同状态 no-op success，不写 History、不递增 version。首次成功后丢失响应并原样重试旧 version 会返回 `VERSION_CONFLICT`，V0 不把它称为请求级幂等。如果已有其他当前 Session，默认返回冲突；用户可以明确使用 `--take-over` 接管。接管使用尚不存在的新 Session ID，把新 Session 的 `continuedFrom` 指向旧 Session，但不会伪造旧 Session 的 `endedAt`。
 
@@ -290,3 +290,15 @@ DTO 与 SQLite 字段分离，但字段含义必须一一映射；时间统一�
 - `task context <task-ref> [--format markdown]` 为只读查询，默认 Markdown 输出；`--json` 返回 envelope，data 包含 `task`、`checkpoint`、`session`（当前 Session 或 null）、`worktreeStatus`。Task、Checkpoint、Session 在同一个读事务中取得快照，事务释放后观察 Git；不修改版本、Session、History。
 - 上下文包括目标、范围、验收、最新 Checkpoint 的完成项/决策/待办/风险、当前下一步、阻塞恢复条件与工作目录；不自动导出完整 Session 历史、Import 内容或全部 Notes。无 Checkpoint 时明确留空，Git 无法观察时 `worktreeStatus=null`，附带 `WORKTREE_OBSERVATION_FAILED` 警告。
 - 人类模式 `resume` 使用同一摘要格式；其既有创建 Session 和 CAS 语义不变。导出上下文不会执行 resume。
+
+## M4 补充命令
+
+```bash
+taskctl task notes <task-ref> --json
+taskctl session bind <session-id> --source <source> --external-session <external-id> --if-version <version>
+taskctl --json --input <event.json> hook ingest
+taskctl hook list <session-id> --after 0 --limit 100 --json
+taskctl hook clear <session-id> --if-version <version> --yes
+```
+
+notes 是只读查询。bind 使用 CAS 并写 History；hook ingest 按标准事件键去重，不使用 Task version、不改变执行状态。clear 使用 CAS，保留去重标记；没有可见事件时为当前版本 no-op。完整输入、容量和原生投递边界见 [M4/M5 合同](11-M4-M5实施合同.md)。

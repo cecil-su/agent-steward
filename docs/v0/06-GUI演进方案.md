@@ -1,6 +1,6 @@
 # GUI 演进方案
 
-> M4/M5 正在实现；具体接口、范围和安全合同以 [实施合同](11-M4-M5实施合同.md) 为准，本文保留背景与初版合同。
+> M4/M5 已有实现；当前服务合同见 [实施合同](11-M4-M5实施合同.md) 与 [使用指南](12-M4-M5使用与验收.md)。文中 M1–M3 指早期 CLI 范围，不能将历史验收记录理解为当前全部功能已验收。
 
 
 ## 1. 结论
@@ -22,9 +22,9 @@ Application Service
       └─ Git Adapter
 ```
 
-Daemon 默认只监听 loopback，但 loopback 不是完整的浏览器安全边界。每次启动生成随机认证秘密，写入私有凭据文件；用户粘贴到 GUI，只保留在页面内存中，刷新/重启后重新连接。HTTP 还必须校验 Host 和 Origin、默认拒绝跨 Origin，并为 mutation 提供 CSRF 防护。认证秘密不得进入普通日志、History 或浏览器持久化存储。
+Daemon 默认绑定 127.0.0.1:43123，可显式绑定本机 IPv4。默认本机直连免凭据；远程/严格模式通过长期凭据或 30 天浏览器 Cookie 授权，管理员/只读凭据在私有目录跨重启保留。HTTP 保持精确 Host/Origin、CSRF 与角色检查。网络信任与凭据完整合同统一见 [使用指南](12-M4-M5使用与验收.md)，不再采用早期每次启动新秘密和仅页面内存登录方案。
 
-CLI 和 Daemon 可以并发打开同一个本机 SQLite 数据库，由 WAL、busy timeout 和调用方携带的 Task expected version 处理竞争；Daemon 不成为数据库权威性的额外来源。是否需要 SSE/WebSocket，等 AI Client Hook 或实时会话查看出现真实需求后再决定。
+CLI 和 Daemon 可以并发打开同一个本机 SQLite 数据库，由 WAL、busy timeout 和调用方携带的 Task expected version 处理竞争；Daemon 不成为数据库权威性的额外来源。当前通过 SSE 通知已提交的数据库变化，客户端重新读取快照；外部 Git 文件变化仍需主动刷新，不提供持久事件重放。
 
 ## 3. GUI 页面
 
@@ -49,11 +49,11 @@ CLI 和 Daemon 可以并发打开同一个本机 SQLite 数据库，由 WAL、bu
 - `continuedFrom` 关系；
 - 来源 Checkpoint；
 - Session Import 元数据、重复提示和显式逻辑删除；GUI 不默认渲染原始 BLOB，删除前必须确认并展示“不保证取证级物理擦除”的边界；
-- 后续 Hook 实际采集到的可观察事件。
+- M4 Hook 实际采集到的元数据事件。
 
 GUI 不能把 Session 结束、摘要或测试文本显示成 Task 已验收。
 
-## 4. API 草案
+## 4. 业务 API 索引
 
 ```text
 GET  /api/tasks?status=&taskKey=&query=&pageSize=&cursor=&fields=
@@ -92,7 +92,7 @@ GET  /api/doctor
 
 Task 列表 Query 与 CLI 使用相同的筛选、游标分页和字段白名单投影合同，默认返回完整 TaskView；GUI 不解析 CLI table/lines 文本。Task/Session/Import/Worktree 显式 mutation 中，除 `task-create` 外都必须携带调用方最近查询得到的 `expectedVersion`，成功后返回完整 Task 和新 version；冲突返回 `VERSION_CONFLICT` 及 expected/current version。API 复用 CLI 文档中的 `schemaVersion=2` envelope、整数 Task ID/`taskId` 和稳定 code，不依赖自然语言判断。
 
-观测事件 `/api/hook` 独立去重，不使用 Task expectedVersion，也不返回伪造的新 Task version；`hook-clear` 属于显式 CAS mutation。所有 POST 使用 JSON 和自定义认证请求头；不自动重试写请求。详细 DTO 和操作确认规则见实施合同及使用指南。
+观测事件 `/api/hook` 独立去重，不使用 Task expectedVersion，也不返回伪造的新 Task version；`hook-clear` 属于显式 CAS mutation。POST 使用 JSON；身份可来自可信本机直连、请求头凭据或 Cookie，本机/Cookie 写入还需精确 Origin 与 CSRF 头。不自动重试写请求。连接授权、SSE 和 UI 包接口见使用指南及 [UI 独立发布](14-UI独立发布.md)。详细 DTO 和操作确认规则见实施合同及使用指南。
 
 ## 5. GUI 前置条件
 

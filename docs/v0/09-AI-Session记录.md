@@ -1,6 +1,6 @@
 # AI Session 记录
 
-> M4/M5 正在实现；具体接口、范围和安全合同以 [实施合同](11-M4-M5实施合同.md) 为准，本文保留背景与初版合同。
+> M4/M5 已有实现；当前服务合同见 [实施合同](11-M4-M5实施合同.md) 与 [使用指南](12-M4-M5使用与验收.md)。文中 M1–M3 指早期 CLI 范围，不能将历史验收记录理解为当前全部功能已验收。
 
 
 ## 1. 目标
@@ -164,7 +164,7 @@ taskctl hook clear <session-id> --if-version <version> --yes
 - 没有完整聊天记录时仍能继续任务；
 - Session 结束不会自动关闭 Task；
 - 未提供外部 Session ID 时，调用方可以生成稳定本地 ID 并将外部 ID 留空；
-- Hook 尚未实现时，手工 CLI 流程完整可用；
-- 所有 mutation 使用 expected version，旧快照更新返回结构化冲突；
+- Hook 未配置、禁用或失败时，手工 CLI 流程完整可用；
+- Task/Session 显式 mutation 使用 expected version，旧快照更新返回结构化冲突；Hook 追加按独立事件键去重，不递增 Task version；
 - Session 导入目标明确且超限或非普通文件会被拒绝；
 - 重复导入不复制 BLOB，导入元数据可查询且内容可显式逻辑删除。
