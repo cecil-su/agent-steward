@@ -167,7 +167,7 @@
     openAction('task-components','设置组件范围',[area('components','组件名称（每行一项；留空清空）',selectedNames,false),check('confirmed','确认替换组件范围，不改变执行会话或 Worktree')],'可选组件：'+data.components.map(c=>c.name).join('、'));
   }
   $('projects').onclick=safely(async()=>{if(!projectsSupported)return;projectPageVisible=true;$('task-page').hidden=true;$('project-page').hidden=false;await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);});
-  $('back-tasks').onclick=showTaskPage;
+  $('back-tasks').onclick=safely(async()=>{showTaskPage();if(!await loadList(false,true)||projectPageVisible||!connected||modal)return;if(selected)await selectTask(selected);});
   $('create-project').onclick=()=>openAction('project-create','新建项目',[text('name','项目名称')],'只创建项目记录；登记源码、关联任务均为后续显式操作。');
   $('project-more').onclick=safely(()=>loadProjects(true));
   $('project-filter-form').onsubmit=event=>{event.preventDefault();safely(applyProjectFilter)();};

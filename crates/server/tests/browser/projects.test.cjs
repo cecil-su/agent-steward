@@ -216,3 +216,30 @@ test('reader can inspect projects and navigation; old backends do not expose uns
   const old=fixture({supported:false});await settle();
   try{assert.equal(old.get('projects').hidden,true);assert.equal(old.get('project-filter-form').hidden,true);await old.get('projects').onclick();assert(!old.requests.some(r=>r.url.startsWith('/api/projects')));}finally{await old.get('logout').onclick();}
 });
+
+
+test('returning from projects refreshes hidden task changes and preserves loaded pages and selection',async()=>{
+  const f=fixture({tasksReply:(u,t)=>{
+    const offset=u.searchParams.has('cursor')?30:0;
+    return {tasks:Array.from({length:30},(_,i)=>({...t,id:offset+i+1})),hasMore:offset===0,nextCursor:offset===0?'page-two':null};
+  }});
+  await settle();
+  try{
+    await f.get('more').onclick();
+    assert.equal(f.get('task-list').children.length,60);
+    await f.get('projects').onclick();
+    const before=f.requests.filter(r=>r.url.startsWith('/api/projects?')).length;
+    f.task.title='Changed externally';f.task.version++;f.task.nextStep='New next step';
+    f.change();
+    await until(()=>f.requests.filter(r=>r.url.startsWith('/api/projects?')).length>before);
+    await settle();
+    await f.get('back-tasks').onclick();
+    assert.equal(f.get('task-list').children.length,60);
+    assert(f.text(f.get('task-list')).includes('Changed externally'));
+    assert(f.text(f.get('detail')).includes('Changed externally'));
+    assert(f.text(f.get('detail')).includes('版本 2'));
+    assert(f.text(f.get('detail')).includes('New next step'));
+    assert.equal(f.get('task-list').children[0].attributes['aria-current'],'true');
+    assert.equal(f.get('more').hidden,true);
+  }finally{await f.get('logout').onclick();}
+});
