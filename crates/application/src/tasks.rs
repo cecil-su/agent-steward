@@ -601,7 +601,21 @@ impl Service {
             _ => true,
         };
         if !valid {
-            return Err(AppError::constraint("task.close.invalid_transition"));
+            return Err(AppError::new(
+                "CONSTRAINT_VIOLATION",
+                if outcome == "completed" && task.status == TaskStatus::Blocked {
+                    "completed closure requires in_progress; after confirming the blocker is resolved, explicitly unblock the task, re-read its version, then close"
+                } else {
+                    "close outcome is not allowed from the current task status"
+                },
+                false,
+                json!({
+                    "constraint": "task.close.invalid_transition",
+                    "currentStatus": task.status,
+                    "outcome": outcome,
+                }),
+                4,
+            ));
         }
         if outcome == "completed"
             && (task.title.is_none()
