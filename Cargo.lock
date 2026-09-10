@@ -890,6 +890,7 @@ dependencies = [
  "sha2",
  "steward-application",
  "steward-core",
+ "storage-sqlite",
  "tempfile",
  "tokio",
  "tower",

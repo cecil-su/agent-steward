@@ -225,11 +225,20 @@ impl Service {
             values.push(SqlValue::Text(task_key.clone()));
         }
         if let Some(query) = &query {
-            conditions.push(
-                "(title LIKE ? ESCAPE '\\' OR goal LIKE ? ESCAPE '\\' OR scope LIKE ? ESCAPE '\\')",
-            );
-            let pattern = escaped_like_pattern(query);
-            values.extend((0..3).map(|_| SqlValue::Text(pattern.clone())));
+            let number = query.strip_prefix('#').unwrap_or(query);
+            if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
+                let id = number.parse::<i64>().map_err(|_| {
+                    AppError::invalid("query", "task number is outside the supported range")
+                })?;
+                conditions.push("id=?");
+                values.push(SqlValue::Integer(id));
+            } else {
+                conditions.push(
+                    "(title LIKE ? ESCAPE '\\' OR goal LIKE ? ESCAPE '\\' OR scope LIKE ? ESCAPE '\\')",
+                );
+                let pattern = escaped_like_pattern(query);
+                values.extend((0..3).map(|_| SqlValue::Text(pattern.clone())));
+            }
         }
         if let Some(cursor) = &cursor {
             conditions.push("(updated_at < ? OR (updated_at = ? AND id > ?))");

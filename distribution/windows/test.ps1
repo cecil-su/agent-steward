@@ -55,16 +55,18 @@ try {
             $result = Invoke-RestMethod "$url/api/commands/task-create" -Method Post -ContentType 'application/json' -Headers @{Origin=$url;'X-Steward-CSRF'='1'} -Body '{"input":{}}'
             Assert $result.ok 'Local write failed.'
             Stop-Managed
-            $url = Start-Managed 'v1.0.1'
-            $tasks = Invoke-RestMethod "$url/api/tasks"
-            Assert ($tasks.data.tasks.Count -eq 1) 'Restart did not preserve the task database.'
-            # A different, owned SQLite file advertises the old schema. Preflight
-            # must reject it without stopping the still-running Schema 7 daemon.
+            # Build the synthetic old-schema fixture while the owned database is
+            # quiescent. Never copy a live WAL database's main file; taskd now keeps
+            # its private sidecars open for its whole lifetime.
             $oldDatabase = Join-Path $temp 'old-schema.db'
             $bytes = [IO.File]::ReadAllBytes($settings.database)
             $bytes[60]=0; $bytes[61]=0; $bytes[62]=0; $bytes[63]=2
             [IO.File]::WriteAllBytes($oldDatabase,$bytes)
             $oldHash = (Get-FileHash -LiteralPath $oldDatabase).Hash
+            $url = Start-Managed 'v1.0.1'
+            $tasks = Invoke-RestMethod "$url/api/tasks"
+            Assert ($tasks.data.tasks.Count -eq 1) 'Restart did not preserve the task database.'
+            # Reject the incompatible file without stopping the running daemon.
             $recordBefore = [IO.File]::ReadAllText((Join-Path $InstallRoot 'process.json'))
             $oldSettings = $settings.Clone(); $oldSettings.database = $oldDatabase
             Write-Json (Join-Path $InstallRoot 'settings.json') $oldSettings

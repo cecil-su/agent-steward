@@ -98,6 +98,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("cannot resolve database path")?;
     let service = Service::new(database);
     service.task_list(Some("active"))?;
+    // Keep the privately initialized WAL/SHM alive for the daemon lifetime, without
+    // holding a transaction. Otherwise a later READ_ONLY context/SSE connection can
+    // recreate sidecars with inherited (unprotected) Windows ACLs after the last
+    // short-lived writer closes. Reads must not chmod files or weaken ACL checks.
+    let _database_lifetime = storage_sqlite::open_database(service.database_path())?;
     let listener = tokio::net::TcpListener::bind((args.bind, args.port)).await?;
     let address = listener.local_addr()?;
     let root = args

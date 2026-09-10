@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
-  const statuses = {open:'待开始',in_progress:'进行中',blocked:'有阻塞',closed:'已关闭'};
+  const statuses = {open:'待开始',in_progress:'进行中',pending_release:'待上线',blocked:'有阻塞',closed:'已关闭'};
   let warningText='', listRevision=0,projectDetailViewRevision=0;
   let projectsSupported=false,projectPageVisible=false,projectFilter='',projectFilterRevision=0,projectRows=[],projectListLoaded=false,projectCursor=null,projectListRevision=0,projectDetailRevision=0,projectContext=null,selectedProject=null;
   let pendingWrites=0, uncertainWrite=false, modalEpoch=0;
@@ -27,7 +27,7 @@
   async function apiRequest(path,body,extraHeaders={}) {
     if(body!==undefined&&!['/api/login','/api/logout','/api/connect'].includes(path))throw new Error('当前界面只读，请通过 CLI 维护。');
     let response;
-    try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'X-Steward-UI-Contract':'2',...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
+    try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'X-Steward-UI-Contract':'4',...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
     catch {const error=new Error(body===undefined?'无法读取本地服务，请检查服务是否仍在运行。':'结果未确认：请求中断或超时。请刷新任务和现场，核对是否已执行；不要直接重复提交。');error.uncertain=body!==undefined;throw error;}
     let result;try{result=await response.json();}catch{const error=new Error('服务返回无法识别的结果，请刷新核对。');error.uncertain=body!==undefined;throw error;}
     showWarnings(result.warnings);
@@ -86,6 +86,39 @@
     const provenance=section('资料来源',`资料 revision ${profile.revision} · 更新 ${profile.updatedAt}`);
     provenance.append(taskLink(profile.sourceTaskId,`来源任务 #${profile.sourceTaskId}`),el('p',`记录时任务版本 ${profile.sourceTaskVersion}（历史引用，不代表任务当前版本）`));root.append(provenance);
   }
+  function checkedRules(value,projectId){
+    const positive=n=>Number.isSafeInteger(n)&&n>0,nonblank=s=>typeof s==='string'&&s.trim().length>0;
+    const fail=()=>{throw new Error('有效规则不可用或格式不受支持，请刷新核对；不能按空规则继续。');};
+    if(value?.formatVersion!==1||!Array.isArray(value.rules))return fail();
+    const seen=new Set();
+    for(const rule of value.rules){
+      if(!rule||!positive(rule.id)||seen.has(rule.id)||!positive(rule.revision)||rule.status!=='active'||rule.contentVersion!==1
+        ||!nonblank(rule.content?.name)||!nonblank(rule.content?.body)||!Array.isArray(rule.content.sources)
+        ||!(rule.scope==='global'&&rule.projectId===null||rule.scope==='project'&&positive(rule.projectId)&&rule.projectId===projectId))return fail();
+      seen.add(rule.id);
+      for(const source of rule.content.sources)if(!source||!['explicit','inferred'].includes(source.kind)||!nonblank(source.evidence)
+        ||!(source.taskId===null&&source.taskVersion===null||positive(source.taskId)&&positive(source.taskVersion)))return fail();
+    }
+    return value.rules;
+  }
+  function rulesContent(root,value,projectId,expanded=new Set()){
+    const box=el('section',undefined,'section session-rules');box.append(el('h3','有效个人与项目规则'));root.append(box);
+    let rules;try{rules=checkedRules(value,projectId);}catch(error){box.append(el('p',error.message,'read-error'));return;}
+    if(!rules.length){box.append(el('p','暂无有效规则。','muted'));return;}
+    box.append(el('p','规则不构成执行授权；来源版本为历史引用，执行前仍需独立读取仓库 AGENTS。','muted'));
+    for(const rule of rules){
+      const detail=el('details',undefined,'info-box');detail.dataset.detailKey='session-rule-'+rule.id;detail.open=expanded.has(detail.dataset.detailKey);
+      detail.append(el('summary',`${rule.scope==='global'?'本机通用':'当前项目'} · ${rule.content.name} · revision ${rule.revision}`),section('规则正文',rule.content.body));
+      detail.append(el('p',`规则 #${rule.id} · 正文格式 ${rule.contentVersion}`));
+      if(!rule.content.sources.length)detail.append(el('p','未关联来源任务（直接偏好）。','muted'));
+      for(const source of rule.content.sources){
+        const origin=section(source.kind==='explicit'?'明确表达的依据':'推断依据',source.evidence);
+        if(source.taskId!==null)origin.append(taskLink(source.taskId,`来源任务 #${source.taskId}`),el('p',`记录时任务版本 ${source.taskVersion}（历史引用，不代表当前版本）`));
+        else origin.append(el('p','未关联来源任务。','muted'));detail.append(origin);
+      }
+      box.append(detail);
+    }
+  }
   function taskProject(root,snapshot){
     const box=el('section',undefined,'info-box task-project');box.append(el('h3','所属项目'));root.append(box);
     const t=snapshot.task;
@@ -135,6 +168,7 @@
     if(tab==='overview'){
       if(projectsSupported){taskProject(content,context);for(const node of content.querySelectorAll('details[data-detail-key]'))node.open=expanded.has(node.dataset.detailKey);}
       content.append(section('目标',t.goal),section('范围',t.scope),section('验收条件',t.acceptanceCriteria));if(t.blockReason)content.append(section('阻塞原因',t.blockReason),section('恢复条件',t.blockRecovery));
+      rulesContent(content,context.sessionRules,t.projectId??null,expanded);
       const cp=context.checkpoint;const checkpoint=el('div',undefined,'info-box');checkpoint.append(el('strong','最近 Checkpoint'));
       if(cp){checkpoint.append(el('p',date(cp.createdAt)+' · '+cp.sessionId),section('进展摘要',cp.summary),section('已完成',cp.completed),section('决策',cp.decisions),section('待办',cp.pending),section('风险',cp.risks));}else checkpoint.append(el('p','会话切换前保存 Checkpoint，让下一次继续有据可依。'));
       if(t.currentSessionId&&['in_progress','blocked'].includes(t.status))checkpoint.append(action('保存 Checkpoint','task-checkpoint',[area('summary','当前进展摘要'),area('completed','已完成（每行一项）','',false),area('decisions','已确认决策（每行一项）','',false),area('pending','未完成（每行一项）','',false),area('nextStep','唯一下一步',t.nextStep),area('risks','风险（每行一项）','',false)],'绑定当前 Session，Git HEAD 由服务实时读取。',{sessionId:t.currentSessionId}));content.append(checkpoint);
@@ -177,7 +211,7 @@
     }
   }
   function taskHistoryItem(h,snapshot,notes,noteError,expanded){
-    const labels={'task.created':'创建任务','task.updated':'更新任务信息','task.retitled':'修改任务标题','task.project_changed':'调整所属项目','task.components_changed':'调整组件范围','task.noted':'记录进展、决策或风险','task.blocked':'记录阻塞','task.unblocked':'解除阻塞','task.closed':'关闭任务','task.claimed':'开始执行任务','checkpoint.saved':'保存进展检查点','session.resumed':'换会话继续任务','session.attached':'关联执行会话','session.closed':'结束执行会话','session.bound':'绑定会话来源','session.imported':'导入会话记录','session.import_removed':'删除会话导入副本','worktree.created':'创建任务工作区','worktree.adopted':'登记任务工作区','worktree.removed':'删除任务工作区','worktree.detached':'解除失效工作区登记'};
+    const labels={'task.created':'创建任务','task.updated':'更新任务信息','task.retitled':'修改任务标题','task.project_changed':'调整所属项目','task.components_changed':'调整组件范围','task.noted':'记录进展、决策或风险','task.blocked':'记录阻塞','task.unblocked':'解除阻塞','task.closed':'关闭任务','task.claimed':'开始执行任务','task.pending_release':'开发结束，待上线','task.continued':'返回开发中','checkpoint.saved':'保存进展检查点','session.resumed':'换会话继续任务','session.attached':'关联执行会话','session.closed':'结束执行会话','session.bound':'绑定会话来源','session.imported':'导入会话记录','session.import_removed':'删除会话导入副本','worktree.created':'创建任务工作区','worktree.adopted':'登记任务工作区','worktree.removed':'删除任务工作区','worktree.detached':'解除失效工作区登记'};
     const p=h.payload||{},item=el('div',undefined,'timeline-item'),type=h.changeType;
     item.append(el('small',date(h.occurredAt)),el('h3',labels[type]||h.summary||'其他历史事件'));
     const fields={title:'标题',taskKey:'任务标识',goal:'目标',scope:'范围',acceptanceCriteria:'验收条件',nextStep:'下一步',projectId:'所属项目',componentIds:'组件范围',status:'状态',closureOutcome:'关闭结果',closureReason:'关闭原因',blockReason:'阻塞原因',blockRecovery:'恢复条件'};
@@ -187,6 +221,7 @@
     let changed=0;
     const diff=(key,before,after)=>{changed++;changes.append(section(fields[key]||key,`修改前：${value(key,before)}\n修改后：${value(key,after)}`));};
     if(p.before&&p.after){for(const key of Object.keys(fields))if(JSON.stringify(p.before[key])!==JSON.stringify(p.after[key]))diff(key,p.before[key],p.after[key]);}
+    else if(['task.pending_release','task.continued'].includes(type))diff('status',p.previousStatus,p.status);
     else if(type==='task.retitled')diff('title',p.previousTitle,p.title);
     else if(type==='task.project_changed'){diff('projectId',p.previousProjectId,p.projectId);if(Object.hasOwn(p,'previousComponentIds')||Object.hasOwn(p,'componentIds'))diff('componentIds',p.previousComponentIds,p.componentIds);}
     else if(type==='task.components_changed')diff('componentIds',p.previousComponentIds,p.componentIds);
@@ -214,7 +249,7 @@
   }
   async function loadEvents(id,root,after=0){const data=await api(`/api/sessions/${encodeURIComponent(id)}/events?after=${after}&limit=50`);if(!after)clear(root);if(!data.events.length&&!after)root.append(el('p','暂无观测记录。Hook 仅记录事件元数据，不保存消息正文。','muted'));for(const e of data.events){const row=el('div',undefined,'timeline-item');row.append(el('small',`#${e.sequence} · 发生 ${date(e.occurredAt)} · 接收 ${date(e.receivedAt)}`),el('p',e.kind+' · '+e.eventId));root.append(row);}if(data.hasMore){const more=button('下一页观测',safely(async()=>{more.remove();await loadEvents(id,root,data.nextAfter);}));root.append(more);}if(!after&&data.events.length)root.append(action('清除观测记录','hook-clear',[check('confirmed','确认清除 '+id+' 的观测记录')],'保留最小去重标记，防止重试恢复已删除事件。不保证物理擦除。',{sessionId:id}));}
   async function loadImports(id,root){const data=await api(`/api/sessions/${encodeURIComponent(id)}/imports`);clear(root);if(!data.imports.length)root.append(el('p','暂无导入记录。','muted'));for(const item of data.imports){const node=el('div',undefined,'timeline-item');node.append(el('p',item.sourcePath),el('small',`${item.sizeBytes} 字节 · ${date(item.importedAt)} · SHA-256 ${item.sha256}`),action('删除导入副本','session-import-remove',[check('confirmed','确认删除导入副本 '+item.id)],'只删除数据库副本，不删除源文件。不保证备份或存储介质上的物理擦除。',{importId:item.id}));root.append(node);}}
-  function contextText(){const t=context.task,cp=context.checkpoint;return [`# ${t.title||'未命名任务'} (#${t.id})`,`状态：${statuses[t.status]} · version ${t.version}`,'','## 目标',t.goal||'尚未填写','','## 范围',t.scope||'尚未填写','','## 验收',t.acceptanceCriteria||'尚未填写','','## 下一步',t.nextStep||'尚未填写',...(t.blockReason?['','## 阻塞',t.blockReason,'恢复条件：'+t.blockRecovery]:[]),'','## 项目归属',context.project?`${context.project.name} (##${context.project.id})`:'未关联或后端未提供','组件范围：'+(t.componentIds===undefined?'后端未提供':t.componentIds.length?t.componentIds.join(', '):'未限定组件'),'','## Checkpoint 后的备注（至多50条）',JSON.stringify(context.notesSinceCheckpoint||[],null,2),...(context.notesTruncated?['备注已截断；请使用完整备注查询。']:[]),'','## Checkpoint',cp?JSON.stringify(cp,null,2):'暂无','','## 执行会话',context.session?JSON.stringify(context.session,null,2):'暂无','','## 实时 Git 状态',context.worktreeStatus?JSON.stringify(context.worktreeStatus,null,2):'未关联或无法观察','','继续前重新读取最新 Task version；本文不授权自动关闭任务。'].join('\n');}
+  function contextText(){const t=context.task,cp=context.checkpoint;checkedRules(context.sessionRules,t.projectId??null);return [`# ${t.title||'未命名任务'} (#${t.id})`,`状态：${statuses[t.status]||t.status} · version ${t.version}`,'','## 目标',t.goal||'尚未填写','','## 范围',t.scope||'尚未填写','','## 验收',t.acceptanceCriteria||'尚未填写','','## 下一步',t.nextStep||'尚未填写',...(t.blockReason?['','## 阻塞',t.blockReason,'恢复条件：'+t.blockRecovery]:[]),'','## 项目归属',context.project?`${context.project.name} (##${context.project.id})`:'未关联或后端未提供','组件范围：'+(t.componentIds===undefined?'后端未提供':t.componentIds.length?t.componentIds.join(', '):'未限定组件'),'','## 项目资料与来源',context.projectProfile===undefined?'后端未提供项目资料。':context.projectProfile===null?'项目资料尚未填写。':JSON.stringify(context.projectProfile,null,2),'','## 有效个人与项目规则（不构成执行授权）',JSON.stringify(context.sessionRules,null,2),'来源任务版本为历史引用；仍需独立读取适用仓库 AGENTS。规则不授权领取、部署或关闭任务。','','## Checkpoint 后的备注（至多50条）',JSON.stringify(context.notesSinceCheckpoint||[],null,2),...(context.notesTruncated?['备注已截断；请使用完整备注查询。']:[]),'','## Checkpoint',cp?JSON.stringify(cp,null,2):'暂无','','## 执行会话',context.session?JSON.stringify(context.session,null,2):'暂无','','## 实时 Git 状态',context.worktreeStatus?JSON.stringify(context.worktreeStatus,null,2):'未关联或无法观察','','继续前重新读取最新 Task version；本文不授权自动关闭任务。'].join('\n');}
   async function copyContext(){const id=selected;await selectTask(id);if(!context||selected!==id)return;const output=contextText();try{await navigator.clipboard.writeText(output);notify('已复制最新交接上下文。',true);}catch{openAction('copy-context','交接上下文',[area('context','复制下方内容',output)],'选择并复制文本。');$('submit-action').hidden=true;}}
   function sourceContextText(data){return [`# ${data.project.name} (##${data.project.id})`,`源码登记：#${data.source.id}`,`当前目录：${data.resolvedPath||'未提供'}`,`观察时间：${data.observedAt||'未提供'}`,...(data.git?[`Git 分支：${data.git.branch||'未附着分支'}`,`HEAD：${data.git.head||'尚无提交'}`,`工作区：${data.git.dirty?'有改动':'未观察到改动'}`]:['Git 状态：未提供']),'','## 文件导航',...(data.entries||[]).map(e=>e.path),`省略条目：${data.omittedEntries||0}`,'','只读导航，不登记 Worktree，不自动领取或关闭任务。'].join('\n');}
   function showTaskPage(){projectPageVisible=false;projectDetailRevision++;$('project-page').hidden=true;$('task-page').hidden=false;}
@@ -254,6 +289,7 @@
     const p=info.project;if(!preserveRange)projectContext={project:p};clear(root);
     const heading=el('div',undefined,'detail-heading');heading.append(el('p',`##${p.id} · revision ${p.revision}`),el('h2',p.name));root.append(heading);
     profileContent(root,info.profile);
+    rulesContent(root,info.sessionRules,id,expanded);
     const componentsArea=section('组件','正在读取组件…'),sourcesArea=section('项目源码登记','正在读取源码登记…');root.append(componentsArea,sourcesArea);
     let components=null;
     const readComponents=async()=>{
@@ -414,7 +450,7 @@
       while(!controller.signal.aborted){
         let reader;
         try{
-          const response=await fetch('/api/events',{headers:{'X-Steward-UI-Contract':'2'},credentials:'same-origin',signal:controller.signal,cache:'no-store'});
+          const response=await fetch('/api/events',{headers:{'X-Steward-UI-Contract':'4'},credentials:'same-origin',signal:controller.signal,cache:'no-store'});
           if(controller.signal.aborted)return;
           if(response.status===401){resetConnection();$('login-error').textContent='浏览器授权已失效，请重新连接。';return;}
           if(!response.ok||!response.body)throw new Error('event stream unavailable');

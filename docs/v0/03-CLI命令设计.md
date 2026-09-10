@@ -47,7 +47,7 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 
 `<task-ref>` 接受纯数字 `12`、展示形式 `#12` 或可选 `taskKey`。前两种解析为整数主键，`taskKey` 按原文查询，没有 `key:` 转义语法。JSON 中的 `TaskView.id` 和所有 `taskId` 是整数；人类输出显示 `#12`。`taskKey` 不能为纯数字或以 `#` 开头；可以在创建时设置，也可以从 `null` 设置一次，之后不可更改或清空。
 
-`task list` 默认每页 50 条，最大 200 条，固定按 `updatedAt DESC, id ASC` 排序，并使用 `nextCursor` 继续读取。游标保存固定长度的筛选摘要并绑定创建它时的 `status/taskKey/query` 条件，不内嵌完整筛选文本；因此合法输入产生的 `nextCursor` 一定可被下一页消费，筛选条件变化后复用旧游标返回 `INVALID_INPUT`。`--status` 和 `--task-key` 精确匹配，`--query` 对 title/goal/scope 做转义后的 SQLite `LIKE` 包含匹配，ASCII 字母不区分大小写，非 ASCII 遵循 SQLite 默认比较语义，`%` 和 `_` 按普通字符处理。`--fields title` 或 `--fields id,title,status` 只投影白名单字段；不传时 JSON 返回完整 TaskView。未知、重复或空字段拒绝，字段白名单就是下文 `TaskView` 的 camelCase 字段集合；投影不改变筛选、排序和游标计算。
+`task list` 默认每页 50 条，最大 200 条，固定按 `updatedAt DESC, id ASC` 排序，并使用 `nextCursor` 继续读取。游标保存固定长度的筛选摘要并绑定创建它时的 `status/taskKey/query` 条件，不内嵌完整筛选文本；因此合法输入产生的 `nextCursor` 一定可被下一页消费，筛选条件变化后复用旧游标返回 `INVALID_INPUT`。`--status` 和 `--task-key` 精确匹配。`--query 45` 或 `--query '#45'` 按整数ID精确搜索，不匹配其它任务正文中的数字；前导零按同一编号处理，超出整数范围返回 `INVALID_INPUT`，不存在编号返回空列表。编号查询仍与状态、项目等筛选取交集；已关闭任务需选对应视图或不限制状态。其它 `--query` 对 title/goal/scope 做转义后的 SQLite `LIKE` 包含匹配，ASCII 字母不区分大小写，非 ASCII 遵循 SQLite 默认比较语义，`%` 和 `_` 按普通字符处理。`--fields title` 或 `--fields id,title,status` 只投影白名单字段；不传时 JSON 返回完整 TaskView。未知、重复或空字段拒绝，字段白名单就是下文 `TaskView` 的 camelCase 字段集合；投影不改变筛选、排序和游标计算。
 
 非 JSON 的 `task list` 默认输出 ID/title/status/updatedAt 表格；显式 `--fields` 决定表格列，`null` 显示为 `—`，过长单元格只在表格中以省略号截断。`--format lines` 要求恰好选择一个字段，每条 Task 输出一行；它不能与 `--json` 组合。机器调用始终使用 `--json`，不解析表格或 lines 文本。
 

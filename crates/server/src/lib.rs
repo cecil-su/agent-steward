@@ -181,6 +181,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/ui/releases/{id}/{name}", get(ui::asset))
         .route("/app.js", get(script))
         .route("/style.css", get(style))
+        .route("/favicon.ico", get(favicon))
         .route("/api/connect", post(connect))
         .route("/api/access", get(access))
         .route("/api/login", post(login))
@@ -541,6 +542,13 @@ async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Respon
     }
     pending.take();
     grant_browser(&state, &headers, "admin")
+}
+
+async fn favicon() -> impl IntoResponse {
+    (
+        [("content-type", "image/vnd.microsoft.icon")],
+        include_bytes!("../web-legacy-readonly/favicon.ico").as_slice(),
+    )
 }
 
 async fn script() -> impl IntoResponse {

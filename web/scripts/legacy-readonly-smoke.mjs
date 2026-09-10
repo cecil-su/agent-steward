@@ -63,9 +63,15 @@ try {
   cli('task', 'components', String(scoped.id), '--component', 'frontend', '--if-version', String(scoped.version), '--yes', '--reason', 'Synthetic component scope fixture');
   const noProject = createTask('无项目任务', null);
   const emptyTask = createTask('资料未填写任务', empty.id);
+  cli('task', 'claim', String(noProject.id), '--session', 'synthetic-pending', '--if-version', String(noProject.version));
+  cli('task', 'pending-release', String(noProject.id), '--if-version', String(noProject.version + 1));
+  const ruleBody = '规则完整正文\n<img src=x onerror=alert(1)>';
+  for (const [name, projectId, ruleStatus] of [['合成通用规则', null, 'active'], ['合成项目规则', p.id, 'active'], ['candidate-hidden', null, 'candidate'], ['disabled-hidden', null, 'disabled']]) {
+    cli('rule', 'create', '--reason', 'Synthetic native rules fixture', '--input', input('rule', { scope: projectId ? 'project' : 'global', projectId, status: ruleStatus, contentVersion: 1, content: { name, body: ruleBody, sources: [{ kind: 'explicit', evidence: '历史版本依据', taskId: origin.id, taskVersion: origin.version }] } }));
+  }
   const baseline = snapshot();
   const resources = Object.fromEntries(['index.html', 'app.js', 'style.css'].map(name => [name, fs.readFileSync(path.join(source, name))]));
-  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'native-task45-test', requiredApiContract: 2, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
+  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'native-task45-test', requiredApiContract: 4, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
   const release = sha(manifest), uiRoot = path.join(temp, 'ui'), releaseDir = path.join(uiRoot, 'releases', release);
   fs.mkdirSync(releaseDir, { recursive: true });
   fs.writeFileSync(path.join(releaseDir, 'manifest.json'), manifest);
@@ -95,12 +101,29 @@ try {
   await page.goto(url);
   try { await page.getByLabel('本次服务的连接凭据').fill(token); await page.getByRole('button', { name: '连接工作台' }).click(); await page.locator('#workspace').waitFor({ state: 'visible' }); }
   catch { await page.screenshot({ path: path.join(artifacts, 'login-failure.png') }); console.error('Login diagnostic:', await page.locator('#login-error').textContent({ timeout: 1000 }).catch(() => 'Application login page unavailable'), errors); throw Error('Synthetic reader login failed (credential omitted)'); }
+  for (const number of [String(noProject.id), '#' + noProject.id]) {
+    await page.locator('#search').fill(number); await page.locator('#search-form button').click();
+    await page.waitForFunction(id => { const cards = document.querySelectorAll('#task-list .task-card'); return cards.length === 1 && cards[0].querySelector('.card-meta span')?.textContent === '#' + id; }, noProject.id);
+  }
+  await page.locator('#search').fill(''); await page.locator('#search-form button').click();
+  await page.waitForFunction(() => document.querySelectorAll('#task-list .task-card').length === 30);
   const task = async name => { await page.locator('#task-list .task-card').filter({ hasText: name }).click(); await page.locator('#detail h2').filter({ hasText: name }).waitFor(); };
   const project = async name => { await page.locator('#projects').click(); await page.locator('#project-list .task-card').filter({ hasText: name }).click(); await page.locator('#project-detail h2').filter({ hasText: name }).waitFor(); };
   const projectRoot = page.locator('#project-detail');
   await task('无项目任务'); await page.getByText('未关联项目', { exact: true }).waitFor();
+  await page.locator('#detail .badge.pending_release').waitFor();
   await task('资料未填写任务'); await page.locator('#detail summary').filter({ hasText: '展开项目简介' }).click(); await page.getByText('项目简介尚未填写。', { exact: true }).waitFor();
   await task('未限定组件任务'); await page.getByText('当前组件范围：未限定组件', { exact: true }).waitFor();
+  const rulesPanel = page.locator('#detail .session-rules');
+  await rulesPanel.getByText('本机通用 · 合成通用规则 · revision 1', { exact: true }).click();
+  await rulesPanel.locator('details[open]').getByText(ruleBody, { exact: true }).waitFor();
+  assert.equal(await rulesPanel.locator('img,script').count(), 0);
+  assert.equal(await rulesPanel.getByText(/candidate-hidden|disabled-hidden/).count(), 0);
+  await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { window.__copied = text; } } }); });
+  await page.getByRole('button', { name: '复制交接上下文', exact: true }).click();
+  await page.waitForFunction(() => window.__copied?.includes('规则完整正文'));
+  const copied = await page.evaluate(() => window.__copied);
+  for (const text of ['历史版本依据', 'sourceTaskVersion', '"taskVersion": 1', '不构成执行授权']) assert(copied.includes(text));
   assert.equal(await page.locator('#detail').getByText('架构入口独占项目页', { exact: false }).count(), 0);
   assert.equal(await page.locator('#detail').getByText(profile.summary, { exact: true }).isVisible(), false);
   await page.locator('#detail summary').filter({ hasText: '展开项目简介' }).click();
@@ -200,10 +223,15 @@ try {
   assert.equal(await page.locator('#detail').getByText('当前组件范围：未限定组件', { exact: true }).count(), 0);
   await page.unroute(`**/api/projects/${p.id}/components`, fail); await page.getByRole('button', { name: '重试读取组件名称', exact: true }).click();
   await page.getByText(`当前组件范围：frontend (#${component.id})`, { exact: true }).waitFor();
-  const missingTaskFields = async route => { const response = await route.fetch(); const body = await response.json(); delete body.data.projectProfile; delete body.data.task.componentIds; await route.fulfill({ response, json: body }); };
+  const missingTaskFields = async route => { const response = await route.fetch(); const body = await response.json(); delete body.data.projectProfile; delete body.data.task.componentIds; delete body.data.sessionRules; await route.fulfill({ response, json: body }); };
   await page.route(`**/api/tasks/${scoped.id}/context`, missingTaskFields); await page.locator('#refresh').click();
   await page.getByText('后端未提供组件范围。', { exact: true }).waitFor(); await page.locator('#detail summary').filter({ hasText: '展开项目简介' }).click();
   await page.getByText('后端未提供项目资料字段，无法读取简介。', { exact: true }).waitFor();
+  await page.locator('#detail .session-rules .read-error').waitFor();
+  await page.evaluate(() => { window.__copied = ''; });
+  await page.getByRole('button', { name: '复制交接上下文', exact: true }).click();
+  await page.locator('#notice').getByText('有效规则不可用或格式不受支持，请刷新核对；不能按空规则继续。', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__copied), '');
   await page.unroute(`**/api/tasks/${scoped.id}/context`, missingTaskFields);
   // Failed context clears the prior task rather than presenting it as the newly selected task.
   await page.route(`**/api/tasks/${unbounded.id}/context`, fail);
@@ -223,7 +251,7 @@ try {
   await page.locator('#logout').click();
   assert.deepEqual(posts, ['/api/login', '/api/logout', '/api/login', '/api/logout']);
   assert.equal(snapshot(), baseline, 'Browser changed synthetic database tables');
-  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['full profile/provenance', 'compact task project', 'component scope', 'project source versus task Worktree', 'closed task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'reader/admin readonly boundary', 'all SQLite tables unchanged'] };
+  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['numeric and hash-prefixed task search', 'contract4 and pending release', 'full rules/source copy and missing-rule copy rejection', 'full profile/provenance', 'compact task project', 'component scope', 'project source versus task Worktree', 'closed task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'reader/admin readonly boundary', 'all SQLite tables unchanged'] };
   fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2)); success = true;
 } finally {
   try { if (browser) await browser.close(); }

@@ -80,6 +80,72 @@ async fn project_task_filter_and_context_keep_project_isolation() {
 }
 
 #[tokio::test]
+async fn favicon_is_public_same_origin_and_does_not_initialize_storage() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("missing.db");
+    let app = router(ServerState::new(
+        Service::new(&database),
+        43123,
+        TOKEN.into(),
+    ));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.ico")
+                .header("host", "127.0.0.1:43123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "image/vnd.microsoft.icon"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        response.headers()["cross-origin-resource-policy"],
+        "same-origin"
+    );
+    let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+    assert_eq!(
+        bytes.as_ref(),
+        include_bytes!("../web-legacy-readonly/favicon.ico")
+    );
+    assert!(!database.exists());
+}
+
+#[tokio::test]
+async fn task_search_accepts_encoded_number_and_preserves_the_selected_view() {
+    let (_temp, service, app) = fixture();
+    service
+        .task_create("SECOND", r#"{"goal":"1 in text, not task number"}"#)
+        .unwrap();
+    let before = service.history("1").unwrap().data;
+    for query in ["1", "%231"] {
+        let (status, body) = request(
+            &app,
+            "GET",
+            &format!("/api/tasks?query={query}&view=active"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"]["tasks"][0]["id"], 1);
+    }
+    assert_eq!(service.history("1").unwrap().data, before);
+    service
+        .task_close("1", 1, "cancelled", Some("synthetic search fixture"))
+        .unwrap();
+    let (_, active) = request(&app, "GET", "/api/tasks?query=%231&view=active", None).await;
+    assert!(active["data"]["tasks"].as_array().unwrap().is_empty());
+    let (_, closed) = request(&app, "GET", "/api/tasks?query=%231&status=closed", None).await;
+    assert_eq!(closed["data"]["tasks"][0]["id"], 1);
+}
+
+#[tokio::test]
 async fn reader_credentials_can_query_but_cannot_mutate_any_resource() {
     let (_temp, service, _) = fixture();
     let app = router(
