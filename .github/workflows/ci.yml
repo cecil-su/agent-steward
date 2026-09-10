@@ -42,10 +42,19 @@ jobs:
           components: clippy
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Build and test readonly UI
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+          npm run build
+          npm run sync:embedded
       - name: Build binaries
         run: cargo build --workspace --locked
       - name: Clippy
@@ -63,17 +72,22 @@ jobs:
       - name: Install browser test dependencies
         if: runner.os == 'Linux'
         run: |
-          npm install --prefix "$RUNNER_TEMP/steward-browser" --no-audit --no-fund playwright@1.58.2
-          "$RUNNER_TEMP/steward-browser/node_modules/.bin/playwright" install --with-deps chromium
-          echo "NODE_PATH=$RUNNER_TEMP/steward-browser/node_modules" >> "$GITHUB_ENV"
+          cd web
+          npx --no-install playwright install --with-deps chromium
       - name: Browser smoke test
         if: runner.os == 'Linux'
-        run: node crates/server/tests/browser/smoke.cjs
+        working-directory: web
+        env:
+          STEWARD_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
+          STEWARD_BROWSER_CHANNEL: chromium
+        run: |
+          STEWARD_TEST_UI_MODE=embedded npm run test:browser
+          npm run test:browser
       - name: Upload browser screenshots
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: browser-screenshots
-          path: .local/m5-*.png
+          path: web/.artifacts/
           if-no-files-found: ignore
           retention-days: 7

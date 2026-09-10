@@ -216,72 +216,13 @@ impl Service {
         reference: &str,
         expected: i64,
         names: &[String],
+        confirmed: bool,
+        reason: &str,
     ) -> AppResult<Outcome> {
-        if names.len() > 200 {
-            return Err(AppError::invalid("components", "at most 200 components"));
-        }
-        let mut connection = self.connection()?;
-        let tx =
-            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = crate::db::load_task_by_reference(&tx, reference)?;
-        crate::db::check_version(&task, expected)?;
-        if task.status == steward_core::TaskStatus::Closed {
-            return Err(AppError::constraint("task.closed"));
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        for name in names {
-            let project_id = task.project_id.ok_or_else(|| {
-                AppError::invalid(
-                    "project",
-                    "associate the task with a project before selecting components",
-                )
-            })?;
-            let (_, key) = normalize_project_name(name)
-                .map_err(|reason| AppError::invalid("component", reason))?;
-            let id: i64 = tx
-                .query_row(
-                    "SELECT id FROM components WHERE project_id=?1 AND name_key=?2",
-                    params![project_id, key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(AppError::from_sqlite)?
-                .ok_or_else(|| AppError::not_found("Component", name))?;
-            if !ids.insert(id) {
-                return Err(AppError::invalid(
-                    "component",
-                    "duplicate component selection",
-                ));
-            }
-        }
-        let ids: Vec<i64> = ids.into_iter().collect();
-        if ids == task.component_ids {
-            tx.commit().map_err(AppError::from_sqlite)?;
-            return Ok(Outcome::new(json!({"task":task})));
-        }
-        tx.execute("DELETE FROM task_components WHERE task_id=?1", [task.id])
-            .map_err(AppError::from_sqlite)?;
-        for id in &ids {
-            tx.execute(
-                "INSERT INTO task_components(task_id,project_id,component_id) VALUES (?1,?2,?3)",
-                params![task.id, task.project_id, id],
-            )
-            .map_err(AppError::from_sqlite)?;
-        }
-        let timestamp = now();
-        crate::db::bump_task(&tx, task.id, expected, &timestamp)?;
-        crate::db::insert_history(
-            &tx,
-            task.id,
-            "task.components_changed",
-            task.current_session_id.as_deref(),
-            "task component scope changed",
-            json!({"previousComponentIds":task.component_ids,"componentIds":ids}),
-            &timestamp,
-        )?;
-        let updated = crate::db::load_task(&tx, task.id)?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task":updated})))
+        self.task_update_fields(
+            reference, expected, &json!({"components": names}).to_string(),
+            confirmed, reason, "task.components_changed",
+        )
     }
 
     pub fn project_component_add(

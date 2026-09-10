@@ -9,6 +9,8 @@ pub use hooks::HookEventInput;
 mod permissions;
 pub use permissions::database_permission_warning;
 mod project_context;
+mod project_profiles;
+pub use project_profiles::{ProjectProfileInput, ProjectProfileView};
 mod projects;
 pub use project_context::ProjectContextOptions;
 mod sources;

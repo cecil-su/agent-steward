@@ -44,12 +44,12 @@ fn task_session_checkpoint_import_and_history_flow() {
     let no_op = service.task_claim("TASK-1", 2, "session-a", false).unwrap();
     assert_eq!(version(&no_op), 2);
     let stale = service
-        .task_update("TASK-1", 1, r#"{"nextStep":"stale"}"#)
+        .task_update("TASK-1", 1, r#"{"nextStep":"stale"}"#, true, "fixture")
         .unwrap_err();
     assert_eq!(stale.body.code, "VERSION_CONFLICT");
 
     let updated = service
-        .task_update("TASK-1", 2, r#"{"nextStep":"Write tests"}"#)
+        .task_update("TASK-1", 2, r#"{"nextStep":"Write tests"}"#, true, "fixture")
         .unwrap();
     assert_eq!(version(&updated), 3);
     let noted = service
@@ -278,6 +278,7 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
                 "acceptanceCriteria":"Initial acceptance",
                 "nextStep":"Continue"
             }"#,
+            true, "fixture",
         )
         .unwrap();
     assert_eq!(version(&filled), 3);
@@ -287,6 +288,7 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
             "PATCHABLE",
             3,
             r#"{"title":"0904｜优化｜Patched title","goal":"Patched goal","nextStep":null}"#,
+            true, "fixture",
         )
         .unwrap();
     assert_eq!(version(&patched), 4, "one patch increments version once");
@@ -294,7 +296,7 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
     assert!(patched.data["task"]["nextStep"].is_null());
 
     let immutable_key = service
-        .task_update("#1", 4, r#"{"taskKey":"OTHER"}"#)
+        .task_update("#1", 4, r#"{"taskKey":"OTHER"}"#, true, "fixture")
         .unwrap_err();
     assert_eq!(immutable_key.body.code, "CONSTRAINT_VIOLATION");
     assert_eq!(
@@ -303,7 +305,7 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
     );
 
     let clearing = service
-        .task_update("PATCHABLE", 4, r#"{"title":null}"#)
+        .task_update("PATCHABLE", 4, r#"{"title":null}"#, true, "fixture")
         .unwrap_err();
     assert_eq!(clearing.body.code, "INVALID_INPUT");
     assert_eq!(clearing.body.details["field"], "title");
@@ -322,7 +324,7 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
     let closed_at = closed.data["task"]["closedAt"].clone();
 
     let ordinary_update = service
-        .task_update("PATCHABLE", 5, r#"{"title":"0904｜文档｜Closed title"}"#)
+        .task_update("PATCHABLE", 5, r#"{"nextStep":"not allowed when closed"}"#, true, "fixture")
         .unwrap_err();
     assert_eq!(ordinary_update.body.code, "CONSTRAINT_VIOLATION");
     let retitled = service
@@ -394,7 +396,7 @@ fn task_titles_require_the_display_naming_rule() {
         .unwrap();
     assert_eq!(created.data["task"]["title"], "0229｜研究｜Leap-day title");
     let invalid_update = service
-        .task_update("VALID-TITLE", 1, r#"{"title":"Still plain"}"#)
+        .task_update("VALID-TITLE", 1, r#"{"title":"Still plain"}"#, true, "fixture")
         .unwrap_err();
     assert_eq!(invalid_update.body.code, "INVALID_INPUT");
     assert_eq!(
@@ -643,7 +645,7 @@ fn concurrent_writers_cannot_bypass_task_cas() {
         let barrier = Arc::clone(&barrier);
         std::thread::spawn(move || {
             barrier.wait();
-            service.task_update("#1", 1, &format!(r#"{{"title":"{title}"}}"#))
+            service.task_update("#1", 1, &format!(r#"{{"title":"{title}"}}"#), true, "fixture")
         })
     });
     let results = handles.map(|handle| handle.join().unwrap());

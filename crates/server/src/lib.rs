@@ -546,13 +546,13 @@ async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Respon
 async fn script() -> impl IntoResponse {
     (
         [("content-type", "text/javascript; charset=utf-8")],
-        include_str!("../web/app.js"),
+        include_str!("../web-readonly/app.js"),
     )
 }
 async fn style() -> impl IntoResponse {
     (
         [("content-type", "text/css; charset=utf-8")],
-        include_str!("../web/style.css"),
+        include_str!("../web-readonly/style.css"),
     )
 }
 
@@ -723,12 +723,14 @@ enum Command {
         #[serde(default)]
         clear: bool,
         confirmed: bool,
+        reason: String,
     },
     TaskComponents {
         task_id: i64,
         expected_version: i64,
         components: Vec<String>,
         confirmed: bool,
+        reason: String,
     },
     TaskCreate {
         input: steward_core::TaskCreateInput,
@@ -737,6 +739,8 @@ enum Command {
         task_id: i64,
         expected_version: i64,
         patch: Value,
+        confirmed: bool,
+        reason: String,
     },
     TaskRetitle {
         task_id: i64,
@@ -903,6 +907,7 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
             project,
             clear,
             confirmed,
+            reason,
         } => {
             confirm(confirmed)?;
             if project.is_some() == clear {
@@ -911,16 +916,17 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
                     "provide a project OR explicit clear=true",
                 ));
             }
-            s.task_set_project(&format!("#{task_id}"), expected_version, project.as_deref())
+            s.task_set_project(&format!("#{task_id}"), expected_version, project.as_deref(), confirmed, &reason)
         }
         Command::TaskComponents {
             task_id,
             expected_version,
             components,
             confirmed,
+            reason,
         } => {
             confirm(confirmed)?;
-            s.task_set_components(&format!("#{task_id}"), expected_version, &components)
+            s.task_set_components(&format!("#{task_id}"), expected_version, &components, confirmed, &reason)
         }
         Command::TaskCreate { input } => {
             s.task_create_with_options(None, Some(&serde_json::to_string(&input).unwrap()))
@@ -929,7 +935,9 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
             task_id,
             expected_version,
             patch,
-        } => s.task_update(&task_id.to_string(), expected_version, &patch.to_string()),
+            confirmed,
+            reason,
+        } => s.task_update(&task_id.to_string(), expected_version, &patch.to_string(), confirmed, &reason),
         Command::TaskRetitle {
             task_id,
             expected_version,

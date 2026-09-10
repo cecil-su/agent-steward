@@ -55,7 +55,7 @@ async fn project_task_filter_and_context_keep_project_isolation() {
     let (_temp, service, app) = fixture();
     service.project_create("Mailroom").unwrap();
     service.project_create("Steward").unwrap();
-    service.task_set_project("1", 1, Some("##1")).unwrap();
+    service.task_set_project("1", 1, Some("##1"), true, "fixture").unwrap();
     service
         .task_create_in_project(None, None, Some("##2"))
         .unwrap();
@@ -496,17 +496,17 @@ async fn commands_and_cli_share_cas_and_conflict_details() {
         &app,
         "POST",
         "/api/commands/task-update",
-        Some(json!({"taskId":1,"expectedVersion":1,"patch":{"goal":"from browser"}})),
+        Some(json!({"taskId":1,"expectedVersion":1,"patch":{"goal":"from browser"},"confirmed":true,"reason":"fixture"})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["task"]["version"], 2);
-    s.task_update("1", 2, r#"{"goal":"from CLI"}"#).unwrap();
+    s.task_update("1", 2, r#"{"goal":"from CLI"}"#, true, "fixture").unwrap();
     let (status, body) = request(
         &app,
         "POST",
         "/api/commands/task-update",
-        Some(json!({"taskId":1,"expectedVersion":2,"patch":{"goal":"stale browser"}})),
+        Some(json!({"taskId":1,"expectedVersion":2,"patch":{"goal":"stale browser"},"confirmed":true,"reason":"fixture"})),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);

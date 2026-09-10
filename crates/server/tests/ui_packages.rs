@@ -77,9 +77,10 @@ async fn switches_whole_releases_and_rolls_back_without_rebuilding_router() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let app = fixture(root);
+    assert_eq!(status(&app).await["apiContract"], 2);
     let embedded = status(&app).await["release"].as_str().unwrap().to_owned();
-    let a = package(root, "a", 1);
-    let b = package(root, "b", 1);
+    let a = package(root, "a", 2);
+    let b = package(root, "b", 2);
     activate(root, &a);
     let (_, headers, html) = get(&app, "/").await;
     assert_eq!(headers["cache-control"], "no-store");
@@ -114,15 +115,18 @@ async fn refuses_bad_packages_and_keeps_last_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let app = fixture(root);
-    let a = package(root, "good", 1);
+    let a = package(root, "good", 2);
     activate(root, &a);
     assert_eq!(status(&app).await["release"], a);
-    let incompatible = package(root, "incompatible", 2);
+    let incompatible = package(root, "old-contract", 1);
     activate(root, &incompatible);
     let s = status(&app).await;
     assert_eq!(s["release"], a);
     assert_eq!(s["error"], "UI_API_INCOMPATIBLE");
-    let corrupt = package(root, "corrupt", 1);
+    let restarted = fixture(root);
+    assert_eq!(status(&restarted).await["uiVersion"], "embedded");
+    assert_eq!(status(&restarted).await["error"], "UI_API_INCOMPATIBLE");
+    let corrupt = package(root, "corrupt", 2);
     fs::write(
         root.join("releases").join(&corrupt).join("app.js"),
         "modified",
@@ -154,11 +158,11 @@ async fn checks_paths_manifest_identity_size_and_security_boundary() {
         activate(root, id);
         assert!(status(&app).await["error"].is_string());
     }
-    let a = package(root, "a", 1);
+    let a = package(root, "a", 2);
     fs::write(root.join("releases").join(&a).join("manifest.json"), "{}").unwrap();
     activate(root, &a);
     assert_eq!(status(&app).await["error"], "UI_PACKAGE_HASH_MISMATCH");
-    let big = package(root, "big", 1);
+    let big = package(root, "big", 2);
     fs::write(
         root.join("releases").join(&big).join("app.js"),
         vec![b'x'; 4 * 1024 * 1024 + 1],
@@ -191,8 +195,8 @@ async fn concurrent_switches_never_mix_an_entry_and_its_resources() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();
     let app = fixture(&root);
-    let a = package(&root, "a", 1);
-    let b = package(&root, "b", 1);
+    let a = package(&root, "a", 2);
+    let b = package(&root, "b", 2);
     activate(&root, &a);
     assert_eq!(status(&app).await["release"], a);
     let writer_app = app.clone();
@@ -233,7 +237,7 @@ async fn stale_ui_contract_cannot_execute_a_write() {
                 .uri("/api/commands/task-create")
                 .header("host", "127.0.0.1:43123")
                 .header("x-steward-token", "synthetic")
-                .header("x-steward-ui-contract", "0")
+                .header("x-steward-ui-contract", "1")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"input":{}}"#))
                 .unwrap(),

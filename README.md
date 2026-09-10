@@ -71,9 +71,9 @@ cargo build --workspace --locked
 cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/steward.db
 ```
 
-启动后默认自动打开 `http://127.0.0.1:43123`。本机直接访问免凭据，包括通过 `--bind` 指定的本机网卡 IP 访问；严格认证模式用 `--require-local-auth`。本机免登录信任所有本地用户/程序，不可通过代理或隧道暴露。远程/严格模式的浏览器授权保留 30 天。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。Windows 本地编译更新可双击 [`distribution/windows/Update-Local.cmd`](distribution/windows/Update-Local.cmd)，首次设置后保留 IP、端口和数据路径；不自动拉代码，编译成功后才切换受管服务。详见 [启动与更新指南](distribution/windows/README.md)。首次创建的私有凭据跨重启保留，SSE 自动同步 CLI/Hook 和页面提交，正在编辑的表单不被覆盖。GUI 支持任务编辑、会话交接、Checkpoint、History、Hook 观测与安全 Worktree 操作；无需单独安装前端依赖。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
+启动后默认自动打开 `http://127.0.0.1:43123`。本机直接访问免凭据，包括通过 `--bind` 指定的本机网卡 IP 访问；严格认证模式用 `--require-local-auth`。本机免登录信任所有本地用户/程序，不可通过代理或隧道暴露。远程/严格模式的浏览器授权保留 30 天。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。Windows 本地编译更新可双击 [`distribution/windows/Update-Local.cmd`](distribution/windows/Update-Local.cmd)，首次设置后保留 IP、端口和数据路径；不自动拉代码，编译与数据库版本预检成功后才切换受管服务；现有 Schema 2/4 安装须经独立迁移并使用新的安装目录，不由普通更新跨 Schema 切换。详见 [启动与更新指南](distribution/windows/README.md)。首次创建的私有凭据跨重启保留，SSE 同步 CLI/Hook 变更，保留未应用搜索和复制输入。Web 为只读工作台，支持任务/项目检索、Checkpoint、Session、History、代码现场和项目资料/来源查看与上下文复制，不提供业务写入口；业务维护由 CLI 完成。已安装程序无需前端依赖；前端开发与内嵌同步见 [web/README.md](web/README.md)。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
 
-当前开发构建的数据库格式为 **schema 4**，不自动迁移旧 schema 1/2/3；旧数据库继续由原构建使用，新功能仅在显式指定的隔离新库验证。CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`。**在活动库迁移方案完成并明确授权前，不安装覆盖全局 CLI/Hook，也不运行本地更新脚本切换正式服务。**
+当前数据库格式为 **schema 5**，不自动迁移旧 schema 1/2/3/4；CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`。Schema4 可通过显式 `database import-schema4` 复制到私有新库，资料使用项目 revision 与来源任务 version 校验。2026-09-09 已按用户授权完成本机成套迁移/发布，详情与恢复边界见 [Schema5 项目资料与发布记录](docs/v0/19-Schema5项目资料与CLI维护.md)。其它环境仍须单独停写、备份、迁移、核验和授权，不能通过普通更新跨 schema。
 
 ## V0 项目与任务归属
 
@@ -85,7 +85,7 @@ taskctl --database /absolute/demo.db task create --project Mailroom
 taskctl --database /absolute/demo.db task list --project '##1'
 ```
 
-示例编号取决于创建返回值。`task context` 增加同事务项目信息及 Checkpoint 之后的新 Notes，超过 50 条显式提示读取完整 Notes。组件/源码根、多仓/monorepo 关联、`project here` 候选定位及 `task components` 范围选择已实现，Git 源须指定 Worktree 解析，所有操作不自动领取或采纳。`project context` 已提供现场来源导航、显式文件片段与 compact JSON data 字节预算；增加前后 Git HEAD/分支/dirty 证据与明确复用阻塞原因，但不持久缓存、不证明完整依赖或宿主环境，`reuseAllowed=false`。项目管理 HTTP/页面已补充：顶部“项目管理”可创建/改名、登记源码，任务可关联项目/组件并按项目筛选；只读角色仅查询。缓存与 Pi 桥接暂缓，不作为项目功能交付前提。人工流程见 [项目管理验收](docs/v0/17-项目管理验收.md)；合同、限制和阶段计划见 [项目与上下文复用](docs/v0/16-项目与上下文复用.md)。
+示例编号取决于创建返回值。`task context` 增加同事务项目信息及 Checkpoint 之后的新 Notes，超过 50 条显式提示读取完整 Notes。组件/源码根、多仓/monorepo 关联、`project here` 候选定位及 `task components` 范围选择已实现，Git 源须指定 Worktree 解析，所有操作不自动领取或采纳。`project context` 已提供现场来源导航、显式文件片段与 compact JSON data 字节预算；增加前后 Git HEAD/分支/dirty 证据与明确复用阻塞原因，但不持久缓存、不证明完整依赖或宿主环境，`reuseAllowed=false`。项目管理 CLI/HTTP 写合同保留；React 页面仅只读检索和展示，可按项目筛选任务。项目资料由 `project profile set` 维护，记录来源任务/依据与 before/after History，项目详情和任务上下文均可读取。缓存与 Pi 桥接暂缓，不作为项目功能交付前提。人工流程见 [项目管理验收](docs/v0/17-项目管理验收.md)；合同、限制和阶段计划见 [项目与上下文复用](docs/v0/16-项目与上下文复用.md)。
 
 安装、绑定、事件输入、HTTP 合同和测试方法见 [M4/M5 使用与验收](docs/v0/12-M4-M5使用与验收.md)。
 

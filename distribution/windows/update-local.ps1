@@ -31,7 +31,7 @@ function Build-LocalBundle([string]$Repository) {
     foreach ($file in @('steward.ps1','Start.cmd','Update.cmd','Stop.cmd','README.md')) {
         Copy-Item -LiteralPath (Join-Path $Repository "distribution\windows\$file") -Destination $bundle
     }
-    Write-Json (Join-Path $bundle 'manifest.json') @{version=$version;databaseSchema=2;launcherProtocol=1;uiPackageProtocol=1;target='x86_64-pc-windows-msvc';sourceRoot=$Repository}
+    Write-Json (Join-Path $bundle 'manifest.json') @{version=$version;databaseSchema=5;launcherProtocol=1;uiPackageProtocol=1;target='x86_64-pc-windows-msvc';sourceRoot=$Repository}
     return Install-Bundle $bundle
 }
 function Initialize-LocalSettings {
@@ -49,6 +49,7 @@ function Initialize-LocalSettings {
 function Update-LocalManaged([string]$Repository) {
     # Compile and stage all files BEFORE requesting graceful shutdown.
     $version = Build-LocalBundle $Repository
+    Assert-SwitchCompatible $version
     # Keep the stable launcher able to resolve local build IDs. No data/config files
     # are copied. Installed versions keep their own launcher for recovery.
     foreach ($file in @('Start.cmd','Update.cmd','Stop.cmd','steward.ps1')) {

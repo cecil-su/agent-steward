@@ -116,13 +116,13 @@ impl Daemon {
 }
 
 #[test]
-fn migrated_database_starts_and_restarts_but_schema2_is_refused_before_listening() {
+fn migrated_database_starts_and_restarts_but_old_schemas_are_refused_before_listening() {
+    for version in [2,4] {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.db");
     let c = Connection::open(&source).unwrap();
-    c.execute_batch(include_str!("../../application/src/migration/schema2.sql"))
-        .unwrap();
-    c.execute_batch("PRAGMA user_version=2; INSERT INTO tasks(id,status,version,created_at,updated_at) VALUES (1,'open',1,'2026-09-08T00:00:00Z','2026-09-08T00:00:00Z');").unwrap();
+    c.execute_batch(if version == 2 { include_str!("../../application/src/migration/schema2.sql") } else { include_str!("../../application/src/migration/schema4.sql") }).unwrap();
+    c.execute_batch(&format!("PRAGMA user_version={version}; INSERT INTO tasks(id,status,version,created_at,updated_at) VALUES (1,'open',1,'2026-09-08T00:00:00Z','2026-09-08T00:00:00Z');")).unwrap();
     drop(c);
     let before = fs::read(&source).unwrap();
     let refused_runtime = temp.path().join("refused-runtime");
@@ -143,7 +143,8 @@ fn migrated_database_starts_and_restarts_but_schema2_is_refused_before_listening
     assert!(!refused_runtime.exists());
     assert!(!String::from_utf8_lossy(&refused.stdout).contains("Agent Steward:"));
     let target = temp.path().join("private-target").join("target.db");
-    Service::new(&target).import_schema2(&source, true).unwrap();
+    if version == 2 { Service::new(&target).import_schema2(&source, true).unwrap(); }
+    else { Service::new(&target).import_schema4(&source, true).unwrap(); }
     let runtime = temp.path().join("runtime");
     let s = Service::new(&target);
     let task = s.task_show("1").unwrap().data;
@@ -162,4 +163,5 @@ fn migrated_database_starts_and_restarts_but_schema2_is_refused_before_listening
     assert_eq!(s.task_show("1").unwrap().data, task);
     assert_eq!(s.history("1").unwrap().data, history);
     assert_eq!(fs::read(source).unwrap(), before);
+    }
 }

@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Read-Json([string]$Path) { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
+function Read-Json([string]$Path) { Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
 function Write-Json([string]$Path, $Value) {
     $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
@@ -22,8 +22,8 @@ function Assert-BuildId([string]$Version) {
 }
 function Assert-Manifest($Manifest) {
     Assert-BuildId $Manifest.version
-    if ($Manifest.databaseSchema -ne 2 -or $Manifest.launcherProtocol -ne 1 -or $Manifest.target -ne 'x86_64-pc-windows-msvc') {
-        throw 'Incompatible release. Database migrations require a separate, backed-up maintenance procedure.'
+    if ($Manifest.databaseSchema -ne 5 -or $Manifest.launcherProtocol -ne 1 -or $Manifest.target -ne 'x86_64-pc-windows-msvc') {
+        throw 'This launcher requires a Schema 5 package. Cross-schema upgrades require a separately backed-up migration and a separate installation directory.'
     }
 }
 function Assert-Settings($Settings) {
@@ -78,8 +78,30 @@ function Stop-Managed {
     }
     Remove-Item -LiteralPath (Join-Path $InstallRoot 'process.json')
 }
-function Start-Managed([string]$Version) {
+function Assert-StartCompatible([string]$Version) {
     Assert-BuildId $Version
+    $directory = Join-Path $InstallRoot "versions\$Version"
+    $manifest = Read-Json (Join-Path $directory 'manifest.json'); Assert-Manifest $manifest
+    $settings = Read-Json (Join-Path $InstallRoot 'settings.json'); Assert-Settings $settings
+    # Run only the selected trusted binary, with an explicit path. This mode must
+    # exit before initialization/listening; old binaries reject the unknown flag.
+    $result = @(& (Join-Path $directory 'taskd.exe') --check-database-schema --database $settings.database)
+    if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1 -or $result[0] -cne "databaseSchema=$($manifest.databaseSchema)") {
+        throw 'Database/binary schema preflight failed. Arrange an explicit migration; no database restore or migration was attempted.'
+    }
+}
+function Assert-SwitchCompatible([string]$Version) {
+    # Do not even attempt an automatic cross-schema rollback. Preserve the old
+    # installation; activate an explicitly migrated database in a separate root.
+    $currentPath = Join-Path $InstallRoot 'current.json'
+    if (Test-Path -LiteralPath $currentPath) {
+        $current = Read-Json $currentPath; Assert-BuildId $current.version
+        Assert-Manifest (Read-Json (Join-Path $InstallRoot "versions\$($current.version)\manifest.json"))
+    }
+    Assert-StartCompatible $Version
+}
+function Start-Managed([string]$Version) {
+    Assert-StartCompatible $Version
     if (Get-ManagedProcess) { throw 'A managed process is already running.' }
     $settings = Read-Json (Join-Path $InstallRoot 'settings.json'); Assert-Settings $settings
     $directory = Join-Path $InstallRoot "versions\$Version"
@@ -152,6 +174,7 @@ function Update-Managed {
 }
 
 function Switch-Managed([string]$Version) {
+    Assert-SwitchCompatible $Version
     $currentPath = Join-Path $InstallRoot 'current.json'
     $current = if (Test-Path -LiteralPath $currentPath) { Read-Json $currentPath } else { $null }
     Stop-Managed
@@ -163,6 +186,9 @@ function Switch-Managed([string]$Version) {
         $failure = $_
         Stop-Managed # A timeout here deliberately prevents starting a second daemon.
         if ($current) {
+            # The database may have changed while startup failed. Refuse an
+            # incompatible fallback instead of launching an old schema binary.
+            Assert-StartCompatible $current.version
             Write-Json $currentPath $current
             $null = Start-Managed $current.version
             throw "Update failed; previous binary restarted. No database restore was attempted. $failure"
@@ -173,11 +199,17 @@ function Switch-Managed([string]$Version) {
 }
 
 if ($LibraryOnly) { return }
+# Copied Start/Stop/Update.cmd must stay in their custom installation, not fall
+# back to the user's default installation. Explicit -InstallRoot always wins.
+if (-not $PSBoundParameters.ContainsKey('InstallRoot') -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'current.json'))) {
+    $InstallRoot = $PSScriptRoot
+}
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 # An old shortcut follows the installed current version, so launcher fixes take effect too.
 $currentPath = Join-Path $InstallRoot 'current.json'
 if (Test-Path -LiteralPath $currentPath) {
     $current = Read-Json $currentPath; Assert-BuildId $current.version
+    Assert-Manifest (Read-Json (Join-Path $InstallRoot "versions\$($current.version)\manifest.json"))
     $launcher = Join-Path $InstallRoot "versions\$($current.version)\steward.ps1"
     if ([IO.Path]::GetFullPath($PSCommandPath) -ne $launcher) { & $launcher -Action $Action -InstallRoot $InstallRoot; return }
 }

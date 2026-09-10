@@ -35,7 +35,7 @@ taskctl task list [--status in_progress] [--task-key <key>] [--query <text>]
 taskctl task show <task-ref> [--json]
 taskctl task create [task-key] [--input <file|->]
 taskctl task claim <task-ref> --session <session-id> --if-version <version> [--take-over]
-taskctl task update <task-ref> --if-version <version> --input <file|->
+taskctl task update <task-ref> --if-version <version> --input <file|-> --yes --reason <修改依据>
 taskctl task retitle <task-ref> --if-version <version> --title <MMDD｜类型｜主题>
 taskctl task note <task-ref> --if-version <version> --type <decision|progress|risk> --text <text>
 taskctl task block <task-ref> --if-version <version> --reason <text> --recovery <text>
@@ -68,9 +68,9 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 
 `title` 非空时统一使用 `MMDD｜类型｜主题`，分隔符必须是全角 `｜`，`MMDD` 必须是有效月日，类型只能是 `功能`、`设计`、`修复`、`优化`、`发布`、`探索`、`文档` 或 `研究`，主题不能为空或带首尾空白。调用方负责按会话时间转换到 `Asia/Shanghai` 后生成 `MMDD`；核心校验结构、月日和类型，不从机器时区猜测日期。
 
-`update --input` 是 JSON Merge Patch 风格的受限字段更新，只允许 `taskKey`、`title`、`goal`、`scope`、`acceptanceCriteria` 和 `nextStep`。省略表示不修改；`nextStep` 可显式为 `null`，字符串值必须非空白。四个描述字段初始可为 `null`，但设置为字符串后不能通过 `null` 清空；清空请求返回 `INVALID_INPUT` 且不递增 version。`taskKey` 仅允许从 `null` 设置为非空、非纯数字且不以 `#` 开头的字符串，之后不可改变；空 Patch、无实际变化的 Patch 和未知字段均拒绝。单次 Patch 无论改变多少字段，都只执行一次 CAS、递增一次 version 并写一条 `task.updated` History。状态、阻塞和关闭结果只能通过专用命令改变。
+`update --input` 是 JSON Merge Patch 风格的受限字段更新，只允许 `taskKey`、`title`、`goal`、`scope`、`acceptanceCriteria`、`nextStep`、`project` 和 `components`。必须显式 `--yes --reason <非空修改依据>`；HTTP `task-update` 必须携带 `confirmed:true`、`reason`，应用层也校验。支持全部状态的信息维护，不领取或修改 Session。`project` 为项目引用字符串或 null（清除），`components` 为最终项目内组件名称数组，[] 清空。换项目且存在旧组件时必须显式提供 components，不静默丢弃。closed 的 nextStep 仍必须为空。详见 [任务信息维护](20-任务信息维护.md)。省略表示不修改；`nextStep` 可显式为 `null`，字符串值必须非空白。四个描述字段初始可为 `null`，但设置为字符串后不能通过 `null` 清空；清空请求返回 `INVALID_INPUT` 且不递增 version。`taskKey` 仅允许从 `null` 设置为非空、非纯数字且不以 `#` 开头的字符串，之后不可改变；空 Patch、无实际变化的 Patch 和未知字段均拒绝。单次 Patch 无论改变多少字段，都只执行一次 CAS、递增一次 version 并写一条 `task.updated` History。状态、阻塞和关闭结果只能通过专用命令改变。
 
-`retitle` 是唯一允许修改已关闭 Task 描述字段的命令；Import/Hook 清理和 Worktree 管理仍按专用合同校验并可能递增 Task version，不改变关闭结果。它只接受符合命名规则的非空 title，执行一次 CAS，仅修改 `title`、`version` 和 `updatedAt`，写入一条 `task.retitled` History；不得重新打开 Task、改变关闭结果或修改其他字段。相同 title 作为无实际变化请求拒绝。未关闭 Task 也可使用该命令做 title-only 修正。
+`retitle` 保留为只改标题的兼容入口；经授权的 `update` 同样允许维护已关闭 Task 的信息；Import/Hook 清理和 Worktree 管理仍按专用合同校验并可能递增 Task version，不改变关闭结果。它只接受符合命名规则的非空 title，执行一次 CAS，仅修改 `title`、`version` 和 `updatedAt`，写入一条 `task.retitled` History；不得重新打开 Task、改变关闭结果或修改其他字段。相同 title 作为无实际变化请求拒绝。未关闭 Task 也可使用该命令做 title-only 修正。
 
 `claim` 的语义是把当前 Session 记录为 Task 的执行会话，并将 `open` Task 推进到 `in_progress`。请求的 Session ID 不存在时，命令在同一事务中创建未结束 Session；它已经存在时，仅允许它是该 Task 尚未结束的当前 Session，并按下述规则返回 no-op，不能重新激活已结束 Session、复用其他 Task 的 Session 或改写既有继续关系，否则返回 `SESSION_CONFLICT`。相同当前 Session 再次领取时，Application Service 先执行 version 校验；只有调用方携带当前 version 时才返回同状态 no-op success，不写 History、不递增 version。首次成功后丢失响应并原样重试旧 version 会返回 `VERSION_CONFLICT`，V0 不把它称为请求级幂等。如果已有其他当前 Session，默认返回冲突；用户可以明确使用 `--take-over` 接管。接管使用尚不存在的新 Session ID，把新 Session 的 `continuedFrom` 指向旧 Session，但不会伪造旧 Session 的 `endedAt`。
 
@@ -113,9 +113,9 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 | `in_progress/blocked` | `close partial` | `closed` | reason 必填并记录残余事项 |
 | `open/in_progress/blocked` | `close cancelled/superseded` | `closed` | reason 必填 |
 
-`update` 和 `note` 允许用于 `open/in_progress/blocked`，但不能绕过专用命令改变状态字段。`checkpoint` 只允许用于 `in_progress/blocked`，且指定 Session 必须是同一 Task 尚未结束的当前 Session。`resume` 只允许用于 `in_progress/blocked`；`open` Task 必须先 `claim`。`claim` 首次把 `open` 推进到 `in_progress`；对于 `in_progress/blocked`，相同且尚未结束的当前 Session 在当前 version 下可以 no-op success，不同当前 Session 必须以尚不存在的新 Session ID 执行 `--take-over`，状态保持不变；当前 Session 为空时必须使用带明确来源的 `resume`，不能丢失继续关系。
+`update` 允许用于全部状态，`note` 仍只允许用于 `open/in_progress/blocked`；都不能绕过专用命令改变状态字段。`checkpoint` 只允许用于 `in_progress/blocked`，且指定 Session 必须是同一 Task 尚未结束的当前 Session。`resume` 只允许用于 `in_progress/blocked`；`open` Task 必须先 `claim`。`claim` 首次把 `open` 推进到 `in_progress`；对于 `in_progress/blocked`，相同且尚未结束的当前 Session 在当前 version 下可以 no-op success，不同当前 Session 必须以尚不存在的新 Session ID 执行 `--take-over`，状态保持不变；当前 Session 为空时必须使用带明确来源的 `resume`，不能丢失继续关系。
 
-`closed` 不允许重新领取、普通更新、阻塞或保存 Checkpoint；V0 不提供 reopen，但允许通过 `retitle` 做 title-only 元数据修正。所有关闭命令都清空 next step 和阻塞字段；若存在当前 Session，还在同一事务中设置其 `endedAt` 并清空 Task 的 `currentSessionId`。非 `blocked` 状态的阻塞字段必须为空；非 `closed` 状态的关闭字段必须为空。
+`closed` 不允许重新领取、阻塞或保存 Checkpoint；V0 不提供 reopen，但允许经授权的 `update/project/components` 信息维护以及 `retitle` 标题修正。所有关闭命令都清空 next step 和阻塞字段；若存在当前 Session，还在同一事务中设置其 `endedAt` 并清空 Task 的 `currentSessionId`。非 `blocked` 状态的阻塞字段必须为空；非 `closed` 状态的关闭字段必须为空。
 
 ## 3. Session
 

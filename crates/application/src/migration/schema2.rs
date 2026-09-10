@@ -1,4 +1,4 @@
-//! Explicit Schema 2 copy. No source initializer, external record-path IO, or service switch.
+//! Explicit Schema 2/4 copies. No source initializer, external record-path IO, or service switch.
 use super::{columns, io_error, refused, require_unused_destination};
 use crate::{AppError, AppResult, HookEventInput, Outcome, Service, db};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -8,6 +8,17 @@ use sha2::{Digest, Sha256};
 use std::{fs, path::Path, time::Duration};
 
 const SCHEMA2: &str = include_str!("schema2.sql");
+const SCHEMA4: &str = include_str!("schema4.sql");
+const TABLES4: [&str; 13] = [
+    "projects", "project_history", "components", "repositories", "source_roots",
+    "tasks", "sessions", "checkpoints", "task_notes", "history", "session_imports",
+    "session_events", "task_components",
+];
+const SEQUENCES4: [(&str, &str); 9] = [
+    ("tasks", "id"), ("task_notes", "id"), ("history", "id"), ("session_events", "sequence"),
+    ("projects", "id"), ("project_history", "id"), ("components", "id"),
+    ("repositories", "id"), ("source_roots", "id"),
+];
 const TABLES: [&str; 7] = [
     "tasks",
     "sessions",
@@ -23,7 +34,8 @@ const SEQUENCES: [(&str, &str); 4] = [
     ("history", "id"),
     ("session_events", "sequence"),
 ];
-const PROJECT_TABLES: [&str; 6] = [
+const PROJECT_TABLES: [&str; 7] = [
+    "project_profiles",
     "projects",
     "project_history",
     "components",
@@ -69,7 +81,7 @@ fn local_path(path: &Path) -> AppResult<()> {
     ))?;
     // Win32 and SQLite normalize these names, whereas publication through a
     // canonical extended-length parent can create the literal, different file.
-    // Keep this migration-only: do not change the HTTP checkout allowlist.
+    // Keep this in offline database checks: do not change the HTTP checkout allowlist.
     #[cfg(windows)]
     for component in path.components() {
         if let std::path::Component::Normal(name) = component
@@ -84,7 +96,26 @@ fn local_path(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn require_regular_source_sidecars(source: &git_adapter::ExistingPathIdentity) -> AppResult<()> {
+pub(super) fn local_file_path(path: &Path) -> AppResult<()> {
+    local_path(path)?;
+    // Path::file_name normalizes terminal separators and `/.`.
+    let text = path.to_string_lossy();
+    if path.file_name().is_none()
+        || text.ends_with('/')
+        || text.ends_with("/.")
+        || (cfg!(windows) && (text.ends_with('\\') || text.ends_with("\\.")))
+    {
+        return Err(AppError::invalid(
+            "database",
+            "database paths must end with an explicit filename, not a separator or dot component",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn require_regular_source_sidecars(
+    source: &git_adapter::ExistingPathIdentity,
+) -> AppResult<()> {
     // Always derive these from the same canonical filename passed to SQLite,
     // never the input spelling (for example, a Windows 8.3 basename alias).
     // This is not a race fence: the source directory must remain trusted/quiescent.
@@ -141,10 +172,15 @@ fn private_parent(path: &Path) -> AppResult<()> {
 }
 
 impl Service {
-    /// Copy a supported, quiescent Schema 2 snapshot to an absent Schema 4 destination.
+    /// Copy a supported, quiescent Schema 2 snapshot to an absent current-schema destination.
     /// The operator must stop writers; identity/data_version rechecks are not a write fence.
     pub fn import_schema2(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
         import(source, self.database_path(), confirmed, |_, _| Ok(()))
+    }
+
+    /// Preserve Schema 4 task/project records in a separate, explicitly confirmed copy.
+    pub fn import_schema4(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
+        import_version(source, self.database_path(), confirmed, 4, |_, _| Ok(()))
     }
 }
 
@@ -153,8 +189,23 @@ fn import(
     source: &Path,
     destination: &Path,
     confirmed: bool,
+    observe: impl FnMut(&str, &Path) -> AppResult<()>,
+) -> AppResult<Outcome> {
+    import_version(source, destination, confirmed, 2, observe)
+}
+
+fn import_version(
+    source: &Path,
+    destination: &Path,
+    confirmed: bool,
+    source_version: i64,
     mut observe: impl FnMut(&str, &Path) -> AppResult<()>,
 ) -> AppResult<Outcome> {
+    let (definition, tables, sequence_fields, empty_tables): (&str, &[&str], &[(&str, &str)], &[&str]) = match source_version {
+        2 => (SCHEMA2, &TABLES, &SEQUENCES, &PROJECT_TABLES),
+        4 => (SCHEMA4, &TABLES4, &SEQUENCES4, &["project_profiles"]),
+        _ => return Err(refused("unsupported source schema")),
+    };
     if !confirmed {
         return Err(AppError::invalid(
             "yes",
@@ -162,20 +213,7 @@ fn import(
         ));
     }
     for path in [source, destination] {
-        local_path(path)?;
-        // Path::file_name normalizes terminal separators and `/.`. Do not publish
-        // a file that cannot be reopened using the operator's original argument.
-        let text = path.to_string_lossy();
-        if path.file_name().is_none()
-            || text.ends_with('/')
-            || text.ends_with("/.")
-            || (cfg!(windows) && (text.ends_with('\\') || text.ends_with("\\.")))
-        {
-            return Err(AppError::invalid(
-                "database",
-                "database paths must end with an explicit filename, not a separator or dot component",
-            ));
-        }
+        local_file_path(path)?;
     }
     require_unused_destination(destination)?;
     if !fs::symlink_metadata(source)
@@ -205,17 +243,17 @@ fn import(
         .map_err(AppError::from_sqlite)?;
     let before = data_version(&old)?;
     let snapshot = old.transaction().map_err(AppError::from_sqlite)?;
-    if storage_sqlite::schema_version(&snapshot).map_err(AppError::from_storage)? != 2 {
-        return Err(refused("only Schema 2 snapshots are supported"));
+    if storage_sqlite::schema_version(&snapshot).map_err(AppError::from_storage)? != source_version {
+        return Err(refused(&format!("only Schema {source_version} snapshots are supported")));
     }
     let expected = Connection::open_in_memory().map_err(AppError::from_sqlite)?;
     expected
-        .execute_batch(SCHEMA2)
+        .execute_batch(definition)
         .map_err(AppError::from_sqlite)?;
     if layout(&snapshot)? != layout(&expected)? {
-        return Err(refused(
-            "Schema 2 layout differs from the supported definition",
-        ));
+        return Err(refused(&format!(
+            "Schema {source_version} layout differs from the supported definition",
+        )));
     }
     integrity(&snapshot)?;
     // Reject oversized imports before materializing their BLOBs (same bound as session import).
@@ -249,7 +287,7 @@ fn import(
     );
     require_unused_destination(&destination)?;
     let staging = tempfile::Builder::new()
-        .prefix(".import-schema2-")
+        .prefix(&format!(".import-schema{source_version}-"))
         .tempdir_in(&parent_identity.canonical_path)
         .map_err(io_error)?;
     steward_core::set_private_dir(staging.path()).map_err(io_error)?;
@@ -261,16 +299,17 @@ fn import(
         .map_err(AppError::from_sqlite)?;
     let mut counts = serde_json::Map::new();
     let mut hashes = serde_json::Map::new();
-    for table in TABLES {
+    for &table in tables {
         let fields = columns(&snapshot, table)?;
         let mut target_fields = columns(&tx, table)?;
-        if table == "tasks" {
+        if source_version == 2 && table == "tasks" {
             target_fields.retain(|f| f != "project_id");
         }
         if fields != target_fields {
             return Err(refused("source and target columns are incompatible"));
         }
-        let select = format!("SELECT {} FROM {table} ORDER BY 1", fields.join(","));
+        let order = if table == "task_components" { "1,3" } else { "1" };
+        let select = format!("SELECT {} FROM {table} ORDER BY {order}", fields.join(","));
         let insert = format!(
             "INSERT INTO {table} ({}) VALUES ({})",
             fields.join(","),
@@ -327,7 +366,7 @@ fn import(
     while let Some(row) = sequences.next().map_err(AppError::from_sqlite)? {
         let name: String = row.get(0).map_err(AppError::from_sqlite)?;
         let seq: i64 = row.get(1).map_err(AppError::from_sqlite)?;
-        let Some((_, field)) = SEQUENCES.iter().find(|(table, _)| *table == name) else {
+        let Some((_, field)) = sequence_fields.iter().find(|(table, _)| *table == name) else {
             return Err(refused("unknown autoincrement high-water mark"));
         };
         if highwater.contains_key(&name) {
@@ -352,14 +391,14 @@ fn import(
         .map_err(AppError::from_sqlite)?;
         highwater.insert(name, json!(seq));
     }
-    for (table, _) in SEQUENCES {
+    for &(table, _) in sequence_fields {
         if counts[table].as_u64().unwrap_or(0) > 0 && !highwater.contains_key(table) {
             return Err(refused("missing autoincrement high-water mark"));
         }
     }
     drop(sequences);
     drop(sequence_rows);
-    for table in PROJECT_TABLES {
+    for &table in empty_tables {
         if tx
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
                 r.get::<_, i64>(0)
@@ -370,7 +409,7 @@ fn import(
             return Err(refused("project metadata must remain empty"));
         }
     }
-    validate_records(&tx)
+    validate_records(&tx, source_version == 4)
         .map_err(|_| refused("source records are incompatible or contain invalid metadata"))?;
     integrity(&tx)?;
     tx.commit().map_err(AppError::from_sqlite)?;
@@ -405,7 +444,7 @@ fn import(
     fs::hard_link(&staged_path, &destination).map_err(io_error)?;
     Ok(Outcome::new(json!({
         "source":source_identity.canonical_path,"destination":destination,
-        "sourceSchema":2,"targetSchema":storage_sqlite::SCHEMA_VERSION,
+        "sourceSchema":source_version,"targetSchema":storage_sqlite::SCHEMA_VERSION,
         "counts":counts,"tableSha256":hashes,"digestEncoding":"sqlite-typed-rows-v1",
         "highWaterMarks":highwater,"verified":true,"sourceOpenedReadOnly":true,
         "sourceQuiescenceVerified":false,"externalPathsObserved":false,
@@ -450,7 +489,8 @@ fn decode<T>(
     Ok(())
 }
 
-fn validate_records(c: &Connection) -> AppResult<()> {
+fn validate_records(c: &Connection, allow_projects: bool) -> AppResult<()> {
+    if allow_projects { validate_project_records(c)?; }
     let mut tasks = c
         .prepare("SELECT id FROM tasks ORDER BY id")
         .map_err(AppError::from_sqlite)?;
@@ -458,7 +498,7 @@ fn validate_records(c: &Connection) -> AppResult<()> {
     while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
         let id: i64 = row.get(0).map_err(AppError::from_sqlite)?;
         let task = db::load_task(c, id)?;
-        if id <= 0 || task.project_id.is_some() || !task.component_ids.is_empty() {
+        if id <= 0 || (!allow_projects && (task.project_id.is_some() || !task.component_ids.is_empty())) {
             return Err(refused("invalid task identity or project membership"));
         }
         if let Some(key) = task.task_key
@@ -554,6 +594,56 @@ fn validate_records(c: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+// Decode only persisted metadata. Historical source paths are never filesystem authority.
+fn validate_project_records(c: &Connection) -> AppResult<()> {
+    for table in ["projects", "components"] {
+        let mut statement = c.prepare(&format!("SELECT id,name,name_key FROM {table}"))
+            .map_err(AppError::from_sqlite)?;
+        let mut rows = statement.query([]).map_err(AppError::from_sqlite)?;
+        while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
+            let id: i64 = row.get(0).map_err(AppError::from_sqlite)?;
+            let name: String = row.get(1).map_err(AppError::from_sqlite)?;
+            let key: String = row.get(2).map_err(AppError::from_sqlite)?;
+            if id <= 0 || steward_core::normalize_project_name(&name).ok() != Some((name, key)) {
+                return Err(refused("invalid project/component name or identity"));
+            }
+        }
+    }
+    if c.query_row("SELECT EXISTS(SELECT 1 FROM projects p WHERE p.revision != (SELECT count(*) FROM project_history h WHERE h.project_id=p.id) OR p.revision != (SELECT coalesce(max(revision),0) FROM project_history h WHERE h.project_id=p.id))", [], |r| r.get::<_, bool>(0)).map_err(AppError::from_sqlite)? {
+        return Err(refused("project history does not match revision"));
+    }
+    let mut history = c.prepare("SELECT payload_json FROM project_history").map_err(AppError::from_sqlite)?;
+    let mut rows = history.query([]).map_err(AppError::from_sqlite)?;
+    while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
+        let text: String = row.get(0).map_err(AppError::from_sqlite)?;
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|_| refused("invalid project history JSON"))?;
+    }
+    for sql in [
+        "SELECT common_dir,common_identity_json FROM repositories",
+        "SELECT directory_path,directory_identity_json FROM source_roots WHERE directory_path IS NOT NULL",
+    ] {
+        let mut statement = c.prepare(sql).map_err(AppError::from_sqlite)?;
+        let mut rows = statement.query([]).map_err(AppError::from_sqlite)?;
+        while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
+            let path: String = row.get(0).map_err(AppError::from_sqlite)?;
+            let text: String = row.get(1).map_err(AppError::from_sqlite)?;
+            let identity: git_adapter::ExistingPathIdentityRecord = serde_json::from_str(&text).map_err(|_| refused("invalid persisted source identity"))?;
+            if identity.canonical_path.to_str() != Some(path.as_str()) {
+                return Err(refused("source path differs from persisted identity"));
+            }
+        }
+    }
+    let mut statement = c.prepare("SELECT relative_path FROM source_roots WHERE relative_path IS NOT NULL").map_err(AppError::from_sqlite)?;
+    let mut rows = statement.query([]).map_err(AppError::from_sqlite)?;
+    while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
+        let path: String = row.get(0).map_err(AppError::from_sqlite)?;
+        steward_core::validate_source_relative_path(&path).map_err(|_| refused("invalid relative source path"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod schema4_tests;
 #[cfg(test)]
 mod process_tests;
 #[cfg(test)]

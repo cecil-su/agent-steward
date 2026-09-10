@@ -17,12 +17,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub const API_CONTRACT: u32 = 1;
+// Contract 2 requires explicit confirmation/reason for task information maintenance.
+pub const API_CONTRACT: u32 = 2;
 const FILES: [&str; 3] = ["index.html", "app.js", "style.css"];
 const MAX_FILE: u64 = 4 * 1024 * 1024;
-const HTML: &str = include_str!("../web/index.html");
-const JS: &str = include_str!("../web/app.js");
-const CSS: &str = include_str!("../web/style.css");
+// Checked-in three-file React snapshot; update via web's explicit sync:embedded step.
+const HTML: &str = include_str!("../web-readonly/index.html");
+const JS: &str = include_str!("../web-readonly/app.js");
+const CSS: &str = include_str!("../web-readonly/style.css");
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

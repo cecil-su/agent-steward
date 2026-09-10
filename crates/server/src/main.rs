@@ -14,6 +14,9 @@ use steward_server::{ServerState, router};
 struct Args {
     #[arg(long)]
     database: Option<PathBuf>,
+    /// Check the explicit database schema read-only and exit; no initialization or listener.
+    #[arg(long, requires = "database")]
+    check_database_schema: bool,
     /// Local UI package store. Pure UI activation needs no daemon restart.
     #[arg(long)]
     ui_root: Option<PathBuf>,
@@ -59,6 +62,14 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args.check_database_schema {
+        let database = args
+            .database
+            .ok_or("--database is required for preflight")?;
+        let schema = Service::new(database).check_database_schema()?;
+        println!("databaseSchema={schema}");
+        return Ok(());
+    }
     if args
         .ui_root
         .as_ref()

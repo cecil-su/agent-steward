@@ -1,6 +1,6 @@
 # Schema 2 → 4：迁移方案与隔离演练
 
-> #34，2026-09-08。**开发工作区已实现 `database import-schema2`，完成 Windows 合成复制/失败/启动验证；尚未提交发布或在正式库执行。**
+> #34，2026-09-08。**迁移入口已提交推送至 `e4c5436` 且对应 CI 通过；Schema 4 安装/启动兼容正在开发工作区隔离验证。尚未发布、安装或在正式库执行迁移。**
 > Git 基线 `0d34375` 已推送；本轮开发未读取、复制或迁移正式业务数据库，未全局安装二进制、切换服务或发布。
 > 正式 Task 连续性仍通过已安装的 taskctl 管理；演练脚本不访问该数据库。
 
@@ -55,7 +55,7 @@ Schema 2 专用入口为 `Service::import_schema2` / `database import-schema2`�
 
 ### 停写前
 
-- 盘点实际 CLI/task-hook/taskd、后台服务/计划任务、Pi/Codex 适配器及数据库配置路径，协调发布任务 #32；不依据数据库中的引用推测运行进程。
+- 盘点实际 CLI/task-hook/taskd、后台服务/计划任务、Pi/Codex 适配器及数据库配置路径，协调实际相关任务/会话（不按旧编号推定发布负责人）；不依据数据库中的引用推测运行进程。
 - 记录版本、二进制/UI 身份、运行参数、目录权限和可恢复方案；不将 token/cookie 写入报告。
 - 先保存 #34 的 Checkpoint，再进入明确维护窗口。**此后包括 Agent Steward 工具、Hook 在内的全部写入者都要暂停**，不能一边保存任务进度一边制作“最终”迁移快照。
 
@@ -63,7 +63,7 @@ Schema 2 专用入口为 `Service::import_schema2` / `database import-schema2`�
 
 - 确认旧进程退出、无在途写入，停止所有自动重启来源；取停写后的最终一致备份，演练期间的副本不能替代它。
 - 核验备份可由旧工具恢复；执行经过验证的新库复制并复核业务数据、序列及权限，保留原库与备份。
-- 优先在受控停机窗口保持既有正式路径，成套切换 CLI/Hook/taskd 与数据库；具体文件操作和服务命令必须在路径/ACL/sidecar/平台占用确认后制定，本文不给出可直接覆盖正式库的脚本。
+- 优先在受控停机窗口保持既有正式数据库路径，成套切换 CLI/Hook/taskd 与数据库。Schema 4 启动器普通更新拒绝已有 Schema 2 安装；使用新的程序安装目录，明确配置迁移后的库/原 runtime，保留旧程序目录但不自动降级。自定义安装入口和只读版本预检见 [Windows 指南](../../distribution/windows/README.md)。具体文件操作和服务命令必须在路径/ACL/sidecar/平台占用确认后制定，本文不给出可直接覆盖正式库的脚本。
 - 老客户端新开 Schema 4 会被拒绝，**但这不能阻止仍持有旧库连接的进程，或继续指向另一个 Schema 2 文件的客户端写入**。不能以 schema guard 替代停写与路径核对，避免两个库分别接收新数据。
 - 先只读检查 doctor、Task 列表/context、Session/History/Import/Hook 去重状态，再明确决定恢复写入。人工验收本轮虽已跳过，正式切换权限及恢复校验并未自动获准。
 
@@ -146,4 +146,8 @@ python crates/cli/tests/schema2_rehearsal.py \
 
 测试修复已单独提交推送 `0d34375`，[CI run 34207573871](https://github.com/cecil-su/agent-steward/actions/runs/34207573871) 的 Windows 作业成功（167 Rust、Node36 PASS/1 SKIP、launcher/update safety）；Ubuntu Rust/Node成功，但浏览器点击“清除观测记录”超时，总体仍 FAILURE。用户明确暂缓 Ubuntu，保留测试/CI，不将该失败记 PASS，也不再以它阻塞本轮 Windows 工作。
 
-本轮已实现迁移入口、修复审查发现的两项 Windows 路径问题并复验，尚未提交推送。下一关是经授权提交推送已核验的候选，再读取对应 Windows CI；最终备份、正式库操作、安装/切换/发布及 Task 关闭仍需对应授权。
+迁移入口及 Windows 路径修复已提交 `0e32e04`；CI 的六处 Clippy 字节数组诊断经 `e4c5436` 修正，[CI 34222200849](https://github.com/cecil-su/agent-steward/actions/runs/34222200849) 整体成功，Windows 185 Rust、Node36 PASS/1 SKIP及启动器测试通过。本次 Ubuntu 作业也成功，不代表专项修复历史浏览器不稳定性或完成已跳过的人工验收。
+
+只读盘点发现旧安装/打包链仍标注 Schema 2，因此现在补齐 Schema 4 安装兼容并做隔离验证：停止前只读预检、拒绝普通跨 Schema 切换、不自动回退不兼容旧程序、正确定位独立安装目录。用户确认其它 Pi 仅保留空闲会话，不要求关闭它们；最终快照前仍需明确维持停写，包括暂停当前会话的 Steward/Hook 写入。最终备份、正式库操作、安装/切换/发布及 Task 关闭仍需对应授权。
+
+安装兼容当前工作区的 Windows 隔离验证：**188 Rust / 37 Node PASS**（含真实 Pi、无跳过），build/本地 Clippy/fmt 通过，五个相关 Rust 文件 LSP 零诊断，跨版本迁移演练 10 组通过。PowerShell 7.4.7 与 Windows PowerShell 5.1（仅测试子进程使用该宿主默认模块路径）均通过真实三件套打包/解包、taskd 启动/重启、错误 Schema 不停止现有服务、跨 Schema/不兼容回退拒绝、自定义目录与中文 JSON 路径测试；本地构建编排测试使用假 Cargo 输出。没有重跑可选的双次 release 重编译脚本或真实 Chrome，也没有修改全机模块路径/执行策略。首次完整 Rust 运行中断的日志不计通过，重新完整运行后取结果。证据 `.local/task34-schema4-launcher-20260908-213539/`，以最终 `verification.json` 的源码/二进制身份为准；这些安装兼容变更尚未提交，不能沿用 `e4c5436` 的 CI 结果。

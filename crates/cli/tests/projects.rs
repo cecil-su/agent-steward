@@ -54,6 +54,7 @@ fn full_git_project_journey_keeps_registration_separate_from_task_execution() {
         &[
             "task",
             "project",
+            "--yes", "--reason", "fixture",
             "#1",
             "--project",
             "##1",
@@ -171,7 +172,7 @@ fn projects_and_membership_are_accessible_through_cli() {
     );
     run(
         &db,
-        &["task", "project", "#1", "--if-version", "1", "--clear"],
+        &["task", "project", "#1", "--if-version", "1", "--clear", "--yes", "--reason", "fixture"],
         true,
     );
     run(
@@ -179,6 +180,7 @@ fn projects_and_membership_are_accessible_through_cli() {
         &[
             "task",
             "project",
+            "--yes", "--reason", "fixture",
             "#1",
             "--if-version",
             "1",
@@ -192,6 +194,7 @@ fn projects_and_membership_are_accessible_through_cli() {
         &[
             "task",
             "project",
+            "--yes", "--reason", "fixture",
             "#1",
             "--if-version",
             "2",
@@ -330,6 +333,7 @@ fn component_source_and_candidate_commands_keep_files_and_task_authority_separat
         &[
             "task",
             "components",
+            "--yes", "--reason", "fixture",
             "#1",
             "--component",
             "backend",
@@ -345,7 +349,7 @@ fn component_source_and_candidate_commands_keep_files_and_task_authority_separat
     assert!(scoped["data"]["task"]["currentSessionId"].is_null());
     run(
         &db,
-        &["task", "components", "#1", "--clear", "--if-version", "2"],
+        &["task", "components", "#1", "--clear", "--if-version", "2", "--yes", "--reason", "fixture"],
         true,
     );
     run(

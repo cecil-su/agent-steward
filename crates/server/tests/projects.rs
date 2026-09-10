@@ -9,6 +9,31 @@ use steward_application::Service;
 use steward_server::{ServerState, router};
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn reader_can_read_profile_and_provenance_without_a_new_http_write_endpoint() {
+    let (_temp, s, app) = fixture();
+    s.project_create("Profile").unwrap();
+    s.task_create_in_project(None, None, Some("##1")).unwrap();
+    s.project_profile_set("##1", 1, steward_application::ProjectProfileInput {
+        summary: "简介".into(), architecture: "架构入口".into(), development: "隔离验证".into(),
+        source_task_id: 1, source_task_version: 1, evidence: "synthetic only".into(),
+    }).unwrap();
+    let before = s.project_profile_show("##1").unwrap().data;
+    let task = s.task_show("1").unwrap().data;
+    let history = s.project_history("##1", 0, 50).unwrap().data;
+    let (status, project) = request(&app, "/api/projects/1", None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(project["data"], before);
+    let (status, context) = request(&app, "/api/tasks/1/context", None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(context["data"]["projectProfile"], before["profile"]);
+    let (status, _) = request(&app, "/api/commands/project-profile-set", Some(json!({})), false).await;
+    assert!(!status.is_success());
+    assert_eq!(s.project_profile_show("##1").unwrap().data, before);
+    assert_eq!(s.task_show("1").unwrap().data, task);
+    assert_eq!(s.project_history("##1", 0, 50).unwrap().data, history);
+}
+
 fn fixture() -> (tempfile::TempDir, Service, Router) {
     let temp = tempfile::tempdir().unwrap();
     let service = Service::new(temp.path().join("state.db"));
@@ -111,14 +136,14 @@ async fn project_source_task_query_context_journey_is_explicit_and_read_only_que
     let task = command(
         &app,
         "task-project",
-        json!({"taskId":1,"expectedVersion":1,"project":"##1","confirmed":true}),
+        json!({"taskId":1,"expectedVersion":1,"project":"##1","confirmed":true,"reason":"fixture"}),
     )
     .await;
     assert_eq!(task["task"]["projectId"], 1);
     command(
         &app,
         "task-components",
-        json!({"taskId":1,"expectedVersion":2,"components":["docs"],"confirmed":true}),
+        json!({"taskId":1,"expectedVersion":2,"components":["docs"],"confirmed":true,"reason":"fixture"}),
     )
     .await;
     let before = s.history("1").unwrap().data;
@@ -195,9 +220,9 @@ async fn project_revision_and_task_version_are_separate_and_inputs_fail_closed()
     assert_eq!(error["error"]["details"]["currentRevision"], 2);
     command(&app, "task-create", json!({"input":{"project":"##1"}})).await;
     for body in [
-        json!({"taskId":1,"expectedVersion":1,"confirmed":true}),
-        json!({"taskId":1,"expectedVersion":1,"project":"##1","clear":true,"confirmed":true}),
-        json!({"taskId":1,"expectedVersion":1,"clear":true,"confirmed":false}),
+        json!({"taskId":1,"expectedVersion":1,"confirmed":true,"reason":"fixture"}),
+        json!({"taskId":1,"expectedVersion":1,"project":"##1","clear":true,"confirmed":true,"reason":"fixture"}),
+        json!({"taskId":1,"expectedVersion":1,"clear":true,"confirmed":false,"reason":"fixture"}),
     ] {
         assert_eq!(
             request(&app, "/api/commands/task-project", Some(body), false)
@@ -224,7 +249,7 @@ async fn project_revision_and_task_version_are_separate_and_inputs_fail_closed()
         request(
             &app,
             "/api/commands/task-project",
-            Some(json!({"taskId":-1,"expectedVersion":1,"project":"##1","confirmed":true})),
+            Some(json!({"taskId":-1,"expectedVersion":1,"project":"##1","confirmed":true,"reason":"fixture"})),
             false
         )
         .await
@@ -265,7 +290,7 @@ async fn project_revision_and_task_version_are_separate_and_inputs_fail_closed()
     command(
         &app,
         "task-project",
-        json!({"taskId":1,"expectedVersion":1,"clear":true,"confirmed":true}),
+        json!({"taskId":1,"expectedVersion":1,"clear":true,"confirmed":true,"reason":"fixture"}),
     )
     .await;
     assert!(s.task_show("1").unwrap().data["task"]["projectId"].is_null());

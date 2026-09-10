@@ -35,6 +35,9 @@ impl Service {
             .project_id
             .map(|id| crate::projects::load_project(&tx, id))
             .transpose()?;
+        let project_profile = task.project_id
+            .map(|id| crate::project_profiles::load_profile(&tx, id))
+            .transpose()?.flatten();
         let checkpoint_sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence),0) FROM history WHERE task_id=?1 AND change_type='checkpoint.saved' AND json_extract(payload_json,'$.checkpointId')=?2",
             params![task.id, task.latest_checkpoint_id], |row| row.get(0),
@@ -59,7 +62,7 @@ impl Service {
         notes.reverse();
         tx.commit().map_err(AppError::from_sqlite)?;
         let mut outcome = Outcome::new(json!({"task": task, "checkpoint": checkpoint,
-            "session": session, "project": project, "notesSinceCheckpoint": notes,
+            "session": session, "project": project, "projectProfile": project_profile, "notesSinceCheckpoint": notes,
             "notesTruncated": notes_truncated, "worktreeStatus": null}));
         if notes_truncated {
             outcome.warnings.push(warning("CONTEXT_NOTES_TRUNCATED", "Only the latest 50 notes after the checkpoint are included; use task notes to read all notes", json!({"taskId":task.id})));

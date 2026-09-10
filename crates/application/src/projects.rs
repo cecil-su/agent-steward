@@ -1,9 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde_json::{Value, json};
-use steward_core::{ProjectReference, ProjectView, TaskStatus, normalize_project_name};
+use steward_core::{ProjectReference, ProjectView, normalize_project_name};
 use storage_sqlite::now;
 
-use crate::db::{bump_task, check_version, insert_history, load_task, load_task_by_reference};
 use crate::{AppError, AppResult, Outcome, Service};
 
 pub(crate) fn resolve_project_id(connection: &Connection, reference: &str) -> AppResult<i64> {
@@ -128,8 +127,9 @@ impl Service {
         let mut connection = self.connection()?;
         let tx = connection.transaction().map_err(AppError::from_sqlite)?;
         let project = load_project(&tx, resolve_project_id(&tx, reference)?)?;
+        let profile = crate::project_profiles::load_profile(&tx, project.id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"project": project})))
+        Ok(Outcome::new(json!({"project": project, "profile": profile})))
     }
 
     pub fn project_list(&self, after: i64, limit: u32) -> AppResult<Outcome> {
@@ -208,42 +208,12 @@ impl Service {
         reference: &str,
         expected: i64,
         project: Option<&str>,
+        confirmed: bool,
+        reason: &str,
     ) -> AppResult<Outcome> {
-        let mut connection = self.connection()?;
-        let tx =
-            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task_by_reference(&tx, reference)?;
-        check_version(&task, expected)?;
-        if task.status == TaskStatus::Closed {
-            return Err(AppError::constraint("task.closed"));
-        }
-        let project_id = project
-            .map(|reference| resolve_project_id(&tx, reference))
-            .transpose()?;
-        if task.project_id == project_id {
-            tx.commit().map_err(AppError::from_sqlite)?;
-            return Ok(Outcome::new(json!({"task": task})));
-        }
-        let timestamp = now();
-        tx.execute("DELETE FROM task_components WHERE task_id=?1", [task.id])
-            .map_err(AppError::from_sqlite)?;
-        tx.execute(
-            "UPDATE tasks SET project_id=?1 WHERE id=?2 AND version=?3",
-            params![project_id, task.id, expected],
+        self.task_update_fields(
+            reference, expected, &json!({"project": project}).to_string(),
+            confirmed, reason, "task.project_changed",
         )
-        .map_err(AppError::from_sqlite)?;
-        bump_task(&tx, task.id, expected, &timestamp)?;
-        insert_history(
-            &tx,
-            task.id,
-            "task.project_changed",
-            task.current_session_id.as_deref(),
-            "task project changed",
-            json!({"previousProjectId": task.project_id, "projectId": project_id, "previousComponentIds":task.component_ids}),
-            &timestamp,
-        )?;
-        let updated = load_task(&tx, task.id)?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": updated})))
     }
 }

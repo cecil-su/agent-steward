@@ -6,8 +6,8 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-// Schema 4 is initialized only in empty databases; older builds are never upgraded here.
-pub const SCHEMA_VERSION: i64 = 4;
+// Schema 5 is initialized only in empty databases; older builds are never upgraded here.
+pub const SCHEMA_VERSION: i64 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -180,7 +180,7 @@ CREATE TABLE project_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id),
     revision INTEGER NOT NULL CHECK(revision >= 1),
-    change_type TEXT NOT NULL CHECK(change_type IN ('project.created','project.renamed','component.created','source.added','source.removed')),
+    change_type TEXT NOT NULL CHECK(change_type IN ('project.created','project.renamed','component.created','source.added','source.removed','project.profile_updated')),
     occurred_at TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     UNIQUE(project_id, revision)
@@ -273,6 +273,19 @@ CREATE TABLE tasks (
         OR (repository_path IS NOT NULL AND repository_common_dir IS NOT NULL AND repository_branch IS NOT NULL AND worktree_path IS NOT NULL)),
     FOREIGN KEY(current_session_id, id) REFERENCES sessions(id, task_id) DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY(latest_checkpoint_id, id) REFERENCES checkpoints(id, task_id) DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE project_profiles (
+    project_id INTEGER PRIMARY KEY REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    summary TEXT NOT NULL CHECK(length(trim(summary)) BETWEEN 1 AND 4000),
+    architecture TEXT NOT NULL CHECK(length(trim(architecture)) BETWEEN 1 AND 8000),
+    development TEXT NOT NULL CHECK(length(trim(development)) BETWEEN 1 AND 8000),
+    source_task_id INTEGER NOT NULL REFERENCES tasks(id),
+    source_task_version INTEGER NOT NULL CHECK(source_task_version >= 1),
+    evidence TEXT NOT NULL CHECK(length(trim(evidence)) BETWEEN 1 AND 4000),
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id, revision) REFERENCES project_history(project_id, revision) DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE sessions (

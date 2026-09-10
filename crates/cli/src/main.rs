@@ -69,8 +69,13 @@ enum TopCommand {
 
 #[derive(Debug, Subcommand)]
 enum DatabaseCommand {
-    /// Copy a quiescent Schema 2 snapshot into a new Schema 4 database; never switches services.
+    /// Copy a quiescent Schema 2 snapshot into a new current-schema database; never switches services.
     ImportSchema2 {
+        #[arg(long)]
+        source: PathBuf,
+    },
+    /// Copy a quiescent Schema 4 snapshot into a new current-schema database; never switches services.
+    ImportSchema4 {
         #[arg(long)]
         source: PathBuf,
     },
@@ -83,6 +88,11 @@ enum DatabaseCommand {
 
 #[derive(Debug, Subcommand)]
 enum ProjectCommand {
+    /// Read or replace verified project facts with source-task provenance.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
     /// Live source navigation; snippets only for explicit --file requests. Never a reusable authority snapshot.
     Context {
         project: String,
@@ -139,6 +149,17 @@ enum ProjectCommand {
         after: i64,
         #[arg(long, default_value_t = 50)]
         limit: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCommand {
+    Show { project: String },
+    /// Full replacement from --input JSON; requires current project revision and source Task version.
+    Set {
+        project: String,
+        #[arg(long = "if-revision")]
+        if_revision: i64,
     },
 }
 
@@ -223,6 +244,8 @@ enum TaskCommand {
         components: Vec<String>,
         #[arg(long)]
         clear: bool,
+        #[arg(long)]
+        reason: String,
     },
     /// Read progress, decision, and risk notes.
     Notes {
@@ -276,6 +299,8 @@ enum TaskCommand {
         project: Option<String>,
         #[arg(long)]
         clear: bool,
+        #[arg(long)]
+        reason: String,
     },
     Claim {
         task_id: String,
@@ -290,6 +315,8 @@ enum TaskCommand {
         task_id: String,
         #[arg(long = "if-version")]
         if_version: i64,
+        #[arg(long)]
+        reason: String,
     },
     Retitle {
         task_id: String,
@@ -559,6 +586,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 ));
             }
             match command {
+                DatabaseCommand::ImportSchema4 { source } => service.import_schema4(source, cli.yes),
                 DatabaseCommand::ImportV7 { source } => service.import_legacy_v7(source, cli.yes),
                 DatabaseCommand::ImportSchema2 { source } => {
                     service.import_schema2(source, cli.yes)
@@ -703,6 +731,13 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     if_revision,
                 } => service.project_source_remove(project, *if_revision, *source_id),
             },
+            ProjectCommand::Profile { command } => match command {
+                ProfileCommand::Show { project } => service.project_profile_show(project),
+                ProfileCommand::Set { project, if_revision } => {
+                    let input = read_profile_input(cli.input.as_deref())?;
+                    service.project_profile_set(project, *if_revision, input)
+                }
+            },
             ProjectCommand::Create { name } => service.project_create(name),
             ProjectCommand::Show { project } => service.project_show(project),
             ProjectCommand::List { after, limit } => service.project_list(*after, *limit),
@@ -722,8 +757,9 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 task_id,
                 if_version,
                 components,
+                reason,
                 ..
-            } => service.task_set_components(task_id, *if_version, components),
+            } => service.task_set_components(task_id, *if_version, components, cli.yes, reason),
             TaskCommand::Notes { task_id } => service.task_notes(task_id),
             TaskCommand::Here => service.task_here(
                 &std::env::current_dir()
@@ -783,8 +819,9 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 task_id,
                 if_version,
                 project,
+                reason,
                 ..
-            } => service.task_set_project(task_id, *if_version, project.as_deref()),
+            } => service.task_set_project(task_id, *if_version, project.as_deref(), cli.yes, reason),
             TaskCommand::Claim {
                 task_id,
                 session,
@@ -794,7 +831,8 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             TaskCommand::Update {
                 task_id,
                 if_version,
-            } => service.task_update(task_id, *if_version, &required_input(cli.input.as_deref())?),
+                reason,
+            } => service.task_update(task_id, *if_version, &required_input(cli.input.as_deref())?, cli.yes, reason),
             TaskCommand::Retitle {
                 task_id,
                 if_version,
@@ -996,6 +1034,20 @@ fn read_input(path: &Path) -> Result<String, AppError> {
         return Err(AppError::invalid("input", "must not be empty"));
     }
     Ok(input)
+}
+
+fn read_profile_input(path: Option<&Path>) -> Result<steward_application::ProjectProfileInput, AppError> {
+    const LIMIT: u64 = 512 * 1024;
+    let path = path.ok_or_else(|| AppError::invalid("input", "--input <file|-> is required"))?;
+    let reader: Box<dyn Read> = if path == Path::new("-") { Box::new(io::stdin()) }
+        else { Box::new(fs::File::open(path).map_err(|error| AppError::invalid("input", format!("cannot open profile input: {error}")))?) };
+    let mut bytes = Vec::new();
+    reader.take(LIMIT + 1).read_to_end(&mut bytes)
+        .map_err(|error| AppError::invalid("input", format!("cannot read profile input: {error}")))?;
+    if bytes.len() as u64 > LIMIT { return Err(AppError::invalid("input", "profile JSON exceeds 512 KiB")); }
+    serde_json::from_slice(&bytes).map_err(|error| AppError::invalid("input", format!(
+        "invalid profile JSON ({:?}) at line {}, column {}", error.classify(), error.line(), error.column(),
+    )))
 }
 
 fn required_input(path: Option<&Path>) -> Result<String, AppError> {

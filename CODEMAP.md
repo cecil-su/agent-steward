@@ -51,7 +51,7 @@ flowchart LR
 | 共用权限告警 | [`crates/application/src/permissions.rs`](crates/application/src/permissions.rs) | CLI/HTTP 共用数据库目录及 WAL/SHM 权限检查 |
 | 本地 Daemon | [`crates/server/src/lib.rs`](crates/server/src/lib.rs) | 同源 HTTP、管理员/只读授权、一次性自动连接、严格 Command DTO、Application 调用 |
 | Windows 本地更新 | [`distribution/windows/update-local.ps1`](distribution/windows/update-local.ps1) | 当前源码独立缓存编译、唯一构建 ID、复用受管服务正常停止与失败恢复；入口 Update-Local.cmd |
-| Windows 启动器 | [`distribution/windows/steward.ps1`](distribution/windows/steward.ps1) | 固定配置、PID/启动时间/路径校验、正常停止、发布包校验与切换；不接管用户进程 |
+| Windows 启动器 | [`distribution/windows/steward.ps1`](distribution/windows/steward.ps1) | Schema 4 包、停止前数据库版本预检、同 Schema 回退及自定义目录入口；PID/启动时间/路径校验，不接管用户进程或自动跨 Schema 更新 |
 | 本机身份 | [`crates/server/src/credentials.rs`](crates/server/src/credentials.rs) | 首次创建私有管理员/只读凭据、跨重启复用、拒绝损坏或不安全文件 |
 | 浏览器授权 | [`crates/server/src/browser_auth.rs`](crates/server/src/browser_auth.rs) | 持久 HttpOnly Cookie 授权哈希、角色/凭据/origin 绑定、过期和撤销；不改业务库 Schema |
 | 实时通知 | [`crates/server/src/events.rs`](crates/server/src/events.rs) | 有界认证 SSE、SQLite data_version 观察、CLI/Hook 提交通知、退出释放订阅 |
@@ -72,6 +72,7 @@ flowchart LR
 | Worktree 用例 | [`crates/application/src/worktrees.rs`](crates/application/src/worktrees.rs) | Worktree status/create/remove/adopt/detach，以及 Git 与 SQLite 的部分完成处理 |
 | SQL 映射 | [`crates/application/src/db.rs`](crates/application/src/db.rs) | 数字/`#数字`/`taskKey` 引用解析、常用查询、row 到 DTO 的转换、version 检查、Task version 递增和 History 插入 |
 | 核心合同 | [`crates/core/src/lib.rs`](crates/core/src/lib.rs) | Task 状态、输入/输出 DTO、共享校验、默认数据目录和跨平台私有权限工具 |
+| 启动版本预检 | [`crates/application/src/migration/preflight.rs`](crates/application/src/migration/preflight.rs) | `taskd --check-database-schema --database ...`：显式路径、SQLite 只读/WAL 版本检查，无初始化/监听；不是停写锁或完整性验收。真实入口测试见 `crates/server/tests/database_preflight.rs` |
 | v7 归档迁移 | [`crates/application/src/migration.rs`](crates/application/src/migration.rs) | 显式只读 v7 归档、闭合任务范围校验、逐字段复制核验、新库不覆盖发布；`database import-v7` |
 | Schema 2 显式复制 | [`crates/application/src/migration/schema2.rs`](crates/application/src/migration/schema2.rs) | `database import-schema2`：冻结布局、七表/四序列复制、数据/身份复查、私有暂存及不覆盖发布；不探测历史外部路径。失败/强杀测试在同名子目录，CLI 边界见 `crates/cli/tests/schema2_contract.rs`，真实启动重启见 `crates/server/tests/schema2_startup.rs`；跨版本合成脚本 `crates/cli/tests/schema2_rehearsal.py` |
 | SQLite 基础设施 | [`crates/storage-sqlite/src/lib.rs`](crates/storage-sqlite/src/lib.rs) | 数据库打开、busy timeout、外键、WAL、单一 Schema 原子初始化和数据库路径规范化 |

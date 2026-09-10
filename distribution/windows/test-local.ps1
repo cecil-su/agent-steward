@@ -24,6 +24,12 @@ try {
         New-Item -ItemType Directory -Force -Path $binaries | Out-Null
         foreach ($file in @('taskd.exe','taskctl.exe','task-hook.exe')) { [IO.File]::WriteAllText((Join-Path $binaries $file), 'synthetic executable') }
     }
+    $script:failPreflight = $false
+    function Assert-StartCompatible([string]$Version) {
+        $manifest = Read-Json (Join-Path $InstallRoot "versions\$Version\manifest.json")
+        Assert ($manifest.databaseSchema -eq 5) 'Local bundle mislabeled its database schema.'
+        if ($script:failPreflight) { throw 'synthetic schema mismatch' }
+    }
     function Switch-Managed([string]$Version) {
         $script:switches++
         Assert-BuildId $Version
@@ -43,6 +49,13 @@ try {
     Assert (@(Get-ChildItem (Join-Path $InstallRoot 'versions')).Count -eq 2) 'Repeated local builds reused a version directory.'
     Assert ([IO.File]::ReadAllText((Join-Path $InstallRoot 'settings.json')) -ceq $settings) 'Update changed settings.'
     Assert ([IO.File]::ReadAllText((Join-Path $repository 'Cargo.lock')) -ceq $lockBefore) 'Update changed source lockfile.'
+    $script:failPreflight = $true
+    $launcherBefore = [IO.File]::ReadAllText((Join-Path $InstallRoot 'steward.ps1'))
+    [IO.File]::WriteAllText((Join-Path $repository 'distribution\windows\steward.ps1'), 'different launcher')
+    Assert-Fails { Update-LocalManaged $repository }
+    Assert ($script:switches -eq 2) 'Preflight failure switched the daemon.'
+    Assert ([IO.File]::ReadAllText((Join-Path $InstallRoot 'steward.ps1')) -ceq $launcherBefore) 'Preflight failure replaced the stable launcher.'
+    Assert ([IO.File]::ReadAllText((Join-Path $InstallRoot 'settings.json')) -ceq $settings) 'Preflight failure changed settings.'
     Assert-Fails { Assert-BuildId 'local-../../escape' }
     Write-Host 'PASS: local compile failure isolation, fresh build identities, stage-before-switch, source/config preservation.'
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }

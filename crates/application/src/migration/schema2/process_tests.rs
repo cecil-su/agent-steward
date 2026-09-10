@@ -19,10 +19,12 @@ fn migration_child() {
     let destination = std::env::var_os("STEWARD_SCHEMA2_TEST_DESTINATION").unwrap();
     let ready = std::env::var_os("STEWARD_SCHEMA2_TEST_READY").unwrap();
     let phase = std::env::var("STEWARD_SCHEMA2_TEST_PHASE").unwrap();
-    import(
+    let version = std::env::var("STEWARD_COPY_TEST_VERSION").unwrap_or_else(|_| "2".into()).parse::<i64>().unwrap();
+    import_version(
         Path::new(&source),
         Path::new(&destination),
         true,
+        version,
         |at, _| {
             if at == phase {
                 fs::write(Path::new(&ready), b"ready").unwrap();
@@ -36,9 +38,9 @@ fn migration_child() {
 
 #[test]
 fn killed_import_never_publishes_and_retry_does_not_adopt_abandoned_staging() {
-    for phase in ["history", "before_publish"] {
+    for (version, phase) in [(2,"history"),(2,"before_publish"),(4,"history"),(4,"before_publish")] {
         let temp = tempfile::tempdir().unwrap();
-        let source = super::tests::fixture(temp.path());
+        let source = if version == 2 { super::tests::fixture(temp.path()) } else { super::schema4_tests::fixture(temp.path()) };
         let before = fs::read(&source).unwrap();
         let destination = temp.path().join("new.db");
         let ready = temp.path().join("ready");
@@ -49,6 +51,7 @@ fn killed_import_never_publishes_and_retry_does_not_adopt_abandoned_staging() {
                     "migration::schema2::process_tests::migration_child",
                     "--nocapture",
                 ])
+                .env("STEWARD_COPY_TEST_VERSION", version.to_string())
                 .env("STEWARD_SCHEMA2_TEST_SOURCE", &source)
                 .env("STEWARD_SCHEMA2_TEST_DESTINATION", &destination)
                 .env("STEWARD_SCHEMA2_TEST_READY", &ready)
@@ -82,14 +85,12 @@ fn killed_import_never_publishes_and_retry_does_not_adopt_abandoned_staging() {
                 p.file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .starts_with(".import-schema2-")
+                    .starts_with(&format!(".import-schema{version}-"))
             })
             .collect();
         assert_eq!(abandoned.len(), 1);
         private_parent(&abandoned[0]).unwrap();
-        Service::new(&destination)
-            .import_schema2(&source, true)
-            .unwrap();
+        import_version(&source, &destination, true, version, |_, _| Ok(())).unwrap();
         assert!(
             abandoned[0].exists(),
             "retry must not scan, adopt or delete old staging"

@@ -282,7 +282,25 @@ impl Service {
         reference: &str,
         expected: i64,
         input_json: &str,
+        confirmed: bool,
+        reason: &str,
     ) -> AppResult<Outcome> {
+        self.task_update_fields(reference, expected, input_json, confirmed, reason, "task.updated")
+    }
+
+    pub(crate) fn task_update_fields(
+        &self,
+        reference: &str,
+        expected: i64,
+        input_json: &str,
+        confirmed: bool,
+        reason: &str,
+        change_type: &str,
+    ) -> AppResult<Outcome> {
+        if !confirmed {
+            return Err(AppError::invalid("confirmed", "explicit user confirmation is required"));
+        }
+        let reason = required("reason", reason)?;
         let patch: Value = serde_json::from_str(input_json)
             .map_err(|error| AppError::invalid("input", error.to_string()))?;
         let patch = patch
@@ -294,7 +312,7 @@ impl Service {
         for key in patch.keys() {
             if !matches!(
                 key.as_str(),
-                "taskKey" | "title" | "goal" | "scope" | "acceptanceCriteria" | "nextStep"
+                "taskKey" | "title" | "goal" | "scope" | "acceptanceCriteria" | "nextStep" | "project" | "components"
             ) {
                 return Err(AppError::invalid(key, "unknown patch field"));
             }
@@ -305,8 +323,50 @@ impl Service {
         let mut task = load_task_by_reference(&tx, reference)?;
         let id = task.id;
         check_version(&task, expected)?;
-        ensure_mutable(&task)?;
+        let before = serde_json::to_value(&task).unwrap();
         let mut changed = Vec::new();
+        if let Some(project) = patch.get("project") {
+            let project_id = if project.is_null() {
+                None
+            } else {
+                Some(crate::projects::resolve_project_id(&tx, project.as_str().ok_or_else(|| {
+                    AppError::invalid("project", "must be a project reference string or null")
+                })?)?)
+            };
+            if project_id != task.project_id {
+                if !task.component_ids.is_empty() && !patch.contains_key("components") {
+                    return Err(AppError::invalid("components", "changing project requires explicit replacement or [] for existing components"));
+                }
+                task.project_id = project_id;
+                changed.push("projectId".to_owned());
+            }
+        }
+        if let Some(components) = patch.get("components") {
+            let names: Vec<String> = serde_json::from_value(components.clone())
+                .map_err(|_| AppError::invalid("components", "must be an array of component names"))?;
+            if names.len() > 200 {
+                return Err(AppError::invalid("components", "at most 200 components"));
+            }
+            let mut ids = std::collections::BTreeSet::new();
+            for name in names {
+                let project_id = task.project_id.ok_or_else(|| AppError::invalid("project", "select a project before selecting components"))?;
+                let (_, key) = steward_core::normalize_project_name(&name)
+                    .map_err(|reason| AppError::invalid("component", reason))?;
+                let id: i64 = tx.query_row(
+                    "SELECT id FROM components WHERE project_id=?1 AND name_key=?2",
+                    params![project_id, key], |row| row.get(0),
+                ).optional().map_err(AppError::from_sqlite)?
+                    .ok_or_else(|| AppError::not_found("Component", &name))?;
+                if !ids.insert(id) {
+                    return Err(AppError::invalid("components", "duplicate component selection"));
+                }
+            }
+            let ids: Vec<i64> = ids.into_iter().collect();
+            if ids != task.component_ids {
+                task.component_ids = ids;
+                changed.push("componentIds".to_owned());
+            }
+        }
         if let Some(value) = patch.get("taskKey") {
             let value = value
                 .as_str()
@@ -348,18 +408,27 @@ impl Service {
                 changed.push("nextStep".to_owned());
             }
         }
+        if task.status == TaskStatus::Closed && task.next_step.is_some() {
+            return Err(AppError::constraint("task.closed.next_step"));
+        }
         if changed.is_empty() {
-            return Err(AppError::invalid(
-                "input",
-                "patch does not change any field",
-            ));
+            if change_type != "task.updated" {
+                tx.commit().map_err(AppError::from_sqlite)?;
+                return Ok(Outcome::new(json!({"task": task})));
+            }
+            return Err(AppError::invalid("input", "patch does not change any field"));
         }
         changed.sort();
         let timestamp = now();
+        let association_changed = changed.iter().any(|field| field == "projectId" || field == "componentIds");
+        if association_changed {
+            tx.execute("DELETE FROM task_components WHERE task_id=?1", [id])
+                .map_err(AppError::from_sqlite)?;
+        }
         let count = tx
             .execute(
                 "UPDATE tasks SET task_key=?3,title=?4,goal=?5,scope=?6,acceptance_criteria=?7,
-                    next_step=?8,version=version+1,updated_at=?9 WHERE id=?1 AND version=?2",
+                    next_step=?8,version=version+1,updated_at=?9,project_id=?10 WHERE id=?1 AND version=?2",
                 params![
                     id,
                     expected,
@@ -369,23 +438,33 @@ impl Service {
                     task.scope,
                     task.acceptance_criteria,
                     task.next_step,
-                    timestamp
+                    timestamp,
+                    task.project_id
                 ],
             )
             .map_err(AppError::from_sqlite)?;
         if count != 1 {
             return Err(AppError::version(expected, load_task(&tx, id)?.version));
         }
+        if association_changed {
+            for component_id in &task.component_ids {
+                tx.execute("INSERT INTO task_components(task_id,project_id,component_id) VALUES (?1,?2,?3)",
+                    params![id, task.project_id, component_id]).map_err(AppError::from_sqlite)?;
+            }
+        }
+        let response_task = load_task(&tx, id)?;
         insert_history(
             &tx,
             id,
-            "task.updated",
-            task.current_session_id.as_deref(),
-            "task fields updated",
-            json!({"changedFields": changed}),
+            change_type,
+            None,
+            "task information maintained with explicit confirmation",
+            json!({"changedFields": changed, "before": before, "after": response_task,
+                "confirmed": true, "reason": reason,
+                "previousProjectId": before["projectId"], "projectId": response_task.project_id,
+                "previousComponentIds": before["componentIds"], "componentIds": response_task.component_ids}),
             &timestamp,
         )?;
-        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         Ok(Outcome::new(json!({"task": response_task})))
     }

@@ -1,4 +1,5 @@
 //! Explicit offline database copies. Never opens sources through the current initializer.
+mod preflight;
 mod schema2;
 use std::{fs, path::Path, time::Duration};
 
