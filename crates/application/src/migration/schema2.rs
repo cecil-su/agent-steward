@@ -237,6 +237,13 @@ fn import(
     import_version(source, destination, confirmed, 2, observe)
 }
 
+type SchemaCopyLayout<'a> = (
+    &'a str,
+    &'a [&'a str],
+    &'a [(&'a str, &'a str)],
+    &'a [&'a str],
+);
+
 fn import_version(
     source: &Path,
     destination: &Path,
@@ -244,18 +251,14 @@ fn import_version(
     source_version: i64,
     mut observe: impl FnMut(&str, &Path) -> AppResult<()>,
 ) -> AppResult<Outcome> {
-    let (definition, tables, sequence_fields, empty_tables): (
-        &str,
-        &[&str],
-        &[(&str, &str)],
-        &[&str],
-    ) = match source_version {
-        2 => (SCHEMA2, &TABLES, &SEQUENCES, &PROJECT_TABLES),
-        4 => (SCHEMA4, &TABLES4, &SEQUENCES4, &["project_profiles"]),
-        5 => (SCHEMA5, &TABLES5, &SEQUENCES4, &[]),
-        6 => (SCHEMA6, &TABLES5, &SEQUENCES4, &[]),
-        _ => return Err(refused("unsupported source schema")),
-    };
+    let (definition, tables, sequence_fields, empty_tables): SchemaCopyLayout<'_> =
+        match source_version {
+            2 => (SCHEMA2, &TABLES, &SEQUENCES, &PROJECT_TABLES),
+            4 => (SCHEMA4, &TABLES4, &SEQUENCES4, &["project_profiles"]),
+            5 => (SCHEMA5, &TABLES5, &SEQUENCES4, &[]),
+            6 => (SCHEMA6, &TABLES5, &SEQUENCES4, &[]),
+            _ => return Err(refused("unsupported source schema")),
+        };
     if !confirmed {
         return Err(AppError::invalid(
             "yes",
