@@ -57,12 +57,19 @@ jobs:
           npm run sync:embedded
       - name: Build binaries
         run: cargo build --workspace --locked
+      - name: Install pinned Pi 0.85.1 for mandatory real-host regressions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = & ./.github/scripts/install-test-pi.ps1 -Destination "$env:RUNNER_TEMP/steward-test-pi-0.85.1"
+          "STEWARD_TEST_PI_BIN=$binary" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "STEWARD_REQUIRE_REAL_PI=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Native adapters and task-context regressions (real Pi required on Windows; unit-only on Linux)
+        run: node --test integrations/tests/*.test.mjs crates/server/tests/browser/*.test.cjs
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rust tests
         run: cargo test --workspace --all-targets --locked
-      - name: Native adapters, Pi evidence and browser contract tests
-        run: node --test integrations/tests/native.test.mjs integrations/tests/pi-context.test.mjs crates/server/tests/browser/*.test.cjs
       - name: Windows launcher and update safety tests
         if: runner.os == 'Windows'
         shell: powershell

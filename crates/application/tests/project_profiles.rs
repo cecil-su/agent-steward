@@ -136,7 +136,8 @@ fn cas_and_source_validation_fail_without_side_effects() {
         s.project_profile_set("##1", 2, value).unwrap().data["profile"]["sourceTaskVersion"],
         2
     );
-    s.task_set_project("#1", 2, Some("##2"), true, "fixture").unwrap();
+    s.task_set_project("#1", 2, Some("##2"), true, "fixture")
+        .unwrap();
     let before = snapshot(&s);
     let mut moved = input();
     moved.source_task_version = 3;

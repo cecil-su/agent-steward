@@ -14,14 +14,14 @@ $InstallRoot = Join-Path $temp "install with spaces $unicode"
 New-Item -ItemType Directory -Path $InstallRoot,(Join-Path $InstallRoot 'versions'),(Join-Path $InstallRoot 'runs') | Out-Null
 try {
     Assert-Fails { Assert-Version '../v1.0.0' }
-    foreach ($schema in @(0,1,2,3,4,5,7)) {
+    foreach ($schema in @(0,1,2,3,4,5,6,8)) {
         Assert-Fails { Assert-Manifest @{version='v1.0.0';databaseSchema=$schema;launcherProtocol=1;target='x86_64-pc-windows-msvc'} }
     }
-    Assert-Manifest @{version='v1.0.0';databaseSchema=6;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Assert-Manifest @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     Assert-Fails { Assert-Settings @{bind='0.0.0.0';port=43123;database='C:\tasks.db';runtimeDir='C:\runtime';requireLocalAuth=$false} }
     $bundle = Join-Path $temp 'bundle'; New-Item -ItemType Directory -Path $bundle | Out-Null
     foreach ($file in @('taskd.exe','taskctl.exe','task-hook.exe','steward.ps1','Start.cmd','Update.cmd','Stop.cmd','README.md')) { [IO.File]::WriteAllText((Join-Path $bundle $file), 'synthetic') }
-    Write-Json (Join-Path $bundle 'manifest.json') @{version='v1.0.1';databaseSchema=6;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $bundle 'manifest.json') @{version='v1.0.1';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     $zip = Join-Path $temp 'release.zip'; Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $zip
     $sum = "$zip.sha256"; [IO.File]::WriteAllText($sum, (Get-FileHash $zip).Hash)
     Expand-Release $zip $sum (Join-Path $temp 'expanded')
@@ -59,7 +59,7 @@ try {
             $tasks = Invoke-RestMethod "$url/api/tasks"
             Assert ($tasks.data.tasks.Count -eq 1) 'Restart did not preserve the task database.'
             # A different, owned SQLite file advertises the old schema. Preflight
-            # must reject it without stopping the still-running Schema 6 daemon.
+            # must reject it without stopping the still-running Schema 7 daemon.
             $oldDatabase = Join-Path $temp 'old-schema.db'
             $bytes = [IO.File]::ReadAllBytes($settings.database)
             $bytes[60]=0; $bytes[61]=0; $bytes[62]=0; $bytes[63]=2
@@ -78,7 +78,7 @@ try {
         $packageOutput = Join-Path $temp 'packaged'
         & (Join-Path $PSScriptRoot 'package.ps1') -Version 'v9.0.0' -Binaries ([IO.Path]::GetDirectoryName($Taskd)) -Output $packageOutput
         $packaged = Read-Json (Join-Path $packageOutput 'bundle\manifest.json')
-        Assert ($packaged.databaseSchema -eq 6) 'Release package mislabeled Schema 6.'
+        Assert ($packaged.databaseSchema -eq 7) 'Release package mislabeled Schema 7.'
         Expand-Release (Join-Path $packageOutput 'agent-steward-windows-x64.zip') (Join-Path $packageOutput 'agent-steward-windows-x64.zip.sha256') (Join-Path $temp 'package-verified')
         # Restore the synthetic binary for immutable-package retry checks below.
         [IO.File]::WriteAllText((Join-Path $InstallRoot 'versions\v1.0.1\taskd.exe'), 'synthetic')
@@ -94,7 +94,7 @@ try {
     foreach ($p in @((Join-Path $entryRoot 'steward.ps1'),(Join-Path $entryVersion 'steward.ps1'))) { Copy-Item (Join-Path $PSScriptRoot 'steward.ps1') $p }
     Write-Json (Join-Path $entryRoot 'current.json') @{version='v1.0.0'}
     Write-Json (Join-Path $entryRoot 'settings.json') @{bind='127.0.0.1';port=43123;database=(Join-Path $entryRoot 'entry.db');runtimeDir=(Join-Path $entryRoot 'runtime');requireLocalAuth=$false}
-    Write-Json (Join-Path $entryVersion 'manifest.json') @{version='v1.0.0';databaseSchema=6;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $entryVersion 'manifest.json') @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     $savedLocalAppData = $env:LOCALAPPDATA
     try {
         $env:LOCALAPPDATA = Join-Path $temp 'unused default'
@@ -104,7 +104,7 @@ try {
     } finally { $env:LOCALAPPDATA = $savedLocalAppData }
     # Offline update orchestration: download first; failure restarts the old version.
     New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'versions\v1.0.0') | Out-Null
-    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=6;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     $script:failPreflight = $false
     function Assert-StartCompatible([string]$Version) {
         if ($script:failPreflight) { throw 'synthetic schema mismatch' }
@@ -126,7 +126,7 @@ try {
     Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=2;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     Assert-Fails { Update-Managed }
     Assert ($script:stops -eq 0 -and $script:starts.Count -eq 0) 'Cross-schema update touched the daemon.'
-    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=6;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     Assert-Fails { Update-Managed }
     Assert (($script:starts -join ',') -eq 'v1.0.1,v1.0.0') "Failed startup did not restart old version: $script:lastFailure"
     Assert ((Read-Json (Join-Path $InstallRoot 'current.json')).version -eq 'v1.0.0') 'Failed update changed current version.'

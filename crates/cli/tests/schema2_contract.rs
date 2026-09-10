@@ -71,7 +71,7 @@ fn schema2_cli_publishes_one_verified_copy_and_never_overwrites_it() {
     let out = run(&args);
     assert_eq!(out["ok"], true);
     assert_eq!(out["data"]["sourceSchema"], 2);
-    assert_eq!(out["data"]["targetSchema"], 6);
+    assert_eq!(out["data"]["targetSchema"], 7);
     assert_eq!(out["data"]["counts"]["tasks"], 1);
     assert_eq!(out["data"]["highWaterMarks"]["tasks"], 50);
     assert_eq!(

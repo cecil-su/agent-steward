@@ -1,6 +1,6 @@
 import { useId } from 'react';
 import type { Task, Project, TaskContext, ProjectDetail, DetailTab, Note, Session, HistoryEntry } from '../lib/contracts';
-import { HistoryPanel, ProjectProfilePanel, TaskDetailPanel } from './detail-panels';
+import { HistoryPanel, ProjectProfilePanel, SessionRulesPanel, TaskDetailPanel } from './detail-panels';
 import { Textarea } from '../components/ui/textarea';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -175,7 +175,7 @@ export function ReadonlyWorkspace(props: ReadonlyWorkspaceProps) {
                         <Field label="组件 ID" value={(task.componentIds ?? []).join('、') || '无'} />
                       </dl>}
                       {task.projectId != null && props.projectManagement && props.onOpenTaskProject && <Button variant="outline" disabled={props.busy} onClick={() => props.onOpenTaskProject?.(task.projectId!)}>查看所属项目 ##{task.projectId}</Button>}
-                      {detailTab === 'overview' && <ProjectProfilePanel profile={props.taskContext?.projectProfile} />}
+                      {detailTab === 'overview' && <><ProjectProfilePanel profile={props.taskContext?.projectProfile} /><SessionRulesPanel rules={props.taskContext?.sessionRules} /></>}
                       {props.taskContext && <TaskDetailPanel tab={detailTab} context={props.taskContext} notes={props.notes} sessions={props.sessions} history={props.history} />}
                     </div>
                   ) : <EmptyState className="px-6 py-16" title={props.selectedTaskId === null ? '选择任务查看详情' : props.busy ? '正在加载任务详情' : '任务详情暂不可用'} description="从左侧任务列表选择一项。" /> : detail ? (
@@ -188,6 +188,7 @@ export function ReadonlyWorkspace(props: ReadonlyWorkspaceProps) {
                         <Field label="更新时间" value={detail.project.updatedAt} />
                       </dl>
                       <ProjectProfilePanel profile={detail.profile} />
+                      <SessionRulesPanel rules={detail.sessionRules} />
                       {props.onViewProjectTasks && <Button variant="outline" disabled={props.busy} onClick={() => props.onViewProjectTasks?.(detail.project.id)}>查看关联任务</Button>}
                       <section aria-label="项目历史">
                         <h3 className="mb-3 font-semibold">项目历史</h3>

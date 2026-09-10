@@ -22,7 +22,7 @@ const IMPORT_READ_BUFFER_BYTES: usize = 64 * 1024;
 impl Service {
     /// Read one coherent database snapshot without creating or resuming a Session.
     pub fn task_context(&self, reference: &str) -> AppResult<Outcome> {
-        let mut connection = self.connection()?;
+        let mut connection = self.context_connection()?;
         let tx = connection.transaction().map_err(AppError::from_sqlite)?;
         let task = load_task_by_reference(&tx, reference)?;
         let checkpoint = load_latest_checkpoint(&tx, &task)?;
@@ -35,9 +35,12 @@ impl Service {
             .project_id
             .map(|id| crate::projects::load_project(&tx, id))
             .transpose()?;
-        let project_profile = task.project_id
+        let project_profile = task
+            .project_id
             .map(|id| crate::project_profiles::load_profile(&tx, id))
-            .transpose()?.flatten();
+            .transpose()?
+            .flatten();
+        let session_rules = crate::rules::session_rules(&tx, task.project_id)?;
         let checkpoint_sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence),0) FROM history WHERE task_id=?1 AND change_type='checkpoint.saved' AND json_extract(payload_json,'$.checkpointId')=?2",
             params![task.id, task.latest_checkpoint_id], |row| row.get(0),
@@ -62,7 +65,7 @@ impl Service {
         notes.reverse();
         tx.commit().map_err(AppError::from_sqlite)?;
         let mut outcome = Outcome::new(json!({"task": task, "checkpoint": checkpoint,
-            "session": session, "project": project, "projectProfile": project_profile, "notesSinceCheckpoint": notes,
+            "session": session, "project": project, "projectProfile": project_profile, "sessionRules": session_rules, "notesSinceCheckpoint": notes,
             "notesTruncated": notes_truncated, "worktreeStatus": null}));
         if notes_truncated {
             outcome.warnings.push(warning("CONTEXT_NOTES_TRUNCATED", "Only the latest 50 notes after the checkpoint are included; use task notes to read all notes", json!({"taskId":task.id})));
@@ -456,6 +459,7 @@ impl Service {
         )?;
         let response_task = load_task(&tx, task_id)?;
         let response_checkpoint = load_latest_checkpoint(&tx, &response_task)?;
+        let session_rules = crate::rules::session_rules(&tx, response_task.project_id)?;
         let response_sessions = list_sessions_for_task(&tx, task_id)?;
         let next_step = response_task.next_step.clone();
         tx.commit().map_err(AppError::from_sqlite)?;
@@ -463,6 +467,7 @@ impl Service {
             "task": response_task,
             "checkpoint": response_checkpoint,
             "sessions": response_sessions,
+            "sessionRules": session_rules,
             "worktreeStatus": worktree_status,
             "nextStep": next_step,
         })))

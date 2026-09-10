@@ -7,7 +7,7 @@ describe('same-origin transport', () => {
     const transport = vi.fn<typeof fetch>().mockImplementation(async () => reply({ ok: true, data: { id: 1 } }));
     const api = createApi({ fetch: transport });
     await expect(api.get('/api/tasks/1')).resolves.toEqual({ id: 1 });
-    expect(transport.mock.calls[0][1]).toMatchObject({ method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: { 'X-Steward-UI-Contract': '3' } });
+    expect(transport.mock.calls[0][1]).toMatchObject({ method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: { 'X-Steward-UI-Contract': '4' } });
     await api.login('synthetic-credential');
     expect(transport.mock.calls[1][1]).toMatchObject({ method: 'POST', headers: { 'X-Steward-CSRF': '1', 'X-Steward-Token': 'synthetic-credential' }, body: '{}' });
   });

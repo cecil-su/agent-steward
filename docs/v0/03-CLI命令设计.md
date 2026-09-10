@@ -1,6 +1,6 @@
 # CLI 命令设计
 
-Project 的 `##ID`/唯一名称、`project create/show/list/rename/history`、`task create/list --project`、`task project/components`、`project component/source/here/context` 及 context 新字段见 [项目与上下文复用合同](16-项目与上下文复用.md)。当前开发数据库 Schema 4 的普通连接只初始化空库，不隐式升级 Schema 2/3 旧库；JSON envelope 仍为 2。本文其余部分保留 Task/Session/Worktree 基础合同。
+Project 的 `##ID`/唯一名称、`project create/show/list/rename/history`、`task create/list --project`、`task project/components`、`project component/source/here/context` 及 context 新字段见 [项目与上下文复用合同](16-项目与上下文复用.md)。当前开发数据库 Schema7 的普通连接只初始化空库，不隐式升级旧库；JSON envelope为2。`rule` CLI、task context/sessionRules、Schema6显式复制和UI合同4见[个人偏好与项目规则](22-个人偏好与项目规则.md)。本文其余部分保留 Task/Session/Worktree 基础合同。
 
 ## 1. 通用约定
 
@@ -194,7 +194,7 @@ History 与对应 mutation 在同一 SQLite 事务中写入，记录 Task 创建
 
 AI 应遵守：
 
-1. 开始时运行 `task show --json`，取得当前 Task version；
+1. 新窗口读取任务需求时运行 `task context --json`，同时取得当前 Task version 与完整有效 sessionRules；只读查询不自动领取任务；
 2. 使用该 version 执行 `task claim` 或 `task resume`，并从成功结果取得新 version；
 3. 状态、关键决策或阻塞变化时调用对应命令，每次成功后继续携带最新 version；
 4. Git 现场使用 `worktree status` 获取；

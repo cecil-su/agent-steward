@@ -6,6 +6,34 @@ use rusqlite::{Connection, OpenFlags};
 use std::{fs, time::Duration};
 
 impl Service {
+    /// Path/sidecar/identity checks shared with preflight; unlike initialization, requires an existing file.
+    pub(crate) fn context_connection(&self) -> AppResult<Connection> {
+        let input = self.database_path();
+        let path = if input.is_absolute() {
+            input.to_path_buf()
+        } else {
+            std::env::current_dir().map_err(io_error)?.join(input)
+        };
+        local_file_path(&path)?;
+        let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(AppError::invalid(
+                "database",
+                "expected an existing regular database, not a link or directory",
+            ));
+        }
+        let identity = git_adapter::identify_existing(&path)
+            .map_err(|_| AppError::invalid("database", "cannot establish database identity"))?;
+        local_file_path(&identity.canonical_path)?;
+        require_regular_source_sidecars(&identity)?;
+        let connection = storage_sqlite::open_database_readonly(&identity.canonical_path)
+            .map_err(AppError::from_storage)?;
+        git_adapter::verify_existing_identity(&identity).map_err(|_| {
+            AppError::invalid("database", "database identity changed during context open")
+        })?;
+        Ok(connection)
+    }
+
     /// Return this binary's supported schema if the configured database is compatible
     /// or absent. This is a point-in-time version check, not integrity validation or
     /// a writer fence. Read-only WAL access may still involve SHM.

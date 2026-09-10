@@ -12,7 +12,8 @@ fn fixture() -> (tempfile::TempDir, Service) {
     s.project_source_add("##1", 1, None, SourceLocation::Directory(&root))
         .unwrap();
     s.task_create_minimal().unwrap();
-    s.task_set_project("#1", 1, Some("##1"), true, "fixture").unwrap();
+    s.task_set_project("#1", 1, Some("##1"), true, "fixture")
+        .unwrap();
     s.task_claim("#1", 2, "s1", false).unwrap();
     (temp, s)
 }
@@ -171,7 +172,8 @@ fn task_versions_sessions_projects_and_closed_tasks_cannot_replay_reports() {
     req.task_version = 2;
     req.session_id = "s2";
     assert!(s.host_context_binding(&req, &host()).is_err());
-    s.task_set_project("#2", 2, Some("##1"), true, "fixture").unwrap();
+    s.task_set_project("#2", 2, Some("##1"), true, "fixture")
+        .unwrap();
     req.task_version = 3;
     assert!(s.assess_task_host_evidence(&req, &host(), &r).is_err());
     s.session_close("s2", 3).unwrap();

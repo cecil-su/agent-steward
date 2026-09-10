@@ -31,7 +31,7 @@ function Build-LocalBundle([string]$Repository) {
     foreach ($file in @('steward.ps1','Start.cmd','Update.cmd','Stop.cmd','README.md')) {
         Copy-Item -LiteralPath (Join-Path $Repository "distribution\windows\$file") -Destination $bundle
     }
-    Write-Json (Join-Path $bundle 'manifest.json') @{version=$version;databaseSchema=6;launcherProtocol=1;uiPackageProtocol=1;target='x86_64-pc-windows-msvc';sourceRoot=$Repository}
+    Write-Json (Join-Path $bundle 'manifest.json') @{version=$version;databaseSchema=7;launcherProtocol=1;uiPackageProtocol=1;target='x86_64-pc-windows-msvc';sourceRoot=$Repository}
     return Install-Bundle $bundle
 }
 function Initialize-LocalSettings {

@@ -236,7 +236,7 @@ describe('ReadonlyWorkspace', () => {
     } });
     render(<ReadonlyWorkspace {...props} />);
     for (const text of ['检查点摘要', '完成内容', '决策内容', '待办内容', '风险内容', '近期进展']) expect(screen.getByText(text)).toBeTruthy();
-    expect(screen.getByRole('status').textContent).toContain('已截断');
+    expect(within(screen.getByLabelText('近期备注')).getByRole('status').textContent).toContain('已截断');
     const nav = within(screen.getByLabelText('任务详情导航'));
     for (const [label, value] of [['概览', 'overview'], ['进展备注', 'notes'], ['Session', 'sessions'], ['代码现场', 'worktree'], ['历史', 'history']]) {
       fireEvent.click(nav.getByRole('button', { name: label }));

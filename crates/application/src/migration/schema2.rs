@@ -10,20 +10,48 @@ use std::{fs, path::Path, time::Duration};
 const SCHEMA2: &str = include_str!("schema2.sql");
 const SCHEMA4: &str = include_str!("schema4.sql");
 const SCHEMA5: &str = include_str!("schema5.sql");
+const SCHEMA6: &str = include_str!("schema6.sql");
 const TABLES5: [&str; 14] = [
-    "projects", "project_history", "components", "repositories", "source_roots",
-    "tasks", "sessions", "checkpoints", "task_notes", "history", "session_imports",
-    "session_events", "task_components", "project_profiles",
+    "projects",
+    "project_history",
+    "components",
+    "repositories",
+    "source_roots",
+    "tasks",
+    "sessions",
+    "checkpoints",
+    "task_notes",
+    "history",
+    "session_imports",
+    "session_events",
+    "task_components",
+    "project_profiles",
 ];
 const TABLES4: [&str; 13] = [
-    "projects", "project_history", "components", "repositories", "source_roots",
-    "tasks", "sessions", "checkpoints", "task_notes", "history", "session_imports",
-    "session_events", "task_components",
+    "projects",
+    "project_history",
+    "components",
+    "repositories",
+    "source_roots",
+    "tasks",
+    "sessions",
+    "checkpoints",
+    "task_notes",
+    "history",
+    "session_imports",
+    "session_events",
+    "task_components",
 ];
 const SEQUENCES4: [(&str, &str); 9] = [
-    ("tasks", "id"), ("task_notes", "id"), ("history", "id"), ("session_events", "sequence"),
-    ("projects", "id"), ("project_history", "id"), ("components", "id"),
-    ("repositories", "id"), ("source_roots", "id"),
+    ("tasks", "id"),
+    ("task_notes", "id"),
+    ("history", "id"),
+    ("session_events", "sequence"),
+    ("projects", "id"),
+    ("project_history", "id"),
+    ("components", "id"),
+    ("repositories", "id"),
+    ("source_roots", "id"),
 ];
 const TABLES: [&str; 7] = [
     "tasks",
@@ -190,6 +218,10 @@ impl Service {
     }
 
     /// Copy Schema 5 unchanged; never infer pending-release status for existing tasks.
+    pub fn import_schema6(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
+        import_version(source, self.database_path(), confirmed, 6, |_, _| Ok(()))
+    }
+
     pub fn import_schema5(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
         import_version(source, self.database_path(), confirmed, 5, |_, _| Ok(()))
     }
@@ -212,10 +244,16 @@ fn import_version(
     source_version: i64,
     mut observe: impl FnMut(&str, &Path) -> AppResult<()>,
 ) -> AppResult<Outcome> {
-    let (definition, tables, sequence_fields, empty_tables): (&str, &[&str], &[(&str, &str)], &[&str]) = match source_version {
+    let (definition, tables, sequence_fields, empty_tables): (
+        &str,
+        &[&str],
+        &[(&str, &str)],
+        &[&str],
+    ) = match source_version {
         2 => (SCHEMA2, &TABLES, &SEQUENCES, &PROJECT_TABLES),
         4 => (SCHEMA4, &TABLES4, &SEQUENCES4, &["project_profiles"]),
         5 => (SCHEMA5, &TABLES5, &SEQUENCES4, &[]),
+        6 => (SCHEMA6, &TABLES5, &SEQUENCES4, &[]),
         _ => return Err(refused("unsupported source schema")),
     };
     if !confirmed {
@@ -255,8 +293,11 @@ fn import_version(
         .map_err(AppError::from_sqlite)?;
     let before = data_version(&old)?;
     let snapshot = old.transaction().map_err(AppError::from_sqlite)?;
-    if storage_sqlite::schema_version(&snapshot).map_err(AppError::from_storage)? != source_version {
-        return Err(refused(&format!("only Schema {source_version} snapshots are supported")));
+    if storage_sqlite::schema_version(&snapshot).map_err(AppError::from_storage)? != source_version
+    {
+        return Err(refused(&format!(
+            "only Schema {source_version} snapshots are supported"
+        )));
     }
     let expected = Connection::open_in_memory().map_err(AppError::from_sqlite)?;
     expected
@@ -320,7 +361,11 @@ fn import_version(
         if fields != target_fields {
             return Err(refused("source and target columns are incompatible"));
         }
-        let order = if table == "task_components" { "1,3" } else { "1" };
+        let order = if table == "task_components" {
+            "1,3"
+        } else {
+            "1"
+        };
         let select = format!("SELECT {} FROM {table} ORDER BY {order}", fields.join(","));
         let insert = format!(
             "INSERT INTO {table} ({}) VALUES ({})",
@@ -421,6 +466,14 @@ fn import_version(
             return Err(refused("project metadata must remain empty"));
         }
     }
+    for table in ["rules", "rule_history"] {
+        let count: i64 = tx
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .map_err(AppError::from_sqlite)?;
+        if count != 0 {
+            return Err(refused("new rule tables must be empty"));
+        }
+    }
     validate_records(&tx, source_version >= 4)
         .map_err(|_| refused("source records are incompatible or contain invalid metadata"))?;
     integrity(&tx)?;
@@ -502,7 +555,9 @@ fn decode<T>(
 }
 
 fn validate_records(c: &Connection, allow_projects: bool) -> AppResult<()> {
-    if allow_projects { validate_project_records(c)?; }
+    if allow_projects {
+        validate_project_records(c)?;
+    }
     let mut tasks = c
         .prepare("SELECT id FROM tasks ORDER BY id")
         .map_err(AppError::from_sqlite)?;
@@ -510,7 +565,9 @@ fn validate_records(c: &Connection, allow_projects: bool) -> AppResult<()> {
     while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
         let id: i64 = row.get(0).map_err(AppError::from_sqlite)?;
         let task = db::load_task(c, id)?;
-        if id <= 0 || (!allow_projects && (task.project_id.is_some() || !task.component_ids.is_empty())) {
+        if id <= 0
+            || (!allow_projects && (task.project_id.is_some() || !task.component_ids.is_empty()))
+        {
             return Err(refused("invalid task identity or project membership"));
         }
         if let Some(key) = task.task_key
@@ -609,7 +666,8 @@ fn validate_records(c: &Connection, allow_projects: bool) -> AppResult<()> {
 // Decode only persisted metadata. Historical source paths are never filesystem authority.
 fn validate_project_records(c: &Connection) -> AppResult<()> {
     for table in ["projects", "components"] {
-        let mut statement = c.prepare(&format!("SELECT id,name,name_key FROM {table}"))
+        let mut statement = c
+            .prepare(&format!("SELECT id,name,name_key FROM {table}"))
             .map_err(AppError::from_sqlite)?;
         let mut rows = statement.query([]).map_err(AppError::from_sqlite)?;
         while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
@@ -628,11 +686,14 @@ fn validate_project_records(c: &Connection) -> AppResult<()> {
     if c.query_row("SELECT EXISTS(SELECT 1 FROM projects p WHERE p.revision != (SELECT count(*) FROM project_history h WHERE h.project_id=p.id) OR p.revision != (SELECT coalesce(max(revision),0) FROM project_history h WHERE h.project_id=p.id))", [], |r| r.get::<_, bool>(0)).map_err(AppError::from_sqlite)? {
         return Err(refused("project history does not match revision"));
     }
-    let mut history = c.prepare("SELECT payload_json FROM project_history").map_err(AppError::from_sqlite)?;
+    let mut history = c
+        .prepare("SELECT payload_json FROM project_history")
+        .map_err(AppError::from_sqlite)?;
     let mut rows = history.query([]).map_err(AppError::from_sqlite)?;
     while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
         let text: String = row.get(0).map_err(AppError::from_sqlite)?;
-        serde_json::from_str::<serde_json::Value>(&text).map_err(|_| refused("invalid project history JSON"))?;
+        serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|_| refused("invalid project history JSON"))?;
     }
     for sql in [
         "SELECT common_dir,common_identity_json FROM repositories",
@@ -643,26 +704,32 @@ fn validate_project_records(c: &Connection) -> AppResult<()> {
         while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
             let path: String = row.get(0).map_err(AppError::from_sqlite)?;
             let text: String = row.get(1).map_err(AppError::from_sqlite)?;
-            let identity: git_adapter::ExistingPathIdentityRecord = serde_json::from_str(&text).map_err(|_| refused("invalid persisted source identity"))?;
+            let identity: git_adapter::ExistingPathIdentityRecord = serde_json::from_str(&text)
+                .map_err(|_| refused("invalid persisted source identity"))?;
             if identity.canonical_path.to_str() != Some(path.as_str()) {
                 return Err(refused("source path differs from persisted identity"));
             }
         }
     }
-    let mut statement = c.prepare("SELECT relative_path FROM source_roots WHERE relative_path IS NOT NULL").map_err(AppError::from_sqlite)?;
+    let mut statement = c
+        .prepare("SELECT relative_path FROM source_roots WHERE relative_path IS NOT NULL")
+        .map_err(AppError::from_sqlite)?;
     let mut rows = statement.query([]).map_err(AppError::from_sqlite)?;
     while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
         let path: String = row.get(0).map_err(AppError::from_sqlite)?;
-        steward_core::validate_source_relative_path(&path).map_err(|_| refused("invalid relative source path"))?;
+        steward_core::validate_source_relative_path(&path)
+            .map_err(|_| refused("invalid relative source path"))?;
     }
     Ok(())
 }
 
 #[cfg(test)]
+mod process_tests;
+#[cfg(test)]
 mod schema4_tests;
 #[cfg(test)]
 mod schema5_tests;
 #[cfg(test)]
-mod process_tests;
+mod schema6_tests;
 #[cfg(test)]
 mod tests;

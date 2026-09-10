@@ -1,6 +1,10 @@
 # Codex 与 pi 原生适配
 
-#34 当前开发 Schema 4 只用于隔离新库；未获迁移/部署授权前，不按下列部署示例覆盖正式 CLI/Hook。新增上下文采集器仅为仓库内实验模块，见下文。
+当前源码 Schema7/UI合同4；未获迁移/部署授权前，不按下列部署示例覆盖正式 CLI/Hook。上下文采集器仅为仓库内实验模块，见下文。
+
+## 任务需求与规则入口
+
+[task-context.ts 候选启动入口](pi/task-context.md)可由 Herdr原生Agent参数或手工Pi命令显式加载。它在真实Pi input事件中调用 `taskctl --database DB --json task context TASK --require-read-only`，不修改输入；在技能/模板展开后的context阶段完整交付需求与sessionRules。读取失败直接阻断输入，晚到的身份变化触发Agent abort，不将扩展抛错视为阻断；不领取、绑定或恢复Session。已用隔离真实Pi新进程及本地合成provider验证最终模型请求。观测适配器仍保持独立；全局已安装管理扩展未替换，候选不自动部署。启动参数、会话边界、外部源码位置和人工验证限制见上述入口说明；规则合同见[个人偏好与项目规则](../docs/v0/22-个人偏好与项目规则.md)。
 
 先运行 `cargo build --workspace --locked`。适配器需要显式绑定，不读取 transcript，不保存消息正文，不改变 Task 执行状态。
 

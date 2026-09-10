@@ -220,8 +220,12 @@ impl Service {
         reason: &str,
     ) -> AppResult<Outcome> {
         self.task_update_fields(
-            reference, expected, &json!({"components": names}).to_string(),
-            confirmed, reason, "task.components_changed",
+            reference,
+            expected,
+            &json!({"components": names}).to_string(),
+            confirmed,
+            reason,
+            "task.components_changed",
         )
     }
 

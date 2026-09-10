@@ -1,12 +1,6 @@
 # Windows 本机启动与更新
 
-本机 2026-09-09 已发布至 `%LOCALAPPDATA%\agent-steward-app-schema5`，使用桌面 **Agent Steward** 入口或该目录的 `Start.cmd`。后续源码更新请显式传入这个 `-InstallRoot`，不要误用旧默认安装目录：
-
-```powershell
-.\distribution\windows\update-local.ps1 -InstallRoot "$env:LOCALAPPDATA\agent-steward-app-schema5" -NoOpen
-```
-
-下方默认目录示例适用于新安装；自定义安装始终沿用自身根目录。
+当前源码包仅接受 Schema7、UI合同4；不代表已安装版本。Schema2/4/5/6安装不能通过普通更新进入Schema7，必须按[规则与迁移合同](../../docs/v0/22-个人偏好与项目规则.md)另行授权停写、备份、复制核验和独立安装。下方更新步骤仅适用于兼容Schema7安装或新的隔离安装，不可直接套用旧正式安装目录。
 
 ## 推荐：当前源码本地编译更新
 
@@ -17,7 +11,7 @@
 - 首次填写监听 IP（例如 `172.19.10.185`）、端口、数据库和 runtime 路径。已有服务用过自定义路径时务必沿用，避免误以为原任务丢失。
 - 后续直接双击：先编译并安装到新的版本目录，再正常停止启动器管理的旧服务、启动新版并检查监听端口归属及 HTTP 响应。
 - 编译、包兼容或数据库版本预检失败不会停止旧服务；本地更新也不会在预检失败时覆盖稳定启动器。新版启动失败只尝试通过再次预检的同 Schema 原版本；停止超时不强杀，不并行启动第二个实例。
-- 当前包及启动器只接受 **Schema6**。数据库和凭据不随程序替换，不自动迁移或恢复备份；已有 Schema 2/4/5 安装不走普通 Update/Update-Local，须先单独安排停写、最终一致备份及显式迁移，再使用独立安装目录，保留旧安装用于受控恢复。不会将旧程序自动回退到已经迁移的库上。
+- 当前包及启动器只接受 **Schema7**。数据库和凭据不随程序替换，不自动迁移或恢复备份；已有 Schema 2/4/5/6 安装不走普通 Update/Update-Local，须先单独安排停写、最终一致备份及显式迁移，再使用独立安装目录，保留旧安装用于受控恢复。不会将旧程序自动回退到已经迁移的库上。
 
 首次接入启动器前，请自行在旧服务终端按 Ctrl+C 停止它。启动器**不接管、不强杀手工启动的进程**，也不替换 PATH 中的 taskctl/task-hook；宿主 Hook 如需使用新 CLI，应另行更新其可执行文件路径。
 
@@ -32,15 +26,15 @@ cd E:\ai\agent-steward
 
 不要把安装位置设为源码或数据库目录。编译期间不要修改源码，以免构建混合版本。
 
-### 从 Schema 2/4/5 进入 Schema6
+### 从 Schema 2/4/5/6 进入 Schema7
 
-这是单独授权的维护操作，不是普通更新。按 [Schema6迁移与待上线合同](../../docs/v0/21-待上线任务状态.md) 完成停写、备份、迁移及核验后，选择**新的独立 InstallRoot**，明确配置已核验的 Schema6 数据库和原 runtime 路径。数据库可以在获准后保留原正式路径，但程序安装目录不复用旧 Schema 2/4/5 的 current/previous 指针。不要复制旧 current.json、previous.json 或 process.json 到新安装。停旧服务使用原安装目录的 Stop.cmd 并核对进程身份，新启动器不接管旧 Schema 安装。
+这是单独授权的维护操作，不是普通更新。按 [Schema7规则与迁移合同](../../docs/v0/22-个人偏好与项目规则.md) 完成停写、备份、迁移及核验后，选择**新的独立 InstallRoot**，明确配置已核验的 Schema7 数据库和原 runtime 路径。数据库可以在获准后保留原正式路径，但程序安装目录不复用旧 Schema 2/4/5/6 的 current/previous 指针。不要复制旧 current.json、previous.json 或 process.json 到新安装。停旧服务使用原安装目录的 Stop.cmd 并核对进程身份，新启动器不接管旧 Schema 安装。
 
 安装准备和调用示意（不代表已获得正式操作授权）：
 
 ```powershell
 # 初次设置必须明确选择已迁移并核验的库；源库未迁移时会拒绝启动。
-pwsh -NoProfile -File .\distribution\windows\update-local.ps1 -InstallRoot E:\steward-schema5-app -NoOpen
+pwsh -NoProfile -File .\distribution\windows\update-local.ps1 -InstallRoot E:\steward-schema7-app -NoOpen
 # 后续源码更新仍使用这个显式 InstallRoot，不要误指向旧默认安装。
 ```
 
@@ -54,7 +48,7 @@ pwsh -NoProfile -File .\distribution\windows\update-local.ps1 -InstallRoot E:\st
 taskd --check-database-schema --database <明确的本地绝对路径>
 ```
 
-成功只输出 `databaseSchema=6`，随后退出；不创建数据库、父目录、runtime、凭据或监听器。不存在且无 sidecar 的路径允许之后正常首次初始化；已有库必须是普通文件且版本为6，Schema 0/1/2/3/4/5/未知版本、无法解读的 SQLite 文件、歧义路径或非法 sidecar 均拒绝。读取 SQLite 已提交 WAL 视图，不从可能过期的主文件头猜测版本。
+成功只输出 `databaseSchema=7`，随后退出；不创建数据库、父目录、runtime、凭据或监听器。不存在且无 sidecar 的路径允许之后正常首次初始化；已有库必须是普通文件且版本为7，Schema 0/1/2/3/4/5/6/未知版本、无法解读的 SQLite 文件、歧义路径或非法 sidecar 均拒绝。读取 SQLite 已提交 WAL 视图，不从可能过期的主文件头猜测版本。
 
 这是**只读版本预检，不是完整性/业务验收、原子切换或停写锁**。WAL 只读访问仍可能涉及 SHM。需要可信、受控路径和维护窗口；预检后数据库变化会被后续启动/回退检查再次拒绝，但不能替代暂停所有写入者。
 
@@ -62,7 +56,7 @@ taskd --check-database-schema --database <明确的本地绝对路径>
 
 前端源码在 `web/`；先用 Node24.11.1 执行 `npm ci --ignore-scripts` 和 `npm run build`。`ui.ps1 Build` 只读取 `web/dist` 三文件，不再发布旧 `crates/server/web`。后端发布前另执行 `npm run sync:embedded`，将相同只读产物同步到 `crates/server/web-readonly` 后重编译 taskd；这样损坏 UI 包或显式回退也不会恢复旧业务写入口。普通 Web build 不修改内嵌快照，Rust 单独构建使用已保存快照。
 
-首次需经用户授权升级一次 taskd；新启动器为声明 `uiPackageProtocol: 1` 的二进制包传入 `<InstallRoot>/ui`。之后使用源码内 `ui.ps1`，不再为纯 UI 改动运行 `Update-Local.cmd`：
+包要求UI合同4，旧合同1/2/3服务不能通过纯UI更新适配；不得改号冒充兼容。首次需经用户授权升级配套 taskd；新启动器为声明 `uiPackageProtocol: 1` 的二进制包传入 `<InstallRoot>/ui`。之后使用源码内 `ui.ps1`，不再为纯 UI 改动运行 `Update-Local.cmd`：
 
 ```powershell
 .\distribution\windows\ui.ps1 -Action Build -Version ui-20260907-1 -Output E:\steward-artifacts\ui-20260907-1

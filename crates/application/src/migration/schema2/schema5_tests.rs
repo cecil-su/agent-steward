@@ -43,7 +43,7 @@ fn schema5_copy_preserves_all_tables_and_never_infers_pending_release() {
     let s = Service::new(&target);
     let result = s.import_schema5(&source, true).unwrap();
     assert_eq!(result.data["sourceSchema"], 5);
-    assert_eq!(result.data["targetSchema"], 6);
+    assert_eq!(result.data["targetSchema"], 7);
     assert_eq!(result.data["tableSha256"].as_object().unwrap().len(), 14);
     assert_eq!(result.data["counts"]["project_profiles"], 1);
     let old = Connection::open(&source).unwrap();

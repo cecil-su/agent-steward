@@ -24,10 +24,10 @@ try {
     $started = $process.StartTime
     $status = & $script -Action Activate -Package (Join-Path $temp 'a') -UiRoot $root -Url $url
     Assert ($status.release -ceq $a.Id) 'A was not adopted.'
-    # Contract 2 packages must be rejected before changing the active pointer.
+    # Contract 3 packages must be rejected before changing the active pointer.
     $old = Join-Path $temp 'old-contract'; Copy-Item -LiteralPath (Join-Path $temp 'a') -Destination $old -Recurse
     $oldManifest = Get-Content -LiteralPath (Join-Path $old 'manifest.json') -Raw | ConvertFrom-Json
-    $oldManifest.requiredApiContract = 2
+    $oldManifest.requiredApiContract = 3
     [IO.File]::WriteAllText((Join-Path $old 'manifest.json'), ($oldManifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     $pointerBefore = [IO.File]::ReadAllText((Join-Path $root 'current.json'))
     $rejected = $false

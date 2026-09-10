@@ -64,13 +64,13 @@ fnm exec --using=24.11.1 npm.cmd test
 
 `npm run build` 只写 `web/dist/{index.html,app.js,style.css}`，不覆盖 `crates/server/web/`，不激活正式发布。Windows `ui.ps1 Build` 读取 `web/dist`；**构建成功不代表正式网页已更新**。后端发布前显式执行 `npm run sync:embedded`，同步到 `crates/server/web-readonly` 后重新编译 taskd，保证内嵌回退也只读；旧 `crates/server/web` 不再作为活动资源入口。
 
-当前 UI 请求头及外置包使用 API 合同 `3`（包格式仍为 `1`），需要配套 Schema6/合同3 的 taskd，不能纯 UI 更新到合同1/2服务。旧原生及legacy只读包不作为Schema6发布入口。CI 与 Windows 发布流程固定 `.nvmrc`，先运行前端单测/类型检查/构建并同步内嵌快照，再编译 Rust；浏览器 smoke 验证实际只读入口，不操作旧可写页面的按钮。CI 使用显式安装的 Playwright Chromium（`STEWARD_BROWSER_CHANNEL=chromium`）。
+当前 UI 请求头及外置包使用 API 合同 `4`（包格式仍为 `1`），需要配套 Schema7/合同4 的 taskd，不能纯 UI 更新到合同1/2/3服务。旧原生及legacy只读包不作为Schema7发布入口。任务/项目概览及任务上下文复制完整展示有效 sessionRules、revision与来源；空规则和规则不可用分开，不提供规则业务写入口。CI 与 Windows 发布流程固定 `.nvmrc`，先运行前端单测/类型检查/构建并同步内嵌快照，再编译 Rust；浏览器 smoke 验证实际只读入口，不操作旧可写页面的按钮。CI 使用显式安装的 Playwright Chromium（`STEWARD_BROWSER_CHANNEL=chromium`）。
 
 `npm run dev` 是本机前端开发服务，不提供业务 API、不配置正式地址 proxy，也不放宽 taskd Host/Origin/CSP。业务验证使用下方新隔离 taskd 托管构建结果。
 
 ## 真实浏览器验证
 
-明确指定可信开发 `taskd/taskctl` 目录，smoke 要求 Schema6 待上线、项目资料 CLI/API 和合同3独立 UI 包。脚本不会退回全局安装；新建临时库/runtime/UI包、随机端口、严格认证 reader，使用本机已安装 Chrome。缺浏览器直接失败，不下载。
+明确指定可信开发 `taskd/taskctl` 目录，smoke 要求 Schema7、项目资料 CLI/API 和合同4独立 UI 包。脚本不会退回全局安装；新建临时库/runtime/UI包、随机端口、严格认证 reader，使用本机已安装 Chrome。缺浏览器直接失败，不下载。
 
 ```sh
 # 先 npm run build；地址必须是本机网卡，以下仅限获准的隔离测试。
@@ -84,6 +84,16 @@ fnm exec --using=24.11.1 npm.cmd run test:browser
 
 覆盖桌面/390px、无业务按钮、CSP、reader登录退出、任务/项目/历史/上下文读取、项目查找筛选、503 SSE重连与搜索保护、临时 UI 更新提示保护及取消、项目资料/来源显示与复制、Task/Project/Profile/History不变。输出绑定 Node/Chrome、开发二进制 SHA、UI release 及 `.artifacts/<时间>/` 截图；测试过程中 SSE 用外部 CLI 创建额外合成任务，不把它误算为浏览器写入。
 
-隔离验证使用 `target/debug` 的 Schema6/API合同3开发二进制，React内嵌与外置包Chrome smoke均通过（含待上线标识/筛选、桌面/390px、只读边界）；前端75项单测、类型检查和构建通过。Windows包/启动器按Schema6校验，新旧schema不能通过普通更新混用。正式部署及用户验收未执行；参见[待上线与显式离线复制合同](../docs/v0/21-待上线任务状态.md)。
+## 唯一人工预览入口
+
+`fnm exec --using=24.11.1 node web/scripts/rules-preview.mjs ABSOLUTE_CANDIDATE_BINARY_DIRECTORY` 仅管理已有 `.local/local-preview`，沿用其中 config.json 的 bind/port。完整工作台的唯一人工入口为该地址；当前为 `http://172.19.10.185:60446`，数据明确为**合成数据**，不是正式任务/真实偏好。
+
+- 两个必要角色：原入口 Node 进程提供 UI 与 GET-only 代理；`candidate/taskd.exe` 仅在回环随机端口提供 Schema7/合同4合成后端，不作为第二个人工入口。数据库固定 `candidate/synthetic.db`，runtime、进程信息及专属停止标记均在同一目录中。重复运行核对实际进程身份、资源hash、合同与context后复用，不再新建 rules-live-preview 目录或重复监听。
+- `config.json` 字段为 bind、port、upstream、apiContract:4、uiVersion:rules-candidate、dataSource:synthetic。代理实现为 `scripts/local-preview-server.cjs`，启动前检查真实upstream合同；保留本机peer、精确Host、同源Origin/cross-site检查、GET-only与安全响应头，不转发Cookie、Authorization或Token。旧合同UI请求拒绝，不仅替换manifest数字。
+- 现有合同1正式后端与合同4 UI不能混用。候选只替换预览目录内的可变配置/UI，不改正式数据库、服务、全局扩展或不可变发布包。配置/server/UI及旧state保存于 `backups/<timestamp>`；旧沙箱不删除。状态文件只作定位线索，不能代替CIM/实际命令行及监听核验。
+- 结束或刷新候选前，先核实两角色命令行及路径，再分别向 `.local/local-preview/stop` 与 `candidate/stop` 写入 `stop`，等待对应进程/监听正常退出，不强杀。刷新需重新运行上述命令；存在运行进程或资源变更时脚本不会自动重启。
+- 恢复旧预览：确认候选两角色已退出，保留当前现场，再把选定备份的config.json、server.cjs及ui复制回**预览目录**并启动其中server.cjs。恢复旧合同UI与旧配置须成套，不恢复过期PID，不迁移/重启其正式upstream。候选库、日志和停止标记保留作证据。
+
+Node24.11.1下78项前端测试、类型检查和构建通过；预览代理有独立合同/安全回归。完整工作台页面、规则来源及上下文复制仍待人工确认，静态面板不是验收。未默认运行完整browser-smoke；内嵌三文件已同步。正式迁移、安装与重启未执行，仍需另行授权。参见[规则与显式离线复制合同](../docs/v0/22-个人偏好与项目规则.md)。
 
 依据：[UI包合同](../docs/v0/14-UI独立发布.md)、[Vite](https://vite.dev/config/build-options)、[shadcn](https://ui.shadcn.com/docs/installation/vite)、[TanStack Query](https://tanstack.com/query/latest/docs/framework/react/reference/QueryClient)。

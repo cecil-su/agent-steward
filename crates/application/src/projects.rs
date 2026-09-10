@@ -128,8 +128,11 @@ impl Service {
         let tx = connection.transaction().map_err(AppError::from_sqlite)?;
         let project = load_project(&tx, resolve_project_id(&tx, reference)?)?;
         let profile = crate::project_profiles::load_profile(&tx, project.id)?;
+        let rules = crate::rules::session_rules(&tx, Some(project.id))?;
         tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"project": project, "profile": profile})))
+        Ok(Outcome::new(
+            json!({"project": project, "profile": profile, "sessionRules": rules}),
+        ))
     }
 
     pub fn project_list(&self, after: i64, limit: u32) -> AppResult<Outcome> {
@@ -212,8 +215,12 @@ impl Service {
         reason: &str,
     ) -> AppResult<Outcome> {
         self.task_update_fields(
-            reference, expected, &json!({"project": project}).to_string(),
-            confirmed, reason, "task.project_changed",
+            reference,
+            expected,
+            &json!({"project": project}).to_string(),
+            confirmed,
+            reason,
+            "task.project_changed",
         )
     }
 }

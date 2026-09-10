@@ -35,6 +35,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum TopCommand {
+    /// Personal global/project rules; recording never claims a task.
+    Rule {
+        #[command(subcommand)]
+        command: RuleCommand,
+    },
     /// Explicit offline import; never changes or upgrades the source database.
     Database {
         #[command(subcommand)]
@@ -68,7 +73,48 @@ enum TopCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum RuleCommand {
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        project: Option<i64>,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    Show {
+        id: i64,
+    },
+    Create {
+        #[arg(long)]
+        reason: String,
+    },
+    Update {
+        id: i64,
+        #[arg(long)]
+        if_revision: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    Disable {
+        id: i64,
+        #[arg(long)]
+        if_revision: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    History {
+        id: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DatabaseCommand {
+    /// Copy a quiescent Schema 6 snapshot; new rules start empty.
+    ImportSchema6 {
+        #[arg(long)]
+        source: PathBuf,
+    },
     /// Copy a quiescent Schema 2 snapshot into a new current-schema database; never switches services.
     ImportSchema2 {
         #[arg(long)]
@@ -159,7 +205,9 @@ enum ProjectCommand {
 
 #[derive(Debug, Subcommand)]
 enum ProfileCommand {
-    Show { project: String },
+    Show {
+        project: String,
+    },
     /// Full replacement from --input JSON; requires current project revision and source Task version.
     Set {
         project: String,
@@ -259,9 +307,12 @@ enum TaskCommand {
     },
     /// Find tasks associated with the current directory (does not select or claim one).
     Here,
-    /// Export task context without changing Task or Session state.
+    /// Export task context through a read-only SQLite connection; never initialize a missing/empty database.
     Context {
         task_id: String,
+        /// Compatibility assertion for host adapters; older CLIs reject this before opening a database.
+        #[arg(long)]
+        require_read_only: bool,
         #[arg(long, default_value = "markdown", value_parser = ["markdown"])]
         format: String,
     },
@@ -596,6 +647,33 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
     match &cli.command {
+        TopCommand::Rule { command } => match command {
+            RuleCommand::List {
+                scope,
+                project,
+                status,
+            } => service.rule_list(scope.as_deref(), *project, status.as_deref()),
+            RuleCommand::Show { id } => service.rule_show(*id),
+            RuleCommand::History { id } => service.rule_history(*id),
+            RuleCommand::Create { reason } => {
+                service.rule_create(read_rule_input(cli.input.as_deref())?, reason)
+            }
+            RuleCommand::Update {
+                id,
+                if_revision,
+                reason,
+            } => service.rule_update(
+                *id,
+                *if_revision,
+                read_rule_input(cli.input.as_deref())?,
+                reason,
+            ),
+            RuleCommand::Disable {
+                id,
+                if_revision,
+                reason,
+            } => service.rule_disable(*id, *if_revision, reason),
+        },
         TopCommand::Database { command } => {
             if cli.database.is_none() {
                 return Err(AppError::invalid(
@@ -604,8 +682,15 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 ));
             }
             match command {
-                DatabaseCommand::ImportSchema4 { source } => service.import_schema4(source, cli.yes),
-                DatabaseCommand::ImportSchema5 { source } => service.import_schema5(source, cli.yes),
+                DatabaseCommand::ImportSchema4 { source } => {
+                    service.import_schema4(source, cli.yes)
+                }
+                DatabaseCommand::ImportSchema5 { source } => {
+                    service.import_schema5(source, cli.yes)
+                }
+                DatabaseCommand::ImportSchema6 { source } => {
+                    service.import_schema6(source, cli.yes)
+                }
                 DatabaseCommand::ImportV7 { source } => service.import_legacy_v7(source, cli.yes),
                 DatabaseCommand::ImportSchema2 { source } => {
                     service.import_schema2(source, cli.yes)
@@ -752,7 +837,10 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             },
             ProjectCommand::Profile { command } => match command {
                 ProfileCommand::Show { project } => service.project_profile_show(project),
-                ProfileCommand::Set { project, if_revision } => {
+                ProfileCommand::Set {
+                    project,
+                    if_revision,
+                } => {
                     let input = read_profile_input(cli.input.as_deref())?;
                     service.project_profile_set(project, *if_revision, input)
                 }
@@ -841,7 +929,9 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 project,
                 reason,
                 ..
-            } => service.task_set_project(task_id, *if_version, project.as_deref(), cli.yes, reason),
+            } => {
+                service.task_set_project(task_id, *if_version, project.as_deref(), cli.yes, reason)
+            }
             TaskCommand::Claim {
                 task_id,
                 session,
@@ -852,7 +942,13 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 task_id,
                 if_version,
                 reason,
-            } => service.task_update(task_id, *if_version, &required_input(cli.input.as_deref())?, cli.yes, reason),
+            } => service.task_update(
+                task_id,
+                *if_version,
+                &required_input(cli.input.as_deref())?,
+                cli.yes,
+                reason,
+            ),
             TaskCommand::Retitle {
                 task_id,
                 if_version,
@@ -870,12 +966,14 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 reason,
                 recovery,
             } => service.task_block(task_id, *if_version, reason, recovery),
-            TaskCommand::PendingRelease { task_id, if_version } => {
-                service.task_pending_release(task_id, *if_version)
-            }
-            TaskCommand::Continue { task_id, if_version } => {
-                service.task_continue(task_id, *if_version)
-            }
+            TaskCommand::PendingRelease {
+                task_id,
+                if_version,
+            } => service.task_pending_release(task_id, *if_version),
+            TaskCommand::Continue {
+                task_id,
+                if_version,
+            } => service.task_continue(task_id, *if_version),
             TaskCommand::Unblock {
                 task_id,
                 if_version,
@@ -1062,18 +1160,76 @@ fn read_input(path: &Path) -> Result<String, AppError> {
     Ok(input)
 }
 
-fn read_profile_input(path: Option<&Path>) -> Result<steward_application::ProjectProfileInput, AppError> {
+fn read_rule_input(path: Option<&Path>) -> Result<steward_application::RuleInput, AppError> {
+    const LIMIT: u64 = 128 * 1024;
+    let path = path.ok_or_else(|| AppError::invalid("input", "--input <file|-> required"))?;
+    let reader: Box<dyn Read> = if path == Path::new("-") {
+        Box::new(io::stdin())
+    } else {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| AppError::invalid("input", "cannot open rule input"))?;
+        if !file
+            .metadata()
+            .map_err(|_| AppError::invalid("input", "cannot inspect input"))?
+            .is_file()
+        {
+            return Err(AppError::invalid("input", "regular file required"));
+        }
+        Box::new(file)
+    };
+    let mut bytes = Vec::new();
+    reader
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AppError::invalid("input", "cannot read rule input"))?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(AppError::invalid("input", "rule input exceeds 128 KiB"));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::invalid("input", "invalid or unsupported rule JSON"))
+}
+
+fn read_profile_input(
+    path: Option<&Path>,
+) -> Result<steward_application::ProjectProfileInput, AppError> {
     const LIMIT: u64 = 512 * 1024;
     let path = path.ok_or_else(|| AppError::invalid("input", "--input <file|-> is required"))?;
-    let reader: Box<dyn Read> = if path == Path::new("-") { Box::new(io::stdin()) }
-        else { Box::new(fs::File::open(path).map_err(|error| AppError::invalid("input", format!("cannot open profile input: {error}")))?) };
+    let reader: Box<dyn Read> = if path == Path::new("-") {
+        Box::new(io::stdin())
+    } else {
+        Box::new(fs::File::open(path).map_err(|error| {
+            AppError::invalid("input", format!("cannot open profile input: {error}"))
+        })?)
+    };
     let mut bytes = Vec::new();
-    reader.take(LIMIT + 1).read_to_end(&mut bytes)
-        .map_err(|error| AppError::invalid("input", format!("cannot read profile input: {error}")))?;
-    if bytes.len() as u64 > LIMIT { return Err(AppError::invalid("input", "profile JSON exceeds 512 KiB")); }
-    serde_json::from_slice(&bytes).map_err(|error| AppError::invalid("input", format!(
-        "invalid profile JSON ({:?}) at line {}, column {}", error.classify(), error.line(), error.column(),
-    )))
+    reader
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            AppError::invalid("input", format!("cannot read profile input: {error}"))
+        })?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(AppError::invalid("input", "profile JSON exceeds 512 KiB"));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::invalid(
+            "input",
+            format!(
+                "invalid profile JSON ({:?}) at line {}, column {}",
+                error.classify(),
+                error.line(),
+                error.column(),
+            ),
+        )
+    })
 }
 
 fn required_input(path: Option<&Path>) -> Result<String, AppError> {
@@ -1226,6 +1382,17 @@ fn render_task_context(data: &Value) -> String {
             text(&data["project"]["name"]),
             text(&data["project"]["revision"])
         ));
+    }
+    output.push_str("## Session rules (personal preferences, not execution authorization)\n\n");
+    if let Some(rules) = data["sessionRules"]["rules"].as_array() {
+        if rules.is_empty() {
+            output.push_str("No effective rules.\n\n");
+        }
+        for rule in rules {
+            output.push_str(&format!("### Rule {} · Revision {} · {} · {}\n\n{}\n\nSources (historical references): {}\n\n", text(&rule["id"]), text(&rule["revision"]), text(&rule["scope"]), text(&rule["content"]["name"]), text(&rule["content"]["body"]), text(&rule["content"]["sources"])));
+        }
+    } else {
+        output.push_str("Rules unavailable; use task context with a compatible CLI.\n\n");
     }
     if let Some(notes) = data["notesSinceCheckpoint"]
         .as_array()

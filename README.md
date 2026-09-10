@@ -62,7 +62,7 @@ taskctl --json task context 12
 
 开发和测试请在命令中添加 `--database <隔离数据库路径>`。`task here` 只列出候选，不自动选择或领取；优先匹配当前 Worktree，未匹配时按 Git common-dir 查找同仓库的已登记任务。未绑定 Worktree 的任务可通过列表找到。
 
-`task context` 输出目标、范围、验收条件、最新 Checkpoint、下一步、阻塞、风险、当前 Session 和实时 Git 状态；不会自动附带导入的聊天原文。Git 观察失败时仍返回任务上下文，并给出警告。`resume` 保留原有 CAS/Session 行为，终端输出采用同样的分段摘要；`--json` 保留结构化输出。
+`task context` 使用只读连接，拒绝缺失、空白、Schema0或不兼容数据库，不初始化文件或表；宿主可携带 `--require-read-only` 要求兼容 CLI，不回退旧调用。输出目标、范围、验收条件、最新 Checkpoint、下一步、阻塞、风险、当前 Session、有效通用/项目规则及实时 Git 状态；不会自动附带导入的聊天原文。Git 观察失败时仍返回任务上下文，并给出警告。`resume` 保留原有 CAS/Session 行为，终端输出采用同样的分段摘要；`--json` 保留结构化输出。
 
 ## V0 本地工作台与 Hook
 
@@ -71,9 +71,9 @@ cargo build --workspace --locked
 cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/steward.db
 ```
 
-启动后默认自动打开 `http://127.0.0.1:43123`。本机直接访问免凭据，包括通过 `--bind` 指定的本机网卡 IP 访问；严格认证模式用 `--require-local-auth`。本机免登录信任所有本地用户/程序，不可通过代理或隧道暴露。远程/严格模式的浏览器授权保留 30 天。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。Windows 本地编译更新可双击 [`distribution/windows/Update-Local.cmd`](distribution/windows/Update-Local.cmd)，首次设置后保留 IP、端口和数据路径；不自动拉代码，编译与数据库版本预检成功后才切换受管服务；现有 Schema 2/4/5 安装须经独立迁移并使用新的安装目录，不由普通更新跨 Schema 切换。详见 [启动与更新指南](distribution/windows/README.md)。首次创建的私有凭据跨重启保留，SSE 同步 CLI/Hook 变更，保留未应用搜索和复制输入。Web 为只读工作台，支持任务/项目检索、Checkpoint、Session、History、代码现场和项目资料/来源查看与上下文复制，不提供业务写入口；业务维护由 CLI 完成。已安装程序无需前端依赖；前端开发与内嵌同步见 [web/README.md](web/README.md)。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
+启动后默认自动打开 `http://127.0.0.1:43123`。本机直接访问免凭据，包括通过 `--bind` 指定的本机网卡 IP 访问；严格认证模式用 `--require-local-auth`。本机免登录信任所有本地用户/程序，不可通过代理或隧道暴露。远程/严格模式的浏览器授权保留 30 天。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。Windows 本地编译更新可双击 [`distribution/windows/Update-Local.cmd`](distribution/windows/Update-Local.cmd)，首次设置后保留 IP、端口和数据路径；不自动拉代码，编译与数据库版本预检成功后才切换受管服务；现有 Schema 2/4/5/6 安装须经独立迁移并使用新的安装目录，不由普通更新跨 Schema 切换。详见 [启动与更新指南](distribution/windows/README.md)。首次创建的私有凭据跨重启保留，SSE 同步 CLI/Hook 变更，保留未应用搜索和复制输入。Web 为只读工作台，支持任务/项目检索、Checkpoint、Session、History、代码现场和项目资料/来源查看与上下文复制，不提供业务写入口；业务维护由 CLI 完成。已安装程序无需前端依赖；前端开发与内嵌同步见 [web/README.md](web/README.md)。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
 
-当前源码数据库格式为 **schema 6**，不自动迁移旧 schema；CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`，UI API 合同为3。新增“待上线”状态：进行中 → 待上线 → 用户确认关闭，也可返回进行中继续修改；Web提供只读标识和筛选。Schema2/4/5 可通过对应显式复制命令导入私有新库，不自动改变任务状态或切换安装。合同及迁移边界见 [待上线任务状态](docs/v0/21-待上线任务状态.md)。源码版本不代表实际部署版本；正式迁移、部署与重启须另行授权。
+当前源码数据库格式为 **schema 7**，CLI/HTTP JSON envelope 为 `schemaVersion: 2`，UI API 合同为4。个人通用/项目规则通过独立 `rule` CLI、revision CAS 与 History 维护；`task context` 同事务返回有效 `sessionRules`，CLI、Web概览及上下文复制完整展示，不领取任务或授权执行。规则格式、宿主集成边界及 Schema6 显式复制见 [个人偏好与项目规则](docs/v0/22-个人偏好与项目规则.md)。Schema2/4/5/6 可通过对应显式复制命令导入私有新库，不自动原地升级或切换安装。源码版本不代表实际部署版本；正式迁移、部署与重启须另行授权。
 
 ## V0 项目与任务归属
 

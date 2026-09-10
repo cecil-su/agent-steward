@@ -19,7 +19,10 @@ fn migration_child() {
     let destination = std::env::var_os("STEWARD_SCHEMA2_TEST_DESTINATION").unwrap();
     let ready = std::env::var_os("STEWARD_SCHEMA2_TEST_READY").unwrap();
     let phase = std::env::var("STEWARD_SCHEMA2_TEST_PHASE").unwrap();
-    let version = std::env::var("STEWARD_COPY_TEST_VERSION").unwrap_or_else(|_| "2".into()).parse::<i64>().unwrap();
+    let version = std::env::var("STEWARD_COPY_TEST_VERSION")
+        .unwrap_or_else(|_| "2".into())
+        .parse::<i64>()
+        .unwrap();
     import_version(
         Path::new(&source),
         Path::new(&destination),
@@ -38,9 +41,18 @@ fn migration_child() {
 
 #[test]
 fn killed_import_never_publishes_and_retry_does_not_adopt_abandoned_staging() {
-    for (version, phase) in [(2,"history"),(2,"before_publish"),(4,"history"),(4,"before_publish")] {
+    for (version, phase) in [
+        (2, "history"),
+        (2, "before_publish"),
+        (4, "history"),
+        (4, "before_publish"),
+    ] {
         let temp = tempfile::tempdir().unwrap();
-        let source = if version == 2 { super::tests::fixture(temp.path()) } else { super::schema4_tests::fixture(temp.path()) };
+        let source = if version == 2 {
+            super::tests::fixture(temp.path())
+        } else {
+            super::schema4_tests::fixture(temp.path())
+        };
         let before = fs::read(&source).unwrap();
         let destination = temp.path().join("new.db");
         let ready = temp.path().join("ready");

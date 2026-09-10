@@ -1,3 +1,4 @@
 # Frozen SQLite schema text is compared verbatim; preserve Rust literal line endings.
 crates/application/src/migration/schema4.sql text eol=lf
 crates/application/src/migration/schema5.sql text eol=lf
+crates/application/src/migration/schema6.sql text eol=lf

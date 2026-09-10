@@ -113,7 +113,9 @@ fn task_membership_uses_cas_without_claiming_or_adopting() {
     }
     let before = s.history("#1").unwrap().data;
     assert_eq!(
-        s.task_set_project("#1", 1, Some("##1"), true, "fixture").unwrap().data["task"],
+        s.task_set_project("#1", 1, Some("##1"), true, "fixture")
+            .unwrap()
+            .data["task"],
         task
     );
     assert_eq!(s.history("#1").unwrap().data, before);
@@ -125,7 +127,11 @@ fn task_membership_uses_cas_without_claiming_or_adopting() {
         "VERSION_CONFLICT"
     );
     s.task_claim("#1", 1, "s1", false).unwrap();
-    let changed = s.task_set_project("#1", 2, Some("##2"), true, "fixture").unwrap().data["task"].clone();
+    let changed = s
+        .task_set_project("#1", 2, Some("##2"), true, "fixture")
+        .unwrap()
+        .data["task"]
+        .clone();
     assert_eq!(changed["projectId"], 2);
     assert_eq!(changed["version"], 3);
     assert_eq!(changed["currentSessionId"], "s1");
@@ -150,14 +156,19 @@ fn task_membership_uses_cas_without_claiming_or_adopting() {
         s.project_rename("##2", 1, "Wrong").unwrap_err().body.code,
         "VERSION_CONFLICT"
     );
-    let cleared = s.task_set_project("#1", 3, None, true, "fixture").unwrap().data["task"].clone();
+    let cleared = s
+        .task_set_project("#1", 3, None, true, "fixture")
+        .unwrap()
+        .data["task"]
+        .clone();
     assert!(cleared["projectId"].is_null());
     assert_eq!(cleared["version"], 4);
     s.task_close("#1", 4, "cancelled", Some("fixture finished"))
         .unwrap();
     assert_eq!(
         s.task_set_project("#1", 5, Some("##1"), true, "fixture")
-            .unwrap().data["task"]["status"],
+            .unwrap()
+            .data["task"]["status"],
         "closed"
     );
     assert_eq!(s.task_show("##1").unwrap_err().body.code, "INVALID_INPUT");
@@ -258,7 +269,10 @@ fn project_history_and_mutations_commit_or_roll_back_together() {
     );
     s.task_create_minimal().unwrap();
     conn.execute_batch("CREATE TRIGGER fail_task_history BEFORE INSERT ON history BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
-    assert!(s.task_set_project("#1", 1, Some("##1"), true, "fixture").is_err());
+    assert!(
+        s.task_set_project("#1", 1, Some("##1"), true, "fixture")
+            .is_err()
+    );
     let task = s.task_show("#1").unwrap().data["task"].clone();
     assert_eq!(task["version"], 1);
     assert!(task["projectId"].is_null());

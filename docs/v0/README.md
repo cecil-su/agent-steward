@@ -44,7 +44,9 @@
 - [任务信息维护](20-任务信息维护.md)
 - [待上线任务状态](21-待上线任务状态.md)
 
-当前源码 Schema 为6，仅初始化空库，不隐式升级。显式 `database import-schema2/import-schema4/import-schema5` 只读对应停写快照并发布到私有新库，不切换默认路径或推断任务状态。信息维护以20为准，待上线状态、Schema6与UI合同3以21为准。不要将开发构建直接安装到正式 CLI/Hook/taskd。JSON envelope 仍为2。
+- [个人偏好与项目规则](22-个人偏好与项目规则.md)
+
+当前源码 Schema 为7，仅初始化空库，不隐式升级。显式 `database import-schema2/import-schema4/import-schema5/import-schema6` 只读对应停写快照并发布到私有新库，不切换默认路径或推断任务状态。信息维护以20为准，待上线状态以21为准，规则、Schema7及UI合同4以22为准。不要将开发构建直接安装到正式 CLI/Hook/taskd。JSON envelope仍为2。
 
 ## 技术基线
 

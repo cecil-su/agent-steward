@@ -13,6 +13,8 @@ fn legacy(path: &Path) {
     service.task_close("1", 4, "completed", None).unwrap();
     let c = Connection::open(path).unwrap();
     c.execute_batch("PRAGMA journal_mode=DELETE; DROP TABLE session_events;
+        DROP TABLE rule_history;
+        DROP TABLE rules;
         DROP TABLE project_profiles;
         DROP TABLE project_history;
         DROP TABLE source_roots;

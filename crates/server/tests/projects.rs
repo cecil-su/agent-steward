@@ -14,20 +14,40 @@ async fn reader_can_read_profile_and_provenance_without_a_new_http_write_endpoin
     let (_temp, s, app) = fixture();
     s.project_create("Profile").unwrap();
     s.task_create_in_project(None, None, Some("##1")).unwrap();
-    s.project_profile_set("##1", 1, steward_application::ProjectProfileInput {
-        summary: "简介".into(), architecture: "架构入口".into(), development: "隔离验证".into(),
-        source_task_id: 1, source_task_version: 1, evidence: "synthetic only".into(),
-    }).unwrap();
+    s.project_profile_set(
+        "##1",
+        1,
+        steward_application::ProjectProfileInput {
+            summary: "简介".into(),
+            architecture: "架构入口".into(),
+            development: "隔离验证".into(),
+            source_task_id: 1,
+            source_task_version: 1,
+            evidence: "synthetic only".into(),
+        },
+    )
+    .unwrap();
     let before = s.project_profile_show("##1").unwrap().data;
     let task = s.task_show("1").unwrap().data;
     let history = s.project_history("##1", 0, 50).unwrap().data;
     let (status, project) = request(&app, "/api/projects/1", None, true).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(project["data"], before);
+    assert_eq!(project["data"]["project"], before["project"]);
+    assert_eq!(project["data"]["profile"], before["profile"]);
+    assert_eq!(
+        project["data"]["sessionRules"],
+        json!({"formatVersion":1,"rules":[]})
+    );
     let (status, context) = request(&app, "/api/tasks/1/context", None, true).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(context["data"]["projectProfile"], before["profile"]);
-    let (status, _) = request(&app, "/api/commands/project-profile-set", Some(json!({})), false).await;
+    let (status, _) = request(
+        &app,
+        "/api/commands/project-profile-set",
+        Some(json!({})),
+        false,
+    )
+    .await;
     assert!(!status.is_success());
     assert_eq!(s.project_profile_show("##1").unwrap().data, before);
     assert_eq!(s.task_show("1").unwrap().data, task);

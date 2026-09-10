@@ -520,7 +520,7 @@ async fn revoke_browsers(State(state): State<ServerState>) -> Response {
 }
 
 async fn access(Extension(access): Extension<Access>) -> Response {
-    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true},"warnings":[],"error":null})).into_response()
+    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true,"sessionRules":true},"warnings":[],"error":null})).into_response()
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -925,7 +925,13 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
                     "provide a project OR explicit clear=true",
                 ));
             }
-            s.task_set_project(&format!("#{task_id}"), expected_version, project.as_deref(), confirmed, &reason)
+            s.task_set_project(
+                &format!("#{task_id}"),
+                expected_version,
+                project.as_deref(),
+                confirmed,
+                &reason,
+            )
         }
         Command::TaskComponents {
             task_id,
@@ -935,7 +941,13 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
             reason,
         } => {
             confirm(confirmed)?;
-            s.task_set_components(&format!("#{task_id}"), expected_version, &components, confirmed, &reason)
+            s.task_set_components(
+                &format!("#{task_id}"),
+                expected_version,
+                &components,
+                confirmed,
+                &reason,
+            )
         }
         Command::TaskCreate { input } => {
             s.task_create_with_options(None, Some(&serde_json::to_string(&input).unwrap()))
@@ -946,7 +958,13 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
             patch,
             confirmed,
             reason,
-        } => s.task_update(&task_id.to_string(), expected_version, &patch.to_string(), confirmed, &reason),
+        } => s.task_update(
+            &task_id.to_string(),
+            expected_version,
+            &patch.to_string(),
+            confirmed,
+            &reason,
+        ),
         Command::TaskRetitle {
             task_id,
             expected_version,

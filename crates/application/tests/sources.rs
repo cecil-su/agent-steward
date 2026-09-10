@@ -87,7 +87,8 @@ fn task_component_scope_stays_within_its_project_and_uses_task_cas() {
             .code,
         "INVALID_INPUT"
     );
-    s.task_set_project("#1", 1, Some("##1"), true, "fixture").unwrap();
+    s.task_set_project("#1", 1, Some("##1"), true, "fixture")
+        .unwrap();
     assert_eq!(
         s.task_set_components("#1", 2, &["android".into()], true, "fixture")
             .unwrap_err()
@@ -96,31 +97,54 @@ fn task_component_scope_stays_within_its_project_and_uses_task_cas() {
         "NOT_FOUND"
     );
     assert_eq!(
-        s.task_set_components("#1", 2, &["frontend".into(), "FRONTEND".into()], true, "fixture")
-            .unwrap_err()
-            .body
-            .code,
+        s.task_set_components(
+            "#1",
+            2,
+            &["frontend".into(), "FRONTEND".into()],
+            true,
+            "fixture"
+        )
+        .unwrap_err()
+        .body
+        .code,
         "INVALID_INPUT"
     );
     let scoped = s
-        .task_set_components("#1", 2, &["backend".into(), "frontend".into()], true, "fixture")
+        .task_set_components(
+            "#1",
+            2,
+            &["backend".into(), "frontend".into()],
+            true,
+            "fixture",
+        )
         .unwrap()
         .data["task"]
         .clone();
     assert_eq!(scoped["componentIds"], serde_json::json!([1, 2]));
     assert_eq!(scoped["version"], 3);
     assert_eq!(
-        s.task_set_components("#1", 3, &["frontend".into(), "backend".into()], true, "fixture")
-            .unwrap()
-            .data["task"],
+        s.task_set_components(
+            "#1",
+            3,
+            &["frontend".into(), "backend".into()],
+            true,
+            "fixture"
+        )
+        .unwrap()
+        .data["task"],
         scoped
     );
     assert_eq!(
-        s.task_set_components("#1", 2, &[], true, "fixture").unwrap_err().body.code,
+        s.task_set_components("#1", 2, &[], true, "fixture")
+            .unwrap_err()
+            .body
+            .code,
         "VERSION_CONFLICT"
     );
     assert_eq!(
-        s.task_set_project("#1", 3, Some("##1"), true, "fixture").unwrap().data["task"],
+        s.task_set_project("#1", 3, Some("##1"), true, "fixture")
+            .unwrap()
+            .data["task"],
         scoped
     );
     let list = s
@@ -144,13 +168,32 @@ fn task_component_scope_stays_within_its_project_and_uses_task_cas() {
         .is_err()
     );
     conn.execute_batch("CREATE TRIGGER fail_scope BEFORE INSERT ON history BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
-    assert!(s.task_set_components("#1", 3, &[], true, "fixture").is_err());
-    assert!(s.task_set_project("#1", 3, Some("##2"), true, "fixture").is_err());
+    assert!(
+        s.task_set_components("#1", 3, &[], true, "fixture")
+            .is_err()
+    );
+    assert!(
+        s.task_set_project("#1", 3, Some("##2"), true, "fixture")
+            .is_err()
+    );
     assert_eq!(s.task_show("#1").unwrap().data["task"], scoped);
     conn.execute_batch("DROP TRIGGER fail_scope;").unwrap();
     s.task_claim("#1", 3, "s1", false).unwrap();
-    assert!(s.task_set_project("#1", 4, Some("##2"), true, "fixture").is_err());
-    let moved = s.task_update("#1", 4, r#"{"project":"2","components":[]}"#, true, "fixture").unwrap().data["task"].clone();
+    assert!(
+        s.task_set_project("#1", 4, Some("##2"), true, "fixture")
+            .is_err()
+    );
+    let moved = s
+        .task_update(
+            "#1",
+            4,
+            r#"{"project":"2","components":[]}"#,
+            true,
+            "fixture",
+        )
+        .unwrap()
+        .data["task"]
+        .clone();
     assert_eq!(moved["componentIds"], serde_json::json!([]));
     assert_eq!(moved["currentSessionId"], "s1");
     assert_eq!(
@@ -162,11 +205,18 @@ fn task_component_scope_stays_within_its_project_and_uses_task_cas() {
         history["history"].as_array().unwrap().last().unwrap()["payload"]["previousComponentIds"],
         serde_json::json!([1, 2])
     );
-    s.task_set_components("#1", 5, &["android".into()], true, "fixture").unwrap();
-    s.task_set_components("#1", 6, &[], true, "fixture").unwrap();
+    s.task_set_components("#1", 5, &["android".into()], true, "fixture")
+        .unwrap();
+    s.task_set_components("#1", 6, &[], true, "fixture")
+        .unwrap();
     s.task_close("#1", 7, "cancelled", Some("test complete"))
         .unwrap();
-    assert_eq!(s.task_set_components("#1", 8, &["android".into()], true, "fixture").unwrap().data["task"]["status"], "closed");
+    assert_eq!(
+        s.task_set_components("#1", 8, &["android".into()], true, "fixture")
+            .unwrap()
+            .data["task"]["status"],
+        "closed"
+    );
 }
 
 #[test]

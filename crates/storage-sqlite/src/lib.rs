@@ -6,8 +6,8 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-// Schema 6 is initialized only in empty databases; older builds are never upgraded here.
-pub const SCHEMA_VERSION: i64 = 6;
+// Schema 7 is initialized only in empty databases; older builds are never upgraded here.
+pub const SCHEMA_VERSION: i64 = 7;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -27,6 +27,21 @@ pub enum StorageError {
 
 pub fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// Existing current-schema database only. Never initializes, chmods, or changes journal mode.
+/// SQLite read-only WAL access can still create/update shared-memory sidecars.
+pub fn open_database_readonly(path: &Path) -> Result<Connection, StorageError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    connection.pragma_update(None, "query_only", true)?;
+    connection.pragma_update(None, "trusted_schema", false)?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    require_current_schema(schema_version(&connection)?)?;
+    Ok(connection)
 }
 
 pub fn open_database(path: &Path) -> Result<Connection, StorageError> {
@@ -175,6 +190,30 @@ CREATE TABLE projects (
     revision INTEGER NOT NULL CHECK(revision >= 1),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL CHECK(scope IN ('global','project')),
+    project_id INTEGER NULL REFERENCES projects(id),
+    status TEXT NOT NULL CHECK(status IN ('candidate','active','disabled')),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    content_version INTEGER NOT NULL CHECK(typeof(content_version) = 'integer' AND content_version >= 1),
+    content_json TEXT NOT NULL CHECK(json_valid(content_json) AND length(CAST(content_json AS BLOB)) <= 65536),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK((scope='global' AND project_id IS NULL) OR (scope='project' AND project_id IS NOT NULL))
+);
+CREATE INDEX idx_rules_context ON rules(status,scope,project_id,id);
+CREATE TABLE rule_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL REFERENCES rules(id),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    operation TEXT NOT NULL CHECK(operation IN ('rule.created','rule.updated','rule.disabled')),
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    before_json TEXT NULL CHECK(before_json IS NULL OR json_valid(before_json)),
+    after_json TEXT NOT NULL CHECK(json_valid(after_json)),
+    occurred_at TEXT NOT NULL,
+    UNIQUE(rule_id,revision)
 );
 CREATE TABLE project_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

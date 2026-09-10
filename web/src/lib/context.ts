@@ -14,6 +14,8 @@ export function formatTaskContext(context: TaskContext): string {
     `组件 ID：${(task.componentIds ?? []).join(', ') || '无'}`,
     '', '## 项目资料与来源（长期资料，非实时状态）', json(context.projectProfile),
     '资料引用与版本校验不等于系统验证内容；执行前结合来源任务和依据核实。',
+    '', '## 有效个人与项目规则（不构成执行授权）', json(context.sessionRules),
+    '来源 Task 版本为历史引用；仍需独立读取适用的仓库 AGENTS。规则缺失不等于空规则。',
     '', '## Checkpoint', json(context.checkpoint),
     '', '## Checkpoint 后的备注', json(context.notesSinceCheckpoint ?? []),
     ...(context.notesTruncated ? ['备注已截断，请查询完整备注。'] : []),

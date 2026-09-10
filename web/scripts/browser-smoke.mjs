@@ -28,7 +28,7 @@ try {
   const uiRoot = path.join(temp, 'ui');
   const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const resources = Object.fromEntries(['index.html', 'app.js', 'style.css'].map((name) => [name, fs.readFileSync(path.join(dist, name))]));
-  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'react-smoke', requiredApiContract: 3, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
+  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'react-smoke', requiredApiContract: 4, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
   let release = sha(manifest);
   const embedded = process.env.STEWARD_TEST_UI_MODE === 'embedded';
   const releaseDir = path.join(uiRoot, 'releases', release);
@@ -85,7 +85,7 @@ try {
   let subscriptions = 0;
   await page.route('**/api/events', async (route) => {
     subscriptions++;
-    assert.equal(route.request().headers()['x-steward-ui-contract'], '3');
+    assert.equal(route.request().headers()['x-steward-ui-contract'], '4');
     if (subscriptions === 1) await route.fulfill({ status: 503, contentType: 'application/json', body: '{"ok":false,"error":{"code":"SERVER_BUSY"}}' });
     else await route.continue();
   });

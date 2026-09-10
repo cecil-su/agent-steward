@@ -49,7 +49,13 @@ fn task_session_checkpoint_import_and_history_flow() {
     assert_eq!(stale.body.code, "VERSION_CONFLICT");
 
     let updated = service
-        .task_update("TASK-1", 2, r#"{"nextStep":"Write tests"}"#, true, "fixture")
+        .task_update(
+            "TASK-1",
+            2,
+            r#"{"nextStep":"Write tests"}"#,
+            true,
+            "fixture",
+        )
         .unwrap();
     assert_eq!(version(&updated), 3);
     let noted = service
@@ -278,7 +284,8 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
                 "acceptanceCriteria":"Initial acceptance",
                 "nextStep":"Continue"
             }"#,
-            true, "fixture",
+            true,
+            "fixture",
         )
         .unwrap();
     assert_eq!(version(&filled), 3);
@@ -288,7 +295,8 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
             "PATCHABLE",
             3,
             r#"{"title":"0904｜优化｜Patched title","goal":"Patched goal","nextStep":null}"#,
-            true, "fixture",
+            true,
+            "fixture",
         )
         .unwrap();
     assert_eq!(version(&patched), 4, "one patch increments version once");
@@ -324,7 +332,13 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
     let closed_at = closed.data["task"]["closedAt"].clone();
 
     let ordinary_update = service
-        .task_update("PATCHABLE", 5, r#"{"nextStep":"not allowed when closed"}"#, true, "fixture")
+        .task_update(
+            "PATCHABLE",
+            5,
+            r#"{"nextStep":"not allowed when closed"}"#,
+            true,
+            "fixture",
+        )
         .unwrap_err();
     assert_eq!(ordinary_update.body.code, "CONSTRAINT_VIOLATION");
     let retitled = service
@@ -396,7 +410,13 @@ fn task_titles_require_the_display_naming_rule() {
         .unwrap();
     assert_eq!(created.data["task"]["title"], "0229｜研究｜Leap-day title");
     let invalid_update = service
-        .task_update("VALID-TITLE", 1, r#"{"title":"Still plain"}"#, true, "fixture")
+        .task_update(
+            "VALID-TITLE",
+            1,
+            r#"{"title":"Still plain"}"#,
+            true,
+            "fixture",
+        )
         .unwrap_err();
     assert_eq!(invalid_update.body.code, "INVALID_INPUT");
     assert_eq!(
@@ -645,7 +665,13 @@ fn concurrent_writers_cannot_bypass_task_cas() {
         let barrier = Arc::clone(&barrier);
         std::thread::spawn(move || {
             barrier.wait();
-            service.task_update("#1", 1, &format!(r#"{{"title":"{title}"}}"#), true, "fixture")
+            service.task_update(
+                "#1",
+                1,
+                &format!(r#"{{"title":"{title}"}}"#),
+                true,
+                "fixture",
+            )
         })
     });
     let results = handles.map(|handle| handle.join().unwrap());

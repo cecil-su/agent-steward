@@ -34,7 +34,7 @@ function Read-UiPackage([string]$Directory) {
     $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
     $keys = @($manifest.PSObject.Properties.Name | Sort-Object)
     if (($keys -join ',') -cne 'entry,files,packageFormat,requiredApiContract,uiVersion') { throw 'Invalid UI manifest fields.' }
-    if ($manifest.packageFormat -ne 1 -or $manifest.requiredApiContract -ne 3 -or $manifest.entry -cne 'index.html' -or $manifest.uiVersion -cnotmatch '^[A-Za-z0-9._-]{1,100}$') { throw 'Unsupported UI package or API contract.' }
+    if ($manifest.packageFormat -ne 1 -or $manifest.requiredApiContract -ne 4 -or $manifest.entry -cne 'index.html' -or $manifest.uiVersion -cnotmatch '^[A-Za-z0-9._-]{1,100}$') { throw 'Unsupported UI package or API contract.' }
     if ((@($manifest.files.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'app.js,index.html,style.css') { throw 'Invalid UI resource list.' }
     foreach ($file in @('index.html','app.js','style.css')) {
         $path = Join-Path $Directory $file; Assert-UiFile $path 4194304
@@ -60,14 +60,14 @@ function Build-UiPackage([string]$Repository, [string]$Destination, [string]$UiV
     foreach ($file in @('index.html','app.js','style.css')) {
         if ((Get-UiHash (Join-Path $Repository "web/dist/$file")) -cne $hashes[$file]) { throw 'UI sources changed during build; use a fresh output and retry.' }
     }
-    Write-UiJson (Join-Path $Destination 'manifest.json') @{packageFormat=1;uiVersion=$UiVersion;requiredApiContract=3;entry='index.html';files=$hashes}
+    Write-UiJson (Join-Path $Destination 'manifest.json') @{packageFormat=1;uiVersion=$UiVersion;requiredApiContract=4;entry='index.html';files=$hashes}
     return Read-UiPackage $Destination
 }
 function Get-UiStatus([string]$Address) {
     $uri = [Uri]$Address
     if ($uri.Scheme -ne 'http' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -ne '/') { throw 'Use the taskd HTTP origin, without credentials, path, query or fragment.' }
     $status = Invoke-RestMethod -Uri ($Address.TrimEnd('/') + '/ui/status') -TimeoutSec 5
-    if ($status.packageFormat -ne 1 -or $status.apiContract -ne 3 -or -not $status.externalEnabled) { throw 'taskd must first be upgraded and started with --ui-root. No service will be restarted by this script.' }
+    if ($status.packageFormat -ne 1 -or $status.apiContract -ne 4 -or -not $status.externalEnabled) { throw 'taskd must first be upgraded and started with --ui-root. No service will be restarted by this script.' }
     return $status
 }
 function Set-UiRelease([string]$Root, [string]$Address, [string]$Id) {

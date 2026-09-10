@@ -1,5 +1,20 @@
-import type { DetailTab, HistoryEntry, Note, Session, TaskContext, ProjectProfile } from '../lib/contracts';
+import type { DetailTab, HistoryEntry, Note, Session, TaskContext, ProjectProfile, SessionRules } from '../lib/contracts';
 import { EmptyState } from '../components/ui/empty-state';
+
+export function SessionRulesPanel({ rules }: { rules?: SessionRules }) {
+  return <section aria-label="有效个人与项目规则" className="space-y-3 rounded-lg border border-border bg-card p-4">
+    <h3 className="font-semibold">有效个人与项目规则</h3>
+    <p className="text-sm text-muted-foreground">个人偏好与项目补充，不构成执行授权；仓库 AGENTS 仍需独立读取。来源版本为历史引用。</p>
+    {!rules || rules.formatVersion !== 1 ? <p role="status">规则不可用，不能据此认定没有规则。</p>
+      : rules.rules.length === 0 ? <p>暂无有效规则。</p>
+      : rules.rules.map(rule => <article key={rule.id} className="space-y-2 border-t border-border pt-3 text-sm">
+        <h4 className="font-semibold">{rule.content.name}</h4>
+        <p className="text-muted-foreground">规则 #{rule.id} · 修订 {rule.revision} · {rule.scope === 'global' ? '通用' : `项目 ##${rule.projectId}`}</p>
+        <p className="whitespace-pre-wrap break-words">{rule.content.body}</p>
+        {rule.content.sources.length === 0 ? <p>无任务来源的直接偏好。</p> : <ul className="space-y-2">{rule.content.sources.map((source, index) => <li key={index} className="whitespace-pre-wrap break-words">{source.kind === 'explicit' ? '明确表达' : '归纳推断'}：{source.evidence}{source.taskId !== null && `（Task #${source.taskId} · 历史版本 ${source.taskVersion}）`}</li>)}</ul>}
+      </article>)}
+  </section>;
+}
 
 export function ProjectProfilePanel({ profile }: { profile?: ProjectProfile | null }) {
   return (

@@ -2,7 +2,10 @@ use super::*;
 
 #[test]
 fn frozen_schema4_preserves_released_rust_literal_line_endings() {
-    assert!(!SCHEMA4.contains('\r'), "CRLF changes sqlite_schema SQL; frozen DDL must stay LF");
+    assert!(
+        !SCHEMA4.contains('\r'),
+        "CRLF changes sqlite_schema SQL; frozen DDL must stay LF"
+    );
 }
 
 pub(super) fn fixture(root: &Path) -> std::path::PathBuf {
@@ -27,14 +30,28 @@ pub(super) fn fixture(root: &Path) -> std::path::PathBuf {
     let identity = git_adapter::identify_existing(&historical).unwrap();
     let text = serde_json::to_string(&identity).unwrap();
     let canonical = identity.canonical_path.to_str().unwrap();
-    c.execute("INSERT INTO repositories VALUES (1,?1,?2,'now')", params![canonical, text]).unwrap();
-    c.execute("INSERT INTO source_roots VALUES (1,1,1,NULL,NULL,?1,?2,'now')", params![canonical,text]).unwrap();
-    c.execute("INSERT INTO source_roots VALUES (2,1,2,1,'.',NULL,NULL,'now')", []).unwrap();
+    c.execute(
+        "INSERT INTO repositories VALUES (1,?1,?2,'now')",
+        params![canonical, text],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO source_roots VALUES (1,1,1,NULL,NULL,?1,?2,'now')",
+        params![canonical, text],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO source_roots VALUES (2,1,2,1,'.',NULL,NULL,'now')",
+        [],
+    )
+    .unwrap();
     fs::remove_dir(historical).unwrap();
     // Include empty autoincrement tables, plus deleted/retired ID ranges.
     for (table, _) in SEQUENCES4 {
-        c.execute("DELETE FROM sqlite_sequence WHERE name=?1", [table]).unwrap();
-        c.execute("INSERT INTO sqlite_sequence VALUES (?1,1000)", [table]).unwrap();
+        c.execute("DELETE FROM sqlite_sequence WHERE name=?1", [table])
+            .unwrap();
+        c.execute("INSERT INTO sqlite_sequence VALUES (?1,1000)", [table])
+            .unwrap();
     }
     source
 }
@@ -53,16 +70,37 @@ fn schema4_copy_preserves_metadata_membership_history_and_highwater_without_path
     assert_eq!(out.data["sourceQuiescenceVerified"], false);
     assert_eq!(out.data["counts"]["task_components"], 2);
     assert_eq!(out.data["highWaterMarks"].as_object().unwrap().len(), 9);
-    for (table, _) in SEQUENCES4 { assert_eq!(out.data["highWaterMarks"][table], 1000); }
+    for (table, _) in SEQUENCES4 {
+        assert_eq!(out.data["highWaterMarks"][table], 1000);
+    }
     let task = service.task_show("1").unwrap().data["task"].clone();
     assert_eq!(task["projectId"], 1);
-    assert_eq!(task["componentIds"], json!([1,2]));
+    assert_eq!(task["componentIds"], json!([1, 2]));
     assert_eq!(task["version"], 3);
     let c = Connection::open(&target).unwrap();
-    assert_eq!(c.query_row("SELECT payload_json FROM project_history WHERE id=1", [], |r| r.get::<_, String>(0)).unwrap(), "{ \"raw\": true }");
-    assert_eq!(c.query_row("SELECT count(*) FROM project_profiles", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(service.project_show("##1").unwrap().data["project"]["revision"], 5);
-    assert_eq!(service.project_create("Next").unwrap().data["project"]["id"], 1001);
+    assert_eq!(
+        c.query_row(
+            "SELECT payload_json FROM project_history WHERE id=1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "{ \"raw\": true }"
+    );
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM project_profiles", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        service.project_show("##1").unwrap().data["project"]["revision"],
+        5
+    );
+    assert_eq!(
+        service.project_create("Next").unwrap().data["project"]["id"],
+        1001
+    );
     assert_eq!(fs::read(source).unwrap(), before);
 }
 
@@ -78,7 +116,9 @@ fn schema4_copy_refuses_confirmation_collisions_and_wrong_source_version() {
     assert!(!target.exists());
     // An independently created destination wins; never overwrite it.
     let result = import_version(&source, &target, true, 4, |phase, _| {
-        if phase == "before_publish" { fs::write(&target, b"competitor").unwrap(); }
+        if phase == "before_publish" {
+            fs::write(&target, b"competitor").unwrap();
+        }
         Ok(())
     });
     assert!(result.is_err());
@@ -96,10 +136,16 @@ fn schema4_copy_rejects_unknown_layout_or_invalid_persisted_metadata() {
     ] {
         let temp = tempfile::tempdir().unwrap();
         let source = fixture(temp.path());
-        Connection::open(&source).unwrap().execute_batch(sql).unwrap();
+        Connection::open(&source)
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
         let before = fs::read(&source).unwrap();
         let target = temp.path().join("new.db");
-        assert!(Service::new(&target).import_schema4(&source, true).is_err(), "{sql}");
+        assert!(
+            Service::new(&target).import_schema4(&source, true).is_err(),
+            "{sql}"
+        );
         assert!(!target.exists());
         assert_eq!(fs::read(source).unwrap(), before);
     }

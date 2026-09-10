@@ -17,8 +17,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// Contract 3 adds pending_release; retains explicit confirmation/reason for task maintenance.
-pub const API_CONTRACT: u32 = 3;
+// Contract 4 requires effective personal/project rules in task/project context.
+// Older UIs must not silently omit these rules when handing off task context.
+pub const API_CONTRACT: u32 = 4;
 const FILES: [&str; 3] = ["index.html", "app.js", "style.css"];
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 // Checked-in three-file React snapshot; update via web's explicit sync:embedded step.

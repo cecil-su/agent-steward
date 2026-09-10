@@ -124,12 +124,12 @@ export function App() {
     queryFn: async ({ signal }): Promise<ProjectDetail> => {
       const path = `/api/projects/${ui.selectedProjectId}`;
       const [info, components, sources] = await Promise.all([
-        api.get<Pick<ProjectDetail, 'project' | 'profile'>>(path, signal),
+        api.get<Pick<ProjectDetail, 'project' | 'profile' | 'sessionRules'>>(path, signal),
         api.get<{ project: Project; components: Component[] }>(`${path}/components`, signal),
         api.get<{ project: Project; sources: Source[] }>(`${path}/sources`, signal),
       ]);
       if (info.project.revision !== components.project.revision || info.project.revision !== sources.project.revision) throw new Error('项目在读取期间发生变化，请刷新后重试。');
-      return { project: info.project, profile: info.profile, components: components.components, sources: sources.sources };
+      return { project: info.project, profile: info.profile, sessionRules: info.sessionRules, components: components.components, sources: sources.sources };
     },
     enabled: connected && ui.tab === 'projects' && access.data?.projectManagement === true && ui.selectedProjectId !== null,
   });

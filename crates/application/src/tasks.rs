@@ -285,7 +285,14 @@ impl Service {
         confirmed: bool,
         reason: &str,
     ) -> AppResult<Outcome> {
-        self.task_update_fields(reference, expected, input_json, confirmed, reason, "task.updated")
+        self.task_update_fields(
+            reference,
+            expected,
+            input_json,
+            confirmed,
+            reason,
+            "task.updated",
+        )
     }
 
     pub(crate) fn task_update_fields(
@@ -298,7 +305,10 @@ impl Service {
         change_type: &str,
     ) -> AppResult<Outcome> {
         if !confirmed {
-            return Err(AppError::invalid("confirmed", "explicit user confirmation is required"));
+            return Err(AppError::invalid(
+                "confirmed",
+                "explicit user confirmation is required",
+            ));
         }
         let reason = required("reason", reason)?;
         let patch: Value = serde_json::from_str(input_json)
@@ -312,7 +322,14 @@ impl Service {
         for key in patch.keys() {
             if !matches!(
                 key.as_str(),
-                "taskKey" | "title" | "goal" | "scope" | "acceptanceCriteria" | "nextStep" | "project" | "components"
+                "taskKey"
+                    | "title"
+                    | "goal"
+                    | "scope"
+                    | "acceptanceCriteria"
+                    | "nextStep"
+                    | "project"
+                    | "components"
             ) {
                 return Err(AppError::invalid(key, "unknown patch field"));
             }
@@ -329,36 +346,52 @@ impl Service {
             let project_id = if project.is_null() {
                 None
             } else {
-                Some(crate::projects::resolve_project_id(&tx, project.as_str().ok_or_else(|| {
-                    AppError::invalid("project", "must be a project reference string or null")
-                })?)?)
+                Some(crate::projects::resolve_project_id(
+                    &tx,
+                    project.as_str().ok_or_else(|| {
+                        AppError::invalid("project", "must be a project reference string or null")
+                    })?,
+                )?)
             };
             if project_id != task.project_id {
                 if !task.component_ids.is_empty() && !patch.contains_key("components") {
-                    return Err(AppError::invalid("components", "changing project requires explicit replacement or [] for existing components"));
+                    return Err(AppError::invalid(
+                        "components",
+                        "changing project requires explicit replacement or [] for existing components",
+                    ));
                 }
                 task.project_id = project_id;
                 changed.push("projectId".to_owned());
             }
         }
         if let Some(components) = patch.get("components") {
-            let names: Vec<String> = serde_json::from_value(components.clone())
-                .map_err(|_| AppError::invalid("components", "must be an array of component names"))?;
+            let names: Vec<String> = serde_json::from_value(components.clone()).map_err(|_| {
+                AppError::invalid("components", "must be an array of component names")
+            })?;
             if names.len() > 200 {
                 return Err(AppError::invalid("components", "at most 200 components"));
             }
             let mut ids = std::collections::BTreeSet::new();
             for name in names {
-                let project_id = task.project_id.ok_or_else(|| AppError::invalid("project", "select a project before selecting components"))?;
+                let project_id = task.project_id.ok_or_else(|| {
+                    AppError::invalid("project", "select a project before selecting components")
+                })?;
                 let (_, key) = steward_core::normalize_project_name(&name)
                     .map_err(|reason| AppError::invalid("component", reason))?;
-                let id: i64 = tx.query_row(
-                    "SELECT id FROM components WHERE project_id=?1 AND name_key=?2",
-                    params![project_id, key], |row| row.get(0),
-                ).optional().map_err(AppError::from_sqlite)?
+                let id: i64 = tx
+                    .query_row(
+                        "SELECT id FROM components WHERE project_id=?1 AND name_key=?2",
+                        params![project_id, key],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(AppError::from_sqlite)?
                     .ok_or_else(|| AppError::not_found("Component", &name))?;
                 if !ids.insert(id) {
-                    return Err(AppError::invalid("components", "duplicate component selection"));
+                    return Err(AppError::invalid(
+                        "components",
+                        "duplicate component selection",
+                    ));
                 }
             }
             let ids: Vec<i64> = ids.into_iter().collect();
@@ -416,11 +449,16 @@ impl Service {
                 tx.commit().map_err(AppError::from_sqlite)?;
                 return Ok(Outcome::new(json!({"task": task})));
             }
-            return Err(AppError::invalid("input", "patch does not change any field"));
+            return Err(AppError::invalid(
+                "input",
+                "patch does not change any field",
+            ));
         }
         changed.sort();
         let timestamp = now();
-        let association_changed = changed.iter().any(|field| field == "projectId" || field == "componentIds");
+        let association_changed = changed
+            .iter()
+            .any(|field| field == "projectId" || field == "componentIds");
         if association_changed {
             tx.execute("DELETE FROM task_components WHERE task_id=?1", [id])
                 .map_err(AppError::from_sqlite)?;
@@ -686,7 +724,10 @@ impl Service {
             )
             .map_err(AppError::from_sqlite)?;
         if changed != 1 {
-            return Err(AppError::version(expected, load_task(&tx, task.id)?.version));
+            return Err(AppError::version(
+                expected,
+                load_task(&tx, task.id)?.version,
+            ));
         }
         insert_history(
             &tx,

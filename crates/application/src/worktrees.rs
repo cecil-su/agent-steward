@@ -1562,7 +1562,13 @@ mod tests {
             )
             .unwrap();
         service
-            .task_update("TASK RECOVERY", 1, r#"{"title":"0904｜优化｜Updated"}"#, true, "fixture")
+            .task_update(
+                "TASK RECOVERY",
+                1,
+                r#"{"title":"0904｜优化｜Updated"}"#,
+                true,
+                "fixture",
+            )
             .unwrap();
 
         let recovery = adopt_recovery_for_created_worktree(
@@ -1747,7 +1753,8 @@ mod tests {
                 "TASK ADOPT RECOVERY",
                 1,
                 r#"{"title":"0904｜优化｜Updated"}"#,
-                true, "fixture",
+                true,
+                "fixture",
             )
             .unwrap();
         service
