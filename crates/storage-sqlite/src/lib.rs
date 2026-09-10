@@ -6,8 +6,8 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-// Schema 5 is initialized only in empty databases; older builds are never upgraded here.
-pub const SCHEMA_VERSION: i64 = 5;
+// Schema 6 is initialized only in empty databases; older builds are never upgraded here.
+pub const SCHEMA_VERSION: i64 = 6;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -228,7 +228,7 @@ CREATE TABLE tasks (
     project_id INTEGER NULL REFERENCES projects(id),
     task_key TEXT NULL UNIQUE CHECK(task_key IS NULL OR length(trim(task_key)) > 0),
     title TEXT NULL CHECK(title IS NULL OR length(trim(title)) > 0),
-    status TEXT NOT NULL CHECK(status IN ('open','in_progress','blocked','closed')),
+    status TEXT NOT NULL CHECK(status IN ('open','in_progress','pending_release','blocked','closed')),
     version INTEGER NOT NULL CHECK(version >= 1),
     goal TEXT NULL CHECK(goal IS NULL OR length(trim(goal)) > 0),
     scope TEXT NULL CHECK(scope IS NULL OR length(trim(scope)) > 0),

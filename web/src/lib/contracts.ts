@@ -1,4 +1,4 @@
-export type TaskStatus = 'open' | 'in_progress' | 'blocked' | 'closed';
+export type TaskStatus = 'open' | 'in_progress' | 'pending_release' | 'blocked' | 'closed';
 export interface Task {
   id: number;
   title: string | null;

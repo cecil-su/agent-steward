@@ -28,7 +28,7 @@ fn preflight_requires_explicit_database_and_does_not_initialize_missing_paths() 
     let runtime = temp.path().join("runtime");
     let out = check(&database, &runtime);
     assert!(out.status.success(), "{:?}", out.stderr);
-    assert_eq!(out.stdout, b"databaseSchema=5\n");
+    assert_eq!(out.stdout, b"databaseSchema=6\n");
     assert!(!database.parent().unwrap().exists());
     assert!(!runtime.exists());
     for suffix in ["-wal", "-shm", "-journal"] {
@@ -46,7 +46,7 @@ fn preflight_requires_explicit_database_and_does_not_initialize_missing_paths() 
 fn preflight_refuses_old_invalid_and_ambiguous_paths_without_touching_them() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("runtime");
-    for version in [0, 1, 2, 3, 4, 6] {
+    for version in [0, 1, 2, 3, 4, 5, 7] {
         let database = temp.path().join(format!("schema-{version}.db"));
         let c = Connection::open(&database).unwrap();
         c.execute_batch(include_str!("../../application/src/migration/schema2.sql"))
@@ -94,8 +94,8 @@ fn preflight_reads_committed_wal_schema_and_preserves_business_records() {
     );
     assert_eq!(fs::read(&database).unwrap(), before);
     assert_eq!(fs::read(&wal).unwrap(), wal_before);
-    c.pragma_update(None, "user_version", 5).unwrap();
-    assert_eq!(check(&database, &runtime).stdout, b"databaseSchema=5\n");
+    c.pragma_update(None, "user_version", 6).unwrap();
+    assert_eq!(check(&database, &runtime).stdout, b"databaseSchema=6\n");
     drop(c);
     assert_eq!(service.task_show("1").unwrap().data, task);
     assert_eq!(service.history("1").unwrap().data, history);

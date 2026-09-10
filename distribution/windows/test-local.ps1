@@ -27,7 +27,7 @@ try {
     $script:failPreflight = $false
     function Assert-StartCompatible([string]$Version) {
         $manifest = Read-Json (Join-Path $InstallRoot "versions\$Version\manifest.json")
-        Assert ($manifest.databaseSchema -eq 5) 'Local bundle mislabeled its database schema.'
+        Assert ($manifest.databaseSchema -eq 6) 'Local bundle mislabeled its database schema.'
         if ($script:failPreflight) { throw 'synthetic schema mismatch' }
     }
     function Switch-Managed([string]$Version) {

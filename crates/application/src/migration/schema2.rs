@@ -1,4 +1,4 @@
-//! Explicit Schema 2/4 copies. No source initializer, external record-path IO, or service switch.
+//! Explicit Schema 2/4/5 copies. No source initializer, external record-path IO, or service switch.
 use super::{columns, io_error, refused, require_unused_destination};
 use crate::{AppError, AppResult, HookEventInput, Outcome, Service, db};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -9,6 +9,12 @@ use std::{fs, path::Path, time::Duration};
 
 const SCHEMA2: &str = include_str!("schema2.sql");
 const SCHEMA4: &str = include_str!("schema4.sql");
+const SCHEMA5: &str = include_str!("schema5.sql");
+const TABLES5: [&str; 14] = [
+    "projects", "project_history", "components", "repositories", "source_roots",
+    "tasks", "sessions", "checkpoints", "task_notes", "history", "session_imports",
+    "session_events", "task_components", "project_profiles",
+];
 const TABLES4: [&str; 13] = [
     "projects", "project_history", "components", "repositories", "source_roots",
     "tasks", "sessions", "checkpoints", "task_notes", "history", "session_imports",
@@ -182,6 +188,11 @@ impl Service {
     pub fn import_schema4(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
         import_version(source, self.database_path(), confirmed, 4, |_, _| Ok(()))
     }
+
+    /// Copy Schema 5 unchanged; never infer pending-release status for existing tasks.
+    pub fn import_schema5(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
+        import_version(source, self.database_path(), confirmed, 5, |_, _| Ok(()))
+    }
 }
 
 // A private observation seam for deterministic interruption/collision tests, not a CLI fault flag.
@@ -204,6 +215,7 @@ fn import_version(
     let (definition, tables, sequence_fields, empty_tables): (&str, &[&str], &[(&str, &str)], &[&str]) = match source_version {
         2 => (SCHEMA2, &TABLES, &SEQUENCES, &PROJECT_TABLES),
         4 => (SCHEMA4, &TABLES4, &SEQUENCES4, &["project_profiles"]),
+        5 => (SCHEMA5, &TABLES5, &SEQUENCES4, &[]),
         _ => return Err(refused("unsupported source schema")),
     };
     if !confirmed {
@@ -409,7 +421,7 @@ fn import_version(
             return Err(refused("project metadata must remain empty"));
         }
     }
-    validate_records(&tx, source_version == 4)
+    validate_records(&tx, source_version >= 4)
         .map_err(|_| refused("source records are incompatible or contain invalid metadata"))?;
     integrity(&tx)?;
     tx.commit().map_err(AppError::from_sqlite)?;
@@ -607,6 +619,10 @@ fn validate_project_records(c: &Connection) -> AppResult<()> {
             if id <= 0 || steward_core::normalize_project_name(&name).ok() != Some((name, key)) {
                 return Err(refused("invalid project/component name or identity"));
             }
+            if table == "projects" {
+                // Schema 5 profiles must remain readable by the current DTO, not just pass SQLite affinity checks.
+                crate::project_profiles::load_profile(c, id)?;
+            }
         }
     }
     if c.query_row("SELECT EXISTS(SELECT 1 FROM projects p WHERE p.revision != (SELECT count(*) FROM project_history h WHERE h.project_id=p.id) OR p.revision != (SELECT coalesce(max(revision),0) FROM project_history h WHERE h.project_id=p.id))", [], |r| r.get::<_, bool>(0)).map_err(AppError::from_sqlite)? {
@@ -644,6 +660,8 @@ fn validate_project_records(c: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod schema4_tests;
+#[cfg(test)]
+mod schema5_tests;
 #[cfg(test)]
 mod process_tests;
 #[cfg(test)]

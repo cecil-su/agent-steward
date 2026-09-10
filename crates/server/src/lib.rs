@@ -587,6 +587,7 @@ async fn tasks(
             None => query.status,
             Some("active") => Some("active".into()),
             Some("in-progress") => Some("in_progress".into()),
+            Some("pending-release") => Some("pending_release".into()),
             Some("blocked") => Some("blocked".into()),
             Some("recent") => None,
             Some(_) => return Err(AppError::invalid("view", "unknown view")),
@@ -758,6 +759,14 @@ enum Command {
         expected_version: i64,
         reason: String,
         recovery: String,
+    },
+    TaskPendingRelease {
+        task_id: i64,
+        expected_version: i64,
+    },
+    TaskContinue {
+        task_id: i64,
+        expected_version: i64,
     },
     TaskUnblock {
         task_id: i64,
@@ -955,6 +964,14 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
             reason,
             recovery,
         } => s.task_block(&task_id.to_string(), expected_version, &reason, &recovery),
+        Command::TaskPendingRelease {
+            task_id,
+            expected_version,
+        } => s.task_pending_release(&task_id.to_string(), expected_version),
+        Command::TaskContinue {
+            task_id,
+            expected_version,
+        } => s.task_continue(&task_id.to_string(), expected_version),
         Command::TaskUnblock {
             task_id,
             expected_version,

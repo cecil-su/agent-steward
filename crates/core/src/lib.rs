@@ -17,6 +17,7 @@ use serde_json::Value;
 pub enum TaskStatus {
     Open,
     InProgress,
+    PendingRelease,
     Blocked,
     Closed,
 }
@@ -26,6 +27,7 @@ impl TaskStatus {
         match self {
             Self::Open => "open",
             Self::InProgress => "in_progress",
+            Self::PendingRelease => "pending_release",
             Self::Blocked => "blocked",
             Self::Closed => "closed",
         }
@@ -39,6 +41,7 @@ impl TryFrom<&str> for TaskStatus {
         match value {
             "open" => Ok(Self::Open),
             "in_progress" => Ok(Self::InProgress),
+            "pending_release" => Ok(Self::PendingRelease),
             "blocked" => Ok(Self::Blocked),
             "closed" => Ok(Self::Closed),
             _ => Err(format!("unknown task status: {value}")),

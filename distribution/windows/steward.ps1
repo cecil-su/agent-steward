@@ -22,8 +22,8 @@ function Assert-BuildId([string]$Version) {
 }
 function Assert-Manifest($Manifest) {
     Assert-BuildId $Manifest.version
-    if ($Manifest.databaseSchema -ne 5 -or $Manifest.launcherProtocol -ne 1 -or $Manifest.target -ne 'x86_64-pc-windows-msvc') {
-        throw 'This launcher requires a Schema 5 package. Cross-schema upgrades require a separately backed-up migration and a separate installation directory.'
+    if ($Manifest.databaseSchema -ne 6 -or $Manifest.launcherProtocol -ne 1 -or $Manifest.target -ne 'x86_64-pc-windows-msvc') {
+        throw 'This launcher requires a Schema 6 package. Cross-schema upgrades require a separately backed-up migration and a separate installation directory.'
     }
 }
 function Assert-Settings($Settings) {

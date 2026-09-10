@@ -8,7 +8,7 @@
 
 当前已提供：
 
-- 任务状态视图、关键词搜索、分页与基础详情。
+- 任务状态视图、关键词搜索、分页与基础详情；“待上线”使用独立标识和筛选，计入未关闭，不计入进行中。
 - 项目列表、按唯一名称或 `##ID` 精确查找、详情和分页历史。
 - 项目→关联任务筛选、任务→所属项目导航及清除筛选。
 - Checkpoint、近期备注/截断提示、完整备注、Session、任务历史、代码现场只读展示。
@@ -64,13 +64,13 @@ fnm exec --using=24.11.1 npm.cmd test
 
 `npm run build` 只写 `web/dist/{index.html,app.js,style.css}`，不覆盖 `crates/server/web/`，不激活正式发布。Windows `ui.ps1 Build` 读取 `web/dist`；**构建成功不代表正式网页已更新**。后端发布前显式执行 `npm run sync:embedded`，同步到 `crates/server/web-readonly` 后重新编译 taskd，保证内嵌回退也只读；旧 `crates/server/web` 不再作为活动资源入口。
 
-当前 UI 请求头及外置包使用 API 合同 `2`（包格式仍为 `1`），需要配套合同 `2` 的 taskd，不能纯 UI 更新到合同 `1` 服务。CI 与 Windows 发布流程固定 `.nvmrc`，先运行前端单测/类型检查/构建并同步内嵌快照，再编译 Rust；浏览器 smoke 验证实际只读入口，不操作旧可写页面的按钮。CI 使用显式安装的 Playwright Chromium（`STEWARD_BROWSER_CHANNEL=chromium`）。
+当前 UI 请求头及外置包使用 API 合同 `3`（包格式仍为 `1`），需要配套 Schema6/合同3 的 taskd，不能纯 UI 更新到合同1/2服务。旧原生及legacy只读包不作为Schema6发布入口。CI 与 Windows 发布流程固定 `.nvmrc`，先运行前端单测/类型检查/构建并同步内嵌快照，再编译 Rust；浏览器 smoke 验证实际只读入口，不操作旧可写页面的按钮。CI 使用显式安装的 Playwright Chromium（`STEWARD_BROWSER_CHANNEL=chromium`）。
 
 `npm run dev` 是本机前端开发服务，不提供业务 API、不配置正式地址 proxy，也不放宽 taskd Host/Origin/CSP。业务验证使用下方新隔离 taskd 托管构建结果。
 
 ## 真实浏览器验证
 
-明确指定可信开发 `taskd/taskctl` 目录，本轮资料 smoke 要求 Schema5 项目资料 CLI/API 和独立 UI 包。脚本不会退回全局安装；新建临时库/runtime/UI包、随机端口、严格认证 reader，使用本机已安装 Chrome。缺浏览器直接失败，不下载。
+明确指定可信开发 `taskd/taskctl` 目录，smoke 要求 Schema6 待上线、项目资料 CLI/API 和合同3独立 UI 包。脚本不会退回全局安装；新建临时库/runtime/UI包、随机端口、严格认证 reader，使用本机已安装 Chrome。缺浏览器直接失败，不下载。
 
 ```sh
 # 先 npm run build；地址必须是本机网卡，以下仅限获准的隔离测试。
@@ -84,6 +84,6 @@ fnm exec --using=24.11.1 npm.cmd run test:browser
 
 覆盖桌面/390px、无业务按钮、CSP、reader登录退出、任务/项目/历史/上下文读取、项目查找筛选、503 SSE重连与搜索保护、临时 UI 更新提示保护及取消、项目资料/来源显示与复制、Task/Project/Profile/History不变。输出绑定 Node/Chrome、开发二进制 SHA、UI release 及 `.artifacts/<时间>/` 截图；测试过程中 SSE 用外部 CLI 创建额外合成任务，不把它误算为浏览器写入。
 
-隔离验证使用 `.local/task45-fix-target/debug` 的 Schema5/API 合同 2 开发二进制，React 内嵌与外置包浏览器 smoke 均通过；前端 74 项单测、类型检查和构建通过。不声称完整业务人工验收、远程 CI 执行或正式部署。Windows 打包/启动脚本按 Schema5 校验，新旧 schema 不能通过普通更新混用；须先单独停写、备份、显式迁移并核验。参见[项目资料与显式离线复制合同](../docs/v0/19-Schema5项目资料与CLI维护.md)。
+隔离验证使用 `target/debug` 的 Schema6/API合同3开发二进制，React内嵌与外置包Chrome smoke均通过（含待上线标识/筛选、桌面/390px、只读边界）；前端75项单测、类型检查和构建通过。Windows包/启动器按Schema6校验，新旧schema不能通过普通更新混用。正式部署及用户验收未执行；参见[待上线与显式离线复制合同](../docs/v0/21-待上线任务状态.md)。
 
 依据：[UI包合同](../docs/v0/14-UI独立发布.md)、[Vite](https://vite.dev/config/build-options)、[shadcn](https://ui.shadcn.com/docs/installation/vite)、[TanStack Query](https://tanstack.com/query/latest/docs/framework/react/reference/QueryClient)。

@@ -51,11 +51,12 @@ export interface ReadonlyWorkspaceProps {
 const views = [
   ['active', '未关闭'],
   ['in-progress', '进行中'],
+  ['pending-release', '待上线'],
   ['blocked', '有阻塞'],
   ['closed', '已关闭'],
   ['recent', '最近全部'],
 ] as const;
-const statusLabels = { open: '待处理', in_progress: '进行中', blocked: '受阻', closed: '已关闭' };
+const statusLabels = { open: '待处理', in_progress: '进行中', pending_release: '待上线', blocked: '受阻', closed: '已关闭' };
 
 function TaskBadge({ task }: { task: Task }) {
   return <Badge variant={task.status === 'open' ? 'default' : task.status}>{statusLabels[task.status]}</Badge>;

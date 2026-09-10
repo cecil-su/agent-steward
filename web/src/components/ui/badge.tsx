@@ -11,6 +11,7 @@ export const badgeVariants = cva(
         secondary: "border-transparent bg-secondary text-secondary-foreground",
         outline: "border-border bg-transparent text-secondary-foreground",
         in_progress: "border-transparent bg-[#e5f2ee] text-[#247757]",
+        pending_release: "border-transparent bg-[#e9e8fc] text-[#5745a2]",
         blocked: "border-transparent bg-[#fff0dd] text-[#95661f]",
         closed: "border-transparent bg-[#eeeff0] text-[#737b80]",
         destructive: "border-[#e6c6bf] bg-[#fbeeea] text-destructive",

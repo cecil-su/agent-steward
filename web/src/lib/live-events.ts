@@ -23,7 +23,7 @@ export function subscribeLiveEvents(callbacks: LiveCallbacks, transport: typeof 
     while (!controller.signal.aborted) {
       callbacks.status('正在连接实时更新…');
       try {
-        const response = await transport('/api/events', { method: 'GET', headers: { 'X-Steward-UI-Contract': '2' }, credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal });
+        const response = await transport('/api/events', { method: 'GET', headers: { 'X-Steward-UI-Contract': '3' }, credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal });
         if (controller.signal.aborted) { await response.body?.cancel().catch(() => {}); return; }
         if (response.status === 401) { unauthorized(); return; }
         if (!response.ok || !response.body) throw new Error('Stream unavailable');

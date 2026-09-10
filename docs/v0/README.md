@@ -40,7 +40,11 @@
 - [项目管理人工验收交接（本轮用户选择跳过）](17-项目管理验收.md)
 - [Schema 2→4 迁移方案与隔离演练](18-Schema2到4迁移与隔离演练.md)
 
-当前开发 Schema 为 4，仅初始化空库，拒绝 Schema 2 活动库及 Schema 3 开发库，不隐式升级；显式 `database import-schema2` 只读停写快照并发布到私有新库，不切换默认路径。不要将开发构建直接安装到正式 CLI/Hook/taskd。JSON envelope 仍为 2。
+- [Schema5 项目资料与CLI维护](19-Schema5项目资料与CLI维护.md)
+- [任务信息维护](20-任务信息维护.md)
+- [待上线任务状态](21-待上线任务状态.md)
+
+当前源码 Schema 为6，仅初始化空库，不隐式升级。显式 `database import-schema2/import-schema4/import-schema5` 只读对应停写快照并发布到私有新库，不切换默认路径或推断任务状态。信息维护以20为准，待上线状态、Schema6与UI合同3以21为准。不要将开发构建直接安装到正式 CLI/Hook/taskd。JSON envelope 仍为2。
 
 ## 技术基线
 

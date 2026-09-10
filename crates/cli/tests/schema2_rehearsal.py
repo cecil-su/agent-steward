@@ -172,7 +172,7 @@ def main(old, new, root):
         assert result.returncode == 0 and value["data"]["verified"]
         assert value["data"]["externalPathsObserved"] is False
         with closing(readonly(snapshot)) as src, closing(readonly(destination)) as dst:
-            assert dst.execute("PRAGMA user_version").fetchone() == (5,)
+            assert dst.execute("PRAGMA user_version").fetchone() == (6,)
             assert {r[1] for r in schema(dst) if r[0] == "table"} == set(TABLES + NEW_TABLES)
             for table in TABLES:
                 assert rows(src, table) == rows(dst, table, columns(src, table))
@@ -203,7 +203,7 @@ def main(old, new, root):
         shutil.copyfile(source, main_only)
         with closing(readonly(main_only)) as partial, closing(readonly(snapshot)) as complete:
             assert rows(partial, "task_notes") != rows(complete, "task_notes")
-        target = root / "migrated-private" / "schema5.db"
+        target = root / "migrated-private" / "schema6.db"
         copy_rows(snapshot, target)
         assert digest(source) == main_hash and digest(wal) == wal_hash
         checks += ["WAL-inclusive snapshot; main-only copy demonstrably incomplete",
@@ -260,7 +260,7 @@ def main(old, new, root):
     assert digest(target) == rejected_hash
     cli(new, snapshot, "task", "create", body={}, error="UNSUPPORTED_SCHEMA_VERSION")
     assert digest(snapshot) == baseline_hash
-    checks.append("old CLI rejects Schema5 and new CLI rejects Schema2 without implicit upgrade")
+    checks.append("old CLI rejects Schema6 and new CLI rejects Schema2 without implicit upgrade")
 
     for version_number in (0, 1, 3, 4):
         wrong = root / f"wrong-{version_number}.db"

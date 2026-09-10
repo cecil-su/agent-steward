@@ -101,19 +101,21 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 
 `summary` 和 `nextStep` 必须是非空字符串，四个数组字段的每个元素也必须是非空字符串；未知字段拒绝。Checkpoint 一经写入不可原地修改，修正通过创建新 Checkpoint 完成。
 
-状态转换固定为：
+状态转换如下；待上线及Schema6/UI合同详见[待上线任务状态](21-待上线任务状态.md)：
 
 | 当前状态 | 命令 | 下一状态 | 附加规则 |
 | --- | --- | --- | --- |
 | `open` | `claim` | `in_progress` | 登记当前 Session |
-| `in_progress/blocked` | `claim --take-over` | 原状态 | 更换当前 Session 并保留继续关系 |
+| `in_progress/pending_release/blocked` | `claim --take-over` | 原状态 | 更换当前 Session 并保留继续关系 |
 | `in_progress` | `block` | `blocked` | reason 和 recovery 必填 |
 | `blocked` | `unblock` | `in_progress` | 清空阻塞字段，next step 必填 |
-| `in_progress` | `close completed` | `closed` | title、goal、scope、acceptanceCriteria 必须完整；清空当前 Session 和 next step |
-| `in_progress/blocked` | `close partial` | `closed` | reason 必填并记录残余事项 |
-| `open/in_progress/blocked` | `close cancelled/superseded` | `closed` | reason 必填 |
+| `in_progress` | `pending-release` | `pending_release` | 功能开发完成、尚未上线；保留当前Session |
+| `pending_release` | `continue` | `in_progress` | 继续修改，保留当前Session |
+| `in_progress/pending_release` | `close completed` | `closed` | title、goal、scope、acceptanceCriteria 必须完整；清空当前 Session 和 next step |
+| `in_progress/pending_release/blocked` | `close partial` | `closed` | reason 必填并记录残余事项 |
+| `open/in_progress/pending_release/blocked` | `close cancelled/superseded` | `closed` | reason 必填 |
 
-`update` 允许用于全部状态，`note` 仍只允许用于 `open/in_progress/blocked`；都不能绕过专用命令改变状态字段。`checkpoint` 只允许用于 `in_progress/blocked`，且指定 Session 必须是同一 Task 尚未结束的当前 Session。`resume` 只允许用于 `in_progress/blocked`；`open` Task 必须先 `claim`。`claim` 首次把 `open` 推进到 `in_progress`；对于 `in_progress/blocked`，相同且尚未结束的当前 Session 在当前 version 下可以 no-op success，不同当前 Session 必须以尚不存在的新 Session ID 执行 `--take-over`，状态保持不变；当前 Session 为空时必须使用带明确来源的 `resume`，不能丢失继续关系。
+`update` 允许用于全部状态，`note` 只允许用于 `open/in_progress/pending_release/blocked`；都不能绕过专用命令改变状态字段。`checkpoint` 只允许用于 `in_progress/pending_release/blocked`，且指定 Session 必须是同一 Task 尚未结束的当前 Session。`resume` 只允许用于 `in_progress/pending_release/blocked`；`open` Task 必须先 `claim`。`claim` 首次把 `open` 推进到 `in_progress`；对于 `in_progress/pending_release/blocked`，相同且尚未结束的当前 Session 在当前 version 下可以 no-op success，不同当前 Session 必须以尚不存在的新 Session ID 执行 `--take-over`，状态保持不变；当前 Session 为空时必须使用带明确来源的 `resume`，不能丢失继续关系。
 
 `closed` 不允许重新领取、阻塞或保存 Checkpoint；V0 不提供 reopen，但允许经授权的 `update/project/components` 信息维护以及 `retitle` 标题修正。所有关闭命令都清空 next step 和阻塞字段；若存在当前 Session，还在同一事务中设置其 `endedAt` 并清空 Task 的 `currentSessionId`。非 `blocked` 状态的阻塞字段必须为空；非 `closed` 状态的关闭字段必须为空。
 

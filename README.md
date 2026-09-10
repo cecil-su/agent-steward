@@ -71,9 +71,9 @@ cargo build --workspace --locked
 cargo run -p steward-server --bin taskd -- --database /tmp/steward-m5-demo/steward.db
 ```
 
-启动后默认自动打开 `http://127.0.0.1:43123`。本机直接访问免凭据，包括通过 `--bind` 指定的本机网卡 IP 访问；严格认证模式用 `--require-local-auth`。本机免登录信任所有本地用户/程序，不可通过代理或隧道暴露。远程/严格模式的浏览器授权保留 30 天。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。Windows 本地编译更新可双击 [`distribution/windows/Update-Local.cmd`](distribution/windows/Update-Local.cmd)，首次设置后保留 IP、端口和数据路径；不自动拉代码，编译与数据库版本预检成功后才切换受管服务；现有 Schema 2/4 安装须经独立迁移并使用新的安装目录，不由普通更新跨 Schema 切换。详见 [启动与更新指南](distribution/windows/README.md)。首次创建的私有凭据跨重启保留，SSE 同步 CLI/Hook 变更，保留未应用搜索和复制输入。Web 为只读工作台，支持任务/项目检索、Checkpoint、Session、History、代码现场和项目资料/来源查看与上下文复制，不提供业务写入口；业务维护由 CLI 完成。已安装程序无需前端依赖；前端开发与内嵌同步见 [web/README.md](web/README.md)。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
+启动后默认自动打开 `http://127.0.0.1:43123`。本机直接访问免凭据，包括通过 `--bind` 指定的本机网卡 IP 访问；严格认证模式用 `--require-local-auth`。本机免登录信任所有本地用户/程序，不可通过代理或隧道暴露。远程/严格模式的浏览器授权保留 30 天。`--no-open` 可用于无桌面环境，`--port 0` 可选临时端口；其他设备首次使用终端显示的只读凭据。Windows 本地编译更新可双击 [`distribution/windows/Update-Local.cmd`](distribution/windows/Update-Local.cmd)，首次设置后保留 IP、端口和数据路径；不自动拉代码，编译与数据库版本预检成功后才切换受管服务；现有 Schema 2/4/5 安装须经独立迁移并使用新的安装目录，不由普通更新跨 Schema 切换。详见 [启动与更新指南](distribution/windows/README.md)。首次创建的私有凭据跨重启保留，SSE 同步 CLI/Hook 变更，保留未应用搜索和复制输入。Web 为只读工作台，支持任务/项目检索、Checkpoint、Session、History、代码现场和项目资料/来源查看与上下文复制，不提供业务写入口；业务维护由 CLI 完成。已安装程序无需前端依赖；前端开发与内嵌同步见 [web/README.md](web/README.md)。`task-hook` 接收显式配置宿主的 JSON 事件，只保存种类和时间等元数据，不存消息或工具正文。
 
-当前数据库格式为 **schema 5**，不自动迁移旧 schema 1/2/3/4；CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`。Schema4 可通过显式 `database import-schema4` 复制到私有新库，资料使用项目 revision 与来源任务 version 校验。2026-09-09 已按用户授权完成本机成套迁移/发布，详情与恢复边界见 [Schema5 项目资料与发布记录](docs/v0/19-Schema5项目资料与CLI维护.md)。其它环境仍须单独停写、备份、迁移、核验和授权，不能通过普通更新跨 schema。
+当前源码数据库格式为 **schema 6**，不自动迁移旧 schema；CLI/HTTP JSON envelope 仍为 `schemaVersion: 2`，UI API 合同为3。新增“待上线”状态：进行中 → 待上线 → 用户确认关闭，也可返回进行中继续修改；Web提供只读标识和筛选。Schema2/4/5 可通过对应显式复制命令导入私有新库，不自动改变任务状态或切换安装。合同及迁移边界见 [待上线任务状态](docs/v0/21-待上线任务状态.md)。源码版本不代表实际部署版本；正式迁移、部署与重启须另行授权。
 
 ## V0 项目与任务归属
 

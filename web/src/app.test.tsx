@@ -38,6 +38,20 @@ function mount(handler?: (path: string) => Response | Promise<Response> | undefi
 async function connect() {
   await screen.findByRole('button', { name: /#40/ });
 }
+it('shows pending release in list and detail without a task write entry', async () => {
+  const pending = { ...task, status: 'pending_release' };
+  const transport = mount(path => {
+    if (path.startsWith('/api/tasks?')) return reply({ tasks: [pending], hasMore: false, nextCursor: null });
+    if (path === '/api/tasks/40/context') return reply({ task: pending, project: null });
+  });
+  await connect();
+  expect(screen.getAllByText('待上线').length).toBeGreaterThanOrEqual(2);
+  fireEvent.click(screen.getByRole('button', { name: /#40/ }));
+  await screen.findByText('fixture');
+  expect(screen.getAllByText('待上线').length).toBeGreaterThanOrEqual(3);
+  expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
+  expect(screen.queryByRole('button', { name: /继续修改|关闭任务|标记待上线/ })).not.toBeInTheDocument();
+});
 it('exchanges a one-use link once under StrictMode and clears it before any request', async () => {
   const code = 'a'.repeat(64);
   window.history.replaceState(null, '', '/?fixture=1#connect=' + code);
@@ -123,10 +137,10 @@ it('restores the original brand and task views without instructional banners', a
   const transport = mount(); await connect();
   expect(screen.getByRole('link', { name: 'Agent Steward · 本地任务工作台' })).toHaveTextContent('S');
   const views = screen.getByLabelText('任务状态视图');
-  expect([...views.querySelectorAll('button')].map(button => button.textContent)).toEqual(['未关闭', '进行中', '有阻塞', '已关闭', '最近全部']);
+  expect([...views.querySelectorAll('button')].map(button => button.textContent)).toEqual(['未关闭', '进行中', '待上线', '有阻塞', '已关闭', '最近全部']);
   expect(screen.queryByText(/项目资料和任务由 AI/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Web 仅用于检索和展示/)).not.toBeInTheDocument();
-  for (const [name, parameter] of [['进行中', 'view=in-progress'], ['有阻塞', 'view=blocked'], ['已关闭', 'status=closed'], ['最近全部', 'view=recent'], ['未关闭', 'view=active']]) {
+  for (const [name, parameter] of [['进行中', 'view=in-progress'], ['待上线', 'view=pending-release'], ['有阻塞', 'view=blocked'], ['已关闭', 'status=closed'], ['最近全部', 'view=recent'], ['未关闭', 'view=active']]) {
     fireEvent.click(screen.getByRole('button', { name }));
     await waitFor(() => expect(screen.getByRole('button', { name: '刷新' })).not.toBeDisabled());
     expect(transport.mock.calls.some(([path]) => String(path).includes(parameter))).toBe(true);

@@ -43,7 +43,7 @@ export function createApi(options: ApiOptions = {}) {
           cache: 'no-store',
           redirect: 'error',
           headers: {
-            'X-Steward-UI-Contract': '2',
+            'X-Steward-UI-Contract': '3',
             ...(write ? { 'Content-Type': 'application/json', 'X-Steward-CSRF': '1' } : {}),
             ...(token ? { 'X-Steward-Token': token } : {}),
             ...(connectionCode ? { 'X-Steward-Connect': connectionCode } : {}),

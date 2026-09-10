@@ -15,7 +15,7 @@ it('parses split frames, sends the contract header and closes on cleanup', async
   await vi.waitFor(() => expect(cb.status).toHaveBeenCalledWith('实时同步'));
   input.send('event: chan'); input.send('ged\r\ndata: refresh\r\n\r\n');
   await vi.waitFor(() => expect(cb.changed).toHaveBeenCalledTimes(1));
-  expect(transport.mock.calls[0][1]).toMatchObject({ method: 'GET', headers: { 'X-Steward-UI-Contract': '2' }, credentials: 'same-origin' });
+  expect(transport.mock.calls[0][1]).toMatchObject({ method: 'GET', headers: { 'X-Steward-UI-Contract': '3' }, credentials: 'same-origin' });
   stop(); expect(transport.mock.calls[0][1]?.signal?.aborted).toBe(true);
 });
 it('closes revoked streams without replaying authentication', async () => {

@@ -72,6 +72,6 @@ fn schema4_cli_copy_requires_explicit_confirmation_and_keeps_source_unchanged() 
     let out = run(&target, &["--yes","database","import-schema4","--source",source.to_str().unwrap()]);
     assert_eq!(out["ok"], true);
     assert_eq!(out["data"]["sourceSchema"], 4);
-    assert_eq!(out["data"]["targetSchema"], 5);
+    assert_eq!(out["data"]["targetSchema"], 6);
     assert_eq!(fs::read(source).unwrap(), before);
 }

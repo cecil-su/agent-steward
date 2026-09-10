@@ -28,7 +28,7 @@ try {
   const uiRoot = path.join(temp, 'ui');
   const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const resources = Object.fromEntries(['index.html', 'app.js', 'style.css'].map((name) => [name, fs.readFileSync(path.join(dist, name))]));
-  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'react-smoke', requiredApiContract: 2, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
+  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'react-smoke', requiredApiContract: 3, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
   let release = sha(manifest);
   const embedded = process.env.STEWARD_TEST_UI_MODE === 'embedded';
   const releaseDir = path.join(uiRoot, 'releases', release);
@@ -47,6 +47,8 @@ try {
   fs.writeFileSync(checkpointFile, JSON.stringify({ summary: '隔离Checkpoint摘要', completed: ['隔离数据准备'], decisions: [], pending: [], risks: [], nextStep: '验证只读页面' }));
   current = cli('task', 'checkpoint', String(task.id), '--session', 'react-read-session', '--if-version', String(current.version), '--input', checkpointFile).task;
   cli('task', 'note', String(task.id), '--if-version', String(current.version), '--type', 'progress', '--text', '可验证的只读备注');
+  current = cli('task', 'show', String(task.id)).task;
+  cli('task', 'pending-release', String(task.id), '--if-version', String(current.version));
   const baseline = cli('task', 'show', String(task.id)).task;
   const baselineHistory = cli('history', String(task.id)).history;
   const profileFile = path.join(temp, 'profile.json');
@@ -83,7 +85,7 @@ try {
   let subscriptions = 0;
   await page.route('**/api/events', async (route) => {
     subscriptions++;
-    assert.equal(route.request().headers()['x-steward-ui-contract'], '2');
+    assert.equal(route.request().headers()['x-steward-ui-contract'], '3');
     if (subscriptions === 1) await route.fulfill({ status: 503, contentType: 'application/json', body: '{"ok":false,"error":{"code":"SERVER_BUSY"}}' });
     else await route.continue();
   });
@@ -107,7 +109,7 @@ try {
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   assert.equal(await page.getByRole('button', { name: '连接', exact: true }).count(), 0, 'Refresh did not restore cookie authorization');
   await page.getByRole('link', { name: 'Agent Steward · 本地任务工作台' }).waitFor();
-  assert.deepEqual(await page.getByLabel('任务状态视图').getByRole('button').allTextContents(), ['未关闭', '进行中', '有阻塞', '已关闭', '最近全部']);
+  assert.deepEqual(await page.getByLabel('任务状态视图').getByRole('button').allTextContents(), ['未关闭', '进行中', '待上线', '有阻塞', '已关闭', '最近全部']);
   assert.equal(await page.getByText(/项目资料和任务由 AI|Web 仅用于检索和展示/).count(), 0);
   await page.route('**/api/tasks?**', async route => {
     if (['in-progress', 'blocked'].includes(new URL(route.request().url()).searchParams.get('view'))) await delay(800);
@@ -128,6 +130,11 @@ try {
     await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   }
   await page.unroute('**/api/tasks?**');
+  await page.getByRole('button', { name: '待上线', exact: true }).click();
+  await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
+  assert.equal(baseline.status, 'pending_release');
+  assert(await page.getByText('待上线', { exact: true }).count() >= 2);
+  await page.getByRole('button', { name: '未关闭', exact: true }).click();
   await page.setViewportSize({ width: 1360, height: 1000 });
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).click();
   await page.getByRole('heading', { name: '未命名任务', exact: true }).waitFor();
@@ -202,8 +209,15 @@ try {
   assert.deepEqual(cli('project', 'history', `##${project.id}`), projectHistoryBaseline);
   assert.equal(await page.evaluate(() => localStorage.length), 0);
   assert.equal(await page.evaluate(() => sessionStorage.length), 0);
-  console.log(JSON.stringify({ result: 'PASS', release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map((name) => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['no business controls/POST', 'desktop/390px layout', 'strict CSP', localAuth ? 'local automatic authorization/logout' : 'reader login/logout', 'refresh restores authorization without login replay', 'Checkpoint/notes/Session/history', 'fresh context copy', 'project lookup/filter', 'SSE 503 reconnect and search protection', 'UI update preserves input/cancel', 'profile/provenance in Project and Task context', 'Task/Project/Profile/History unchanged'] }, null, 2));
+  console.log(JSON.stringify({ result: 'PASS', release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map((name) => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['pending-release badge and filter', 'no business controls/POST', 'desktop/390px layout', 'strict CSP', localAuth ? 'local automatic authorization/logout' : 'reader login/logout', 'refresh restores authorization without login replay', 'Checkpoint/notes/Session/history', 'fresh context copy', 'project lookup/filter', 'SSE 503 reconnect and search protection', 'UI update preserves input/cancel', 'profile/provenance in Project and Task context', 'Task/Project/Profile/History unchanged'] }, null, 2));
   succeeded = true;
+} catch (error) {
+  const page = browser?.contexts()[0]?.pages()[0];
+  if (page) {
+    await page.screenshot({ path: path.join(temp, 'failure.png'), fullPage: true }).catch(() => {});
+    console.error('Synthetic page at failure:', await page.locator('body').innerText().catch(() => '(unavailable)'));
+  }
+  throw error;
 } finally {
   try { if (browser) await browser.close(); }
   finally {

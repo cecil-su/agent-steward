@@ -79,6 +79,11 @@ enum DatabaseCommand {
         #[arg(long)]
         source: PathBuf,
     },
+    /// Copy a quiescent Schema 5 snapshot into a new current-schema database; never switches services.
+    ImportSchema5 {
+        #[arg(long)]
+        source: PathBuf,
+    },
     /// Copy a legacy v7 closed-task archive into a new current-schema database.
     ImportV7 {
         #[arg(long)]
@@ -225,6 +230,7 @@ enum TaskListFormat {
 enum TaskListView {
     Active,
     InProgress,
+    PendingRelease,
     Blocked,
     Recent,
 }
@@ -264,7 +270,7 @@ enum TaskCommand {
         view: Option<TaskListView>,
         #[arg(
             long,
-            help = "open, in_progress, blocked, closed, or active (all unclosed tasks)"
+            help = "open, in_progress, pending_release, blocked, closed, or active (all unclosed tasks)"
         )]
         status: Option<String>,
         #[arg(long = "task-key")]
@@ -342,6 +348,18 @@ enum TaskCommand {
         reason: String,
         #[arg(long)]
         recovery: String,
+    },
+    /// Mark development finished and awaiting release; preserves the current Session.
+    PendingRelease {
+        task_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+    },
+    /// Return a pending-release task to development; does not resume or replace its Session.
+    Continue {
+        task_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
     },
     Unblock {
         task_id: String,
@@ -587,6 +605,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             }
             match command {
                 DatabaseCommand::ImportSchema4 { source } => service.import_schema4(source, cli.yes),
+                DatabaseCommand::ImportSchema5 { source } => service.import_schema5(source, cli.yes),
                 DatabaseCommand::ImportV7 { source } => service.import_legacy_v7(source, cli.yes),
                 DatabaseCommand::ImportSchema2 { source } => {
                     service.import_schema2(source, cli.yes)
@@ -794,6 +813,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     status: match view {
                         Some(TaskListView::Active) => Some("active".into()),
                         Some(TaskListView::InProgress) => Some("in_progress".into()),
+                        Some(TaskListView::PendingRelease) => Some("pending_release".into()),
                         Some(TaskListView::Blocked) => Some("blocked".into()),
                         Some(TaskListView::Recent) => None,
                         None => status.clone(),
@@ -850,6 +870,12 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 reason,
                 recovery,
             } => service.task_block(task_id, *if_version, reason, recovery),
+            TaskCommand::PendingRelease { task_id, if_version } => {
+                service.task_pending_release(task_id, *if_version)
+            }
+            TaskCommand::Continue { task_id, if_version } => {
+                service.task_continue(task_id, *if_version)
+            }
             TaskCommand::Unblock {
                 task_id,
                 if_version,

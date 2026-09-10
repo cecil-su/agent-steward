@@ -387,7 +387,10 @@ impl Service {
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task(&tx, task_id)?;
         check_version(&task, expected)?;
-        if !matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked) {
+        if !matches!(
+            task.status,
+            TaskStatus::InProgress | TaskStatus::PendingRelease | TaskStatus::Blocked
+        ) {
             return Err(AppError::constraint("task.resume.requires_active_task"));
         }
         let source_id = from_session
