@@ -1,6 +1,6 @@
 # CLI 命令设计
 
-Project 的 `##ID`/唯一名称、`project create/show/list/rename/history`、`task create/list --project`、`task project/components`、`project component/source/here/context` 及 context 新字段见 [项目与上下文复用合同](16-项目与上下文复用.md)。当前开发数据库 Schema7 的普通连接只初始化空库，不隐式升级旧库；JSON envelope为2。`rule` CLI、task context/sessionRules、Schema6显式复制和UI合同4见[个人偏好与项目规则](22-个人偏好与项目规则.md)。本文其余部分保留 Task/Session/Worktree 基础合同。
+Project 的 `##ID`/唯一名称、`project create/show/list/rename/history`、`task create/list --project`、`task project/components`、`project component/source/here/context` 及context字段见 [项目与上下文复用合同](16-项目与上下文复用.md)。当前数据库Schema7 的普通连接只初始化空库，不隐式升级旧库；JSON envelope为2。`rule` CLI、task context/sessionRules、Schema6显式复制和UI合同4见[个人偏好与项目规则](22-个人偏好与项目规则.md)。本文其余部分保留 Task/Session/Worktree 基础合同。
 
 ## 1. 通用约定
 
@@ -11,20 +11,20 @@ taskctl [global-options] <domain> <action> [subaction] [arguments] [options]
 全局选项：
 
 - `--database <path>`：覆盖默认 SQLite 数据库路径；
-- `--json`：输出稳定机器合同；
-- `--input <file|->`：从 UTF-8 JSON 文件读取结构化输入；与 `--json` 同用时，`-` 表示从 stdin 按原始字节读取并严格验证 UTF-8。空输入、非法 UTF-8、非法 JSON 和未知字段都返回稳定 `INVALID_INPUT`（`details.field="input"`），输入不成为主存储；
+- `--json`：输出稳定机器合同，帮助、版本及解析失败也遵循JSON输出；仅`--`之前独立出现的选项生效，`--`之后的字面值及`--name=--json`选项值不启用JSON；JSON模式从不交互询问，需确认的操作必须显式`--yes`；
+- `--input <file|->`：从 UTF-8 JSON 普通文件读取结构化输入，通用输入最多16 MiB（含边界）；拒绝目录、设备与命名管道文件路径，打开后再次检查文件类型。与`--json`同用时，`-`按原始字节流式读取stdin，最多读取限额+1字节即拒绝超限，不等待超限流EOF；限额内的stdin仍须由发送方结束输入。Rule/Profile输入保留各自更严格的专用限额。超限、空输入、非法UTF-8、非法JSON和未知字段返回`INVALID_INPUT`（`details.field="input"`）；输入文件不成为主存储；
 - `--yes`：确认 Worktree 删除等明确的本地操作；
-- `--verbose`：输出诊断信息，不改变结果合同。
+- `--verbose`：成功解析命令后向stderr输出构建版本与JSON模式诊断，不输出输入正文、凭据或参数值，不改变stdout结果合同。
 
 默认数据库位于当前操作系统的用户级应用数据目录下，文件名为 `agent-steward/steward.db`。初版不提供远程 Git 写入命令，也不连接远程数据库服务。
 
 ### 显式离线归档迁移
 
-`taskctl --database <不存在的新库绝对路径> --json --yes database import-v7 --source <旧v7快照绝对路径>` 只读源库，保留闭合任务的 ID、版本、时间戳及全部业务记录。拒绝活动任务、Worktree 绑定和既有目标。它不是 Task mutation，不生成新业务 History、不切换默认库。完整限制和验收见 [v7归档迁移](13-v7归档迁移.md)。
+`taskctl --database <不存在的新库绝对路径> --json --yes database import-v7 --source <schema_migrations格式v7快照绝对路径>` 只读源库，保留闭合任务的 ID、版本、时间戳及全部业务记录。拒绝活动任务、Worktree 绑定和既有目标。它不是 Task mutation，不生成新业务 History、不切换默认库。完整限制和验收见 [v7归档迁移](13-v7归档迁移.md)。
 
 ### 显式 Schema 2 快照复制
 
-`taskctl --database <不存在的新库绝对路径> --json --yes database import-schema2 --source <停写Schema2快照绝对路径>` 支持活动/关闭任务、Session/Checkpoint、Import 和 Hook 墓碑。源只读，目标须有私有父目录（不存在时仅新建最后一级），禁止覆盖、合并、默认库回退或服务切换。返回七表计数/摘要与四类序列高水位；`sourceQuiescenceVerified:false` 明确不能以读事务或并发复查代替停写。Schema 3 不在支持范围。实现与 Windows 验证见 [Schema2到4迁移](18-Schema2到4迁移与隔离演练.md)。
+`taskctl --database <不存在的新库绝对路径> --json --yes database import-schema2 --source <停写Schema2快照绝对路径>` 支持活动/关闭任务、Session/Checkpoint、Import 和 Hook 墓碑。源只读，目标须有私有父目录（不存在时仅新建最后一级），禁止覆盖、合并、默认库回退或服务切换。返回七表计数/摘要与四类序列高水位；`sourceQuiescenceVerified:false` 明确不能以读事务或并发复查代替停写。Schema 3 不在支持范围。全部现行入口、输入格式和隔离步骤见[Schema7隔离导入与验证](18-Schema7隔离导入与验证.md)。
 
 ## 2. Task
 
@@ -47,7 +47,7 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 
 `<task-ref>` 接受纯数字 `12`、展示形式 `#12` 或可选 `taskKey`。前两种解析为整数主键，`taskKey` 按原文查询，没有 `key:` 转义语法。JSON 中的 `TaskView.id` 和所有 `taskId` 是整数；人类输出显示 `#12`。`taskKey` 不能为纯数字或以 `#` 开头；可以在创建时设置，也可以从 `null` 设置一次，之后不可更改或清空。
 
-`task list` 默认每页 50 条，最大 200 条，固定按 `updatedAt DESC, id ASC` 排序，并使用 `nextCursor` 继续读取。游标保存固定长度的筛选摘要并绑定创建它时的 `status/taskKey/query` 条件，不内嵌完整筛选文本；因此合法输入产生的 `nextCursor` 一定可被下一页消费，筛选条件变化后复用旧游标返回 `INVALID_INPUT`。`--status` 和 `--task-key` 精确匹配。`--query 45` 或 `--query '#45'` 按整数ID精确搜索，不匹配其它任务正文中的数字；前导零按同一编号处理，超出整数范围返回 `INVALID_INPUT`，不存在编号返回空列表。编号查询仍与状态、项目等筛选取交集；已关闭任务需选对应视图或不限制状态。其它 `--query` 对 title/goal/scope 做转义后的 SQLite `LIKE` 包含匹配，ASCII 字母不区分大小写，非 ASCII 遵循 SQLite 默认比较语义，`%` 和 `_` 按普通字符处理。`--fields title` 或 `--fields id,title,status` 只投影白名单字段；不传时 JSON 返回完整 TaskView。未知、重复或空字段拒绝，字段白名单就是下文 `TaskView` 的 camelCase 字段集合；投影不改变筛选、排序和游标计算。
+`task list` 默认每页50条，允许1–200条，页大小在打开数据库前校验，固定按 `updatedAt DESC, id ASC` 排序，并使用 `nextCursor` 继续读取。游标保存固定长度的筛选摘要并绑定创建它时的 `status/taskKey/query` 条件，不内嵌完整筛选文本；因此合法输入产生的 `nextCursor` 一定可被下一页消费，筛选条件变化后复用旧游标返回 `INVALID_INPUT`。`--status` 和 `--task-key` 精确匹配。`--query 45` 或 `--query '#45'` 按整数ID精确搜索，不匹配其它任务正文中的数字；前导零按同一编号处理，超出整数范围返回 `INVALID_INPUT`，不存在编号返回空列表。编号查询仍与状态、项目等筛选取交集；已关闭任务需选对应视图或不限制状态。其它 `--query` 对 title/goal/scope 做转义后的 SQLite `LIKE` 包含匹配，ASCII 字母不区分大小写，非 ASCII 遵循 SQLite 默认比较语义，`%` 和 `_` 按普通字符处理。`--fields title` 或 `--fields id,title,status` 只投影白名单字段；不传时 JSON 返回完整 TaskView。未知、重复或空字段拒绝，字段白名单就是下文 `TaskView` 的 camelCase 字段集合；投影不改变筛选、排序和游标计算。
 
 非 JSON 的 `task list` 默认输出 ID/title/status/updatedAt 表格；显式 `--fields` 决定表格列，`null` 显示为 `—`，过长单元格只在表格中以省略号截断。`--format lines` 要求恰好选择一个字段，每条 Task 输出一行；它不能与 `--json` 组合。机器调用始终使用 `--json`，不解析表格或 lines 文本。
 
@@ -101,7 +101,7 @@ taskctl task close <task-ref> --if-version <version> --outcome <outcome> [--reas
 
 `summary` 和 `nextStep` 必须是非空字符串，四个数组字段的每个元素也必须是非空字符串；未知字段拒绝。Checkpoint 一经写入不可原地修改，修正通过创建新 Checkpoint 完成。
 
-状态转换如下；待上线及Schema6/UI合同详见[待上线任务状态](21-待上线任务状态.md)：
+状态转换如下；待上线语义详见[待上线任务状态](21-待上线任务状态.md)：
 
 | 当前状态 | 命令 | 下一状态 | 附加规则 |
 | --- | --- | --- | --- |
@@ -153,7 +153,7 @@ taskctl worktree adopt <task-ref> --repo <path> --path <worktree-path> --if-vers
 taskctl worktree detach <task-ref> --expected-path <worktree-path> --if-version <version>
 ```
 
-`create` 要求调用方显式提供目标路径。命令取得下述按 Task advisory lock 后，必须重新读取 Task version，并确认 Task 的 Repository 路径、common-dir 身份、Branch 和 Worktree 引用全部为空；任一引用已经存在时，在调用 Git 前返回 `WORKTREE_SAFETY_REFUSED`，不能覆盖或创建第二个未登记 Worktree。Git 调用完成后无论退出状态如何都必须重新观察现场；只有现场证明创建成功，才在数据库事务中以同一 version compare-and-swap，并同时保存实际 Repository 路径、规范化 common-dir 身份、Branch 和 Worktree 引用。数据库提交后、返回成功前必须再次确认 Worktree 仍存在且身份一致。`--branch` 表示已经存在的本地分支；V0 不隐式创建分支。目标分支不存在、已被其他 Worktree 占用或 Repository 身份不一致时拒绝。如果未来需要创建分支，另行增加显式 `--new-branch` 和 `--start-point` 合同。
+`create` 要求调用方显式提供目标路径。命令取得下述按 Task advisory lock 后，必须重新读取 Task version，并确认 Task 的 Repository 路径、common-dir 身份、Branch 和 Worktree 引用全部为空；任一引用已经存在时，在调用 Git 前返回 `WORKTREE_SAFETY_REFUSED`，不能覆盖或创建第二个未登记 Worktree。Git 调用完成后无论退出状态如何都必须重新观察现场；只有现场证明创建成功，才在数据库事务中以同一 version compare-and-swap，并同时保存实际 Repository 路径、规范化 common-dir 身份、Branch 和 Worktree 引用。数据库提交后、返回成功前必须再次确认 Worktree 仍存在且身份一致。`--branch` 表示已经存在的本地分支；V0 不隐式创建分支。目标分支不存在、已被其他 Worktree 占用或 Repository 身份不一致时拒绝。
 
 Repository、Worktree 和目标父目录必须遵循安全文档中的 `CanonicalPath` 与 `RepositoryIdentity` 合同。数据库路径相等、用户输入字符串相等或单独一次 `resolve()` 都不足以证明是同一现场。
 
@@ -177,7 +177,7 @@ Git 与 SQLite 部分完成时使用显式恢复命令：
 - 两个命令都必须执行 Task version compare-and-swap、写入 History，并在现场无法证明安全时拒绝；
 - `doctor` 只给出诊断和建议命令，不自动调用 `adopt` 或 `detach`。
 
-每次 `git worktree add/remove` 启动后，无论进程退出码是成功还是失败，都必须重新观察 CanonicalPath、RepositoryIdentity 和 Worktree 登记状态。只有能够证明现场未改变时，非零退出才返回 `GIT_COMMAND_FAILED`。如果现场已经改变而数据库尚未提交，返回 `PARTIAL_EXTERNAL_STATE` 和 `adopt`/`detach` 建议；`create` 已创建 Worktree 但 Task 引用仍为空时，必须重新读取 Task 并在建议中携带其当前 version，不能只建议无法发现孤立 Worktree 的 `doctor`。如果 Git 已经启动且无法证明现场是否改变，同样返回 `PARTIAL_EXTERNAL_STATE`，其中 Git 状态为 `unknown`，建议命令为 `taskctl doctor`，不能降级为 `PATH_IDENTITY_UNKNOWN` 或普通 Git 错误。数据库已经提交而后置观察发现不一致时，`databaseState` 必须为 `updated`。
+每次 `git worktree add/remove` 启动后，无论进程退出码是成功还是失败，都必须重新观察 CanonicalPath、RepositoryIdentity 和 Worktree 登记状态。只有能够证明现场未改变时，非零退出才返回 `GIT_COMMAND_FAILED`。如果现场已经改变而数据库尚未提交，返回 `PARTIAL_EXTERNAL_STATE` 和 `adopt`/`detach` 建议；`create`已创建Worktree但Task引用仍为空时，只有重新读取Task并验证恢复前置条件成功，才建议携带最新version的adopt；连接或重读失败时必须停止，建议doctor并明确恢复连接后重新读取Task与Git，禁止发出旧版本恢复命令。如果Git已经启动且无法证明现场是否改变，同样返回`PARTIAL_EXTERNAL_STATE`，其中`gitState=null`，建议命令为 `taskctl doctor`，不能降级为 `PATH_IDENTITY_UNKNOWN` 或普通 Git 错误。数据库已经提交而后置观察发现不一致时，`databaseState` 必须为 `updated`。
 
 ## 5. History 与诊断
 
@@ -202,11 +202,11 @@ AI 应遵守：
 6. 遇到版本冲突时重新 `show`，不得盲目重试旧 Patch；
 7. 不直接修改 SQLite 数据库。
 
-这些规则可以写入项目 `AGENTS.md`。后续 Client Hook / Runtime Adapter 可以自动提交 Session 生命周期和可观察事件，但不能替代显式 Task 更新。
+这些规则可以写入项目 `AGENTS.md`。Client Hook只提交可观察元数据，不能替代显式Task更新或改变Session执行生命周期。
 
 ## 7. JSON 合同
 
-`--json` 时 stdout 只输出一个 UTF-8 JSON 对象并以换行结束；诊断信息只能写入 stderr。所有结果使用 camelCase 和固定 envelope：
+`--json` 时 stdout 只输出一个 UTF-8 JSON 对象并以换行结束；诊断信息只能写入 stderr。`--help`（含子命令帮助）与 `--version` 同样返回成功 envelope，data 分别为 `{ "help": "帮助文本" }` 和 `{ "version": "版本文本" }`，退出码0，不打开数据库；未指定 `--json` 时保留终端文本。所有结果使用 camelCase 和固定 envelope：
 
 ```json
 {
@@ -222,9 +222,9 @@ AI 应遵守：
 
 失败时 `ok=false`、`data=null`，`error` 至少包含 `code`、`message`、`retryable` 和 `details`。可选字段必须显式输出为 `null`，不能因为空而省略；输出消费者必须忽略未来新增字段。输入中的未知字段拒绝，以防拼写错误静默丢失。持久化 Checkpoint 或 History JSON 无法解码时返回 `DATABASE_UNAVAILABLE`，不得转换为空数组或 `null`；`resume` 必须在创建新 Session 前完成 Checkpoint 解码。
 
-所有成功的 Task mutation 在 `data.task` 中返回完整 Task，其 `version` 是 mutation 后的新版本。`VERSION_CONFLICT` 的 `details` 返回 `expectedVersion` 和 `currentVersion`。Git 已经改变现场，或操作期间无法证明 Git 与数据库一致时，返回 `PARTIAL_EXTERNAL_STATE`；`details` 返回规范化 Repository/Worktree 路径、实际或 `unknown` Git 状态、稳定的 `databaseState`（`unchanged`、`updated` 或 `unknown`），以及可执行的 `adopt`、`detach` 或 `taskctl doctor` 建议。`schemaVersion: 2` 表示 Task 主键和所有 `taskId` 已改为 JSON 整数，并新增 `taskKey` 及可空描述语义；旧 `schemaVersion: 1` 消费者不得把该结果当作兼容响应。`recommendedCommand` 保持字符串；`recommendedArgs` 是不经过 Shell 拼接的参数数组，首项为 `taskctl`，并显式携带 `--database` 和规范化数据库路径；数字 Task ID、Repository 与 Worktree 路径各自占用独立数组元素。
+所有成功的 Task mutation 在 `data.task` 中返回完整 Task，其 `version` 是 mutation 后的新版本。`VERSION_CONFLICT` 的 `details` 返回 `expectedVersion` 和 `currentVersion`。Git 已经改变现场，或操作期间无法证明 Git 与数据库一致时，返回 `PARTIAL_EXTERNAL_STATE`；`details` 返回规范化 Repository/Worktree 路径、完整观察对象或`null`的Git状态、稳定的`databaseState`（`unchanged`、`updated` 或 `unknown`），以及可执行的 `adopt`、`detach` 或 `taskctl doctor` 建议。`schemaVersion:2`中的Task主键和taskId为JSON整数，taskKey及描述遵循可空合同。`recommendedCommand` 保持字符串；`recommendedArgs` 是不经过 Shell 拼接的参数数组，首项为 `taskctl`，并显式携带 `--database` 和规范化数据库路径；数字 Task ID、Repository 与 Worktree 路径各自占用独立数组元素。
 
-`gitState` 只能承载可判定的现场事实：无法证明现场时（例如后置观察失败）必须稳定输出字符串 `"unknown"`，不得用包含 `phase`/`observationError` 的对象冒充状态；`phase`、`observationError`、`observed` 等过程诊断统一放入可选 `diagnostics` 对象，无诊断时显式输出 `null`。`detach` 建议只在该 Task 的文件系统路径与 Git 登记均已证明不存在时给出；目录缺失但 Git 仍登记该 Worktree 时不得建议 `detach`（它必然被拒绝），应建议 `taskctl doctor` 并在 `diagnostics` 或 doctor issue 中说明需要先清理 Git 登记或恢复目录。
+`gitState`为可空观察合同：有完整观察时恰好包含`pathExists:boolean`、`registeredByGit:boolean`、`branch:string|null`、`head:string|null`；无法证明现场或只有先前完成动作时输出`null`，不能以完成动作代替观察。消费者必须先处理null。观察不构成随后操作的原子保证。`phase`、`observationError`、`lastObservedGitState`等诊断只放在`diagnostics`，不能把历史观察冒充实时状态；无诊断时显式输出null。`detach` 建议只在该 Task 的文件系统路径与 Git 登记均已证明不存在时给出；目录缺失但Git仍登记该Worktree，或存在无法排除的缺失登记别名时，不得建议detach；不同的缺失路径字符串不能证明不存在别名，应建议 `taskctl doctor` 并在 `diagnostics` 或 doctor issue 中说明需要先清理 Git 登记或恢复目录。
 
 `databaseState=unchanged` 表示本次命令未提交数据库 mutation，`updated` 表示 mutation 已提交，`unknown` 表示提交结果无法确认；该字段不推断其他进程是否同时修改了数据库。
 
@@ -245,7 +245,7 @@ V0 稳定错误码固定为：
 | `GIT_COMMAND_FAILED` | 5 | false | `operation`、`exitStatus`、`stderrSummary` |
 | `PARTIAL_EXTERNAL_STATE` | 6 | false | `repositoryPath`、`worktreePath`、`gitState`、`databaseState`、`diagnostics`（无诊断时为 `null`）、`recommendedCommand: string`、`recommendedArgs: string[]` |
 | `DATABASE_UNAVAILABLE` | 10 | false | `reason` |
-| `INTERNAL` | 10 | false | `diagnosticId` |
+| `GIT_READ_LIMIT` | 5 | false | `{}`；message区分截止时间、取消或输出超限 |
 
 `retryable=true` 只表示重新读取状态或等待后重试可能成功，不授权自动覆盖、接管或执行 destructive 操作。V0 稳定警告码至少包括 `SENSITIVE_CONTENT_CHECK_REQUIRED`、`DUPLICATE_SESSION_IMPORT`、`PHYSICAL_ERASURE_NOT_GUARANTEED`、`RECORD_PATH_MISSING` 和 `INSECURE_DATABASE_PERMISSIONS`；Warning 的 details 也必须使用机器字段，不能只返回自然语言。
 
@@ -261,7 +261,7 @@ V0 DTO 固定如下；这里列出的可选字段也必须以 `null` 输出：
 | `WorktreeStatus` | `registered`、`repositoryPath`、`repositoryCommonDir`、`path`、`exists`、`branch`、`head`、`staged`、`unstaged`、`untracked`、`ignored`、`observedAt` |
 | `HistoryEntry` | `id`、`taskId`、`sequence`、`changeType`、`sessionId`、`occurredAt`、`summary`、`payload` |
 
-`WorktreeStatus.registered/exists` 是布尔值。`repositoryPath`、`repositoryCommonDir`、`path` 和 `branch` 是数据库登记值：`registered=true` 时必须保留并返回，即使文件系统中的 Worktree 已经不存在；`registered=false` 时这些字段为 `null`，`exists=false`。`exists` 和 `observedAt` 来自实时观察；`head`、`staged`、`unstaged`、`untracked`、`ignored` 也是观察值，Worktree 不存在时分别为 `null`，不能伪造空 HEAD 或空数组。Worktree 存在时四个文件数组按 Repository 相对路径字典序排列。只读 `worktree status` 的 Git 观察失败时返回 `GIT_COMMAND_FAILED`；Git mutation 启动后的后置观察无法证明现场未改变时返回 `PARTIAL_EXTERNAL_STATE`，二者都不能返回伪造状态。
+`WorktreeStatus.registered/exists` 是布尔值。`repositoryPath`、`repositoryCommonDir`、`path` 和 `branch` 是数据库登记值：`registered=true` 时必须保留并返回，即使文件系统中的 Worktree 已经不存在；`registered=false` 时这些字段为 `null`，`exists=false`。`exists` 和 `observedAt` 来自实时观察；`head`、`staged`、`unstaged`、`untracked`、`ignored` 也是观察值，Worktree 不存在时分别为 `null`，不能伪造空 HEAD 或空数组。Worktree 存在时四个文件数组按 Repository 相对路径字典序排列。只读 `worktree status` 的 Git 命令失败返回 `GIT_COMMAND_FAILED`，读取资源超限返回 `GIT_READ_LIMIT`；Git mutation 启动后的后置观察无法证明现场未改变时返回 `PARTIAL_EXTERNAL_STATE`，二者都不能返回伪造状态。
 
 命令的 `data` 映射固定为：
 
@@ -281,6 +281,10 @@ V0 DTO 固定如下；这里列出的可选字段也必须以 `null` 输出：
 
 DTO 与 SQLite 字段分离，但字段含义必须一一映射；时间统一输出 UTC RFC 3339。Task ID、Session/Checkpoint/Note/History DTO 中的 `taskId` 和 Note/History 自增 ID 输出 JSON 整数；Session、Checkpoint、Import ID 与 SHA-256 输出字符串。人类模式中的 Task ID 显示为 `#<id>`。任何破坏兼容性的字段删除、改名或语义改变必须增加 `schemaVersion`；只新增字段时消费者仍必须能够忽略。
 
+### Git 读取预算
+
+所有Git读进程使用10秒预算、8MiB stdout与64KiB stderr流式上限，并终止所管理的进程组/Windows Job、回收直接子进程。Unix pipe采用非阻塞读取与停止标志，避免逃逸进程组的后代持有writer时reader join无限等待；这不保证杀死已经逃逸的Unix后代。CLI `task here/context`、`project here/context/source resolve`、`worktree status`、`doctor` 的同次查询共用一个总预算，不为每条Git命令重置。Task context/doctor保留观测失败警告或诊断语义，不将未知状态当作clean。Git写进程不受读取消作用域控制；mutation前后每次Git读取独立限时，后置失败仍按 `PARTIAL_EXTERNAL_STATE` 分类。该预算不是SQLite、原生文件I/O、进程清理或整个CLI操作的硬时间保证。
+
 ## 8. 退出码
 
 - `0`：成功；
@@ -299,7 +303,7 @@ DTO 与 SQLite 字段分离，但字段含义必须一一映射；时间统一�
 - 上下文包括目标、范围、验收、最新 Checkpoint 的完成项/决策/待办/风险、当前下一步、阻塞恢复条件与工作目录；不自动导出完整 Session 历史、Import 内容或全部 Notes。无 Checkpoint 时明确留空，Git 无法观察时 `worktreeStatus=null`，附带 `WORKTREE_OBSERVATION_FAILED` 警告。
 - 人类模式 `resume` 使用同一摘要格式；其既有创建 Session 和 CAS 语义不变。导出上下文不会执行 resume。
 
-## M4 补充命令
+## Notes与Hook命令
 
 ```bash
 taskctl task notes <task-ref> --json
@@ -309,4 +313,4 @@ taskctl hook list <session-id> --after 0 --limit 100 --json
 taskctl hook clear <session-id> --if-version <version> --yes
 ```
 
-notes 是只读查询。bind 使用 CAS 并写 History；hook ingest 按标准事件键去重，不使用 Task version、不改变执行状态。clear 使用 CAS，保留去重标记；没有可见事件时为当前版本 no-op。完整输入、容量和原生投递边界见 [M4/M5 合同](11-M4-M5实施合同.md)。
+notes 是只读查询。bind 使用 CAS 并写 History；hook ingest 按标准事件键去重，不使用 Task version、不改变执行状态。clear 使用 CAS，保留去重标记；没有可见事件时为当前版本 no-op。完整输入、容量和原生投递边界见 [Hook与HTTP合同](11-Hook与HTTP合同.md)。

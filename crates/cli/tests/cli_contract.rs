@@ -34,6 +34,42 @@ fn json_output(output: &Output) -> Value {
 }
 
 #[test]
+fn help_and_version_use_json_envelopes_without_opening_database() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("must-not-exist.db");
+    for (args, field) in [
+        (vec!["--json", "--help"], "help"),
+        (vec!["--help", "--json"], "help"),
+        (vec!["--json", "--version"], "version"),
+        (vec!["task", "--json", "--help"], "help"),
+        (vec!["task", "show", "--help", "--json"], "help"),
+        (
+            vec!["project", "source", "resolve", "--json", "--help"],
+            "help",
+        ),
+    ] {
+        let mut arguments = vec!["--database", database.to_str().unwrap()];
+        arguments.extend(args);
+        let output = run(&arguments);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.ends_with(b"\n"));
+        let value = json_output(&output);
+        assert_eq!(value["schemaVersion"], 2);
+        assert_eq!(value["ok"], true);
+        assert!(!value["data"][field].as_str().unwrap().is_empty());
+        assert_eq!(value["warnings"], json!([]));
+        assert!(value["error"].is_null());
+        assert!(!database.exists());
+    }
+    for option in ["--help", "--version"] {
+        let output = run(&[option]);
+        assert!(output.status.success());
+        assert!(serde_json::from_slice::<Value>(&output.stdout).is_err());
+    }
+}
+
+#[test]
 fn json_cli_supports_create_claim_checkpoint_resume_and_conflict() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("steward.db");

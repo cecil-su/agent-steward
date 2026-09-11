@@ -4,6 +4,8 @@ mod events;
 mod projects;
 #[cfg(test)]
 mod read_tests;
+#[cfg(test)]
+mod resource_tests;
 mod ui;
 use axum::{
     Extension, Json, Router,
@@ -41,6 +43,8 @@ pub struct ServerState {
     event_slots: Arc<Semaphore>,
     event_shutdown: Arc<std::sync::atomic::AtomicBool>,
     slots: Arc<Semaphore>,
+    read_slots: Arc<Semaphore>,
+    auth_slots: Arc<Semaphore>,
     connection_code: Arc<Mutex<Option<(String, Instant)>>>,
 }
 impl ServerState {
@@ -66,6 +70,8 @@ impl ServerState {
             event_slots: Arc::new(Semaphore::new(16)),
             event_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             slots: Arc::new(Semaphore::new(8)),
+            read_slots: Arc::new(Semaphore::new(6)),
+            auth_slots: Arc::new(Semaphore::new(4)),
             connection_code: Arc::new(Mutex::new(None)),
         }
     }
@@ -141,6 +147,17 @@ impl ServerState {
             &self.token,
             self.readonly_token.as_deref(),
         )
+    }
+
+    async fn role_async(&self, headers: HeaderMap) -> Result<Option<&'static str>, Response> {
+        if headers.contains_key("x-steward-token") {
+            return Ok(self.header_role(&headers));
+        }
+        if self.cookie(&headers).is_none() {
+            return Ok(None);
+        }
+        let state = self.clone();
+        auth_job(self, move || state.role(&headers)).await
     }
 
     fn header_role(&self, headers: &HeaderMap) -> Option<&'static str> {
@@ -257,7 +274,10 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
         if local {
             Some("admin")
         } else {
-            state.role(headers)
+            match state.role_async(headers.clone()).await {
+                Ok(role) => role,
+                Err(response) => return response,
+            }
         }
     } else {
         None
@@ -398,9 +418,19 @@ async fn run_read(
             self.0.cancel();
         }
     }
+    let Ok(read_permit) = state.read_slots.clone().try_acquire_owned() else {
+        return failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVER_BUSY",
+            "read capacity is busy; retry later",
+        );
+    };
     let control = steward_application::GitReadControl::default();
     let _cancel = CancelOnDrop(control.clone());
     run(state, move |s| {
+        // Retained by the worker, including cancellation cleanup or a busy SQLite
+        // query. HTTP future cancellation is not SQLite execution cancellation.
+        let _read_permit = read_permit;
         control.within(|| {
             control
                 .check()
@@ -448,6 +478,31 @@ async fn run(
     }
 }
 
+async fn auth_job<T: Send + 'static>(
+    state: &ServerState,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Response> {
+    let permit = state.auth_slots.clone().try_acquire_owned().map_err(|_| {
+        failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AUTH_STORE_UNAVAILABLE",
+            "authorization capacity is busy",
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+    .map_err(|_| {
+        failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AUTH_STORE_UNAVAILABLE",
+            "authorization storage operation failed",
+        )
+    })
+}
+
 fn browser_result(state: &ServerState, role: Option<&str>, id: Option<&str>) -> Response {
     let cookie = format!(
         "{}={}; Path=/api; HttpOnly; SameSite=Strict; Max-Age={}",
@@ -488,6 +543,12 @@ fn grant_browser(state: &ServerState, headers: &HeaderMap, role: &str) -> Respon
     }
 }
 async fn login(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let worker = state.clone();
+    auth_job(&state, move || login_blocking(worker, headers))
+        .await
+        .unwrap_or_else(|response| response)
+}
+fn login_blocking(state: ServerState, headers: HeaderMap) -> Response {
     match state.header_role(&headers) {
         Some(role) => grant_browser(&state, &headers, role),
         None => failure(
@@ -498,6 +559,12 @@ async fn login(State(state): State<ServerState>, headers: HeaderMap) -> Response
     }
 }
 async fn logout(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let worker = state.clone();
+    auth_job(&state, move || logout_blocking(worker, headers))
+        .await
+        .unwrap_or_else(|response| response)
+}
+fn logout_blocking(state: ServerState, headers: HeaderMap) -> Response {
     if let Some(id) = state.cookie(&headers)
         && state.browser_auth.revoke(id).is_err()
     {
@@ -510,6 +577,12 @@ async fn logout(State(state): State<ServerState>, headers: HeaderMap) -> Respons
     browser_result(&state, None, None)
 }
 async fn revoke_browsers(State(state): State<ServerState>) -> Response {
+    let worker = state.clone();
+    auth_job(&state, move || revoke_browsers_blocking(worker))
+        .await
+        .unwrap_or_else(|response| response)
+}
+fn revoke_browsers_blocking(state: ServerState) -> Response {
     if state.browser_auth.revoke_origin(&state.origin).is_err() {
         return failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -525,6 +598,12 @@ async fn access(Extension(access): Extension<Access>) -> Response {
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let worker = state.clone();
+    auth_job(&state, move || connect_blocking(worker, headers))
+        .await
+        .unwrap_or_else(|response| response)
+}
+fn connect_blocking(state: ServerState, headers: HeaderMap) -> Response {
     let supplied = headers.get("x-steward-connect");
     let mut pending = state.connection_code.lock().expect("connection code lock");
     let valid = headers.get_all("x-steward-connect").iter().count() == 1
@@ -883,7 +962,32 @@ fn confirm(value: bool) -> AppResult<()> {
     }
 }
 fn absolute(value: &str) -> AppResult<&FsPath> {
+    if value.contains('\0') {
+        return Err(AppError::invalid("path", "NUL is not a filesystem path"));
+    }
     let p = FsPath::new(value);
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if let Some(Component::Prefix(prefix)) = p.components().next() {
+            let device = match prefix.kind() {
+                Prefix::DeviceNS(_) => true,
+                Prefix::Verbatim(name) => ["GLOBALROOT", "pipe"]
+                    .iter()
+                    .any(|blocked| name.to_string_lossy().eq_ignore_ascii_case(blocked)),
+                Prefix::UNC(_, share) | Prefix::VerbatimUNC(_, share) => {
+                    share.to_string_lossy().eq_ignore_ascii_case("pipe")
+                }
+                _ => false,
+            };
+            if device {
+                return Err(AppError::invalid(
+                    "path",
+                    "device namespaces are not filesystem inputs",
+                ));
+            }
+        }
+    }
     if p.is_absolute() {
         Ok(p)
     } else {

@@ -163,6 +163,13 @@ impl Service {
             .map(|value| required("query", value))
             .transpose()?;
         let fields = validate_list_fields(&options.fields)?;
+        let page_size = options.page_size.unwrap_or(DEFAULT_TASK_PAGE_SIZE);
+        if !(1..=MAX_TASK_PAGE_SIZE).contains(&page_size) {
+            return Err(AppError::invalid(
+                "pageSize",
+                format!("must be between 1 and {MAX_TASK_PAGE_SIZE}"),
+            ));
+        }
         let mut connection = self.connection()?;
         let tx = connection.transaction().map_err(AppError::from_sqlite)?;
         let project_id = options
@@ -177,13 +184,6 @@ impl Service {
             query.as_deref(),
             project_key.as_deref(),
         );
-        let page_size = options.page_size.unwrap_or(DEFAULT_TASK_PAGE_SIZE);
-        if !(1..=MAX_TASK_PAGE_SIZE).contains(&page_size) {
-            return Err(AppError::invalid(
-                "pageSize",
-                format!("must be between 1 and {MAX_TASK_PAGE_SIZE}"),
-            ));
-        }
         let cursor = options
             .cursor
             .as_deref()

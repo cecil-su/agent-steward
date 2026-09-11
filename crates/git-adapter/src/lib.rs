@@ -171,8 +171,36 @@ pub fn acquire_worktree_lock(
             .ok_or_else(|| GitError::PathIdentity("user data directory is unavailable".into()))?
             .join("locks"),
     };
-    fs::create_dir_all(&lock_root)?;
-    steward_core::set_private_dir(&lock_root)?;
+    if let Some(parent) = lock_root.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::create_dir(&lock_root) {
+        Ok(()) => steward_core::set_private_dir(&lock_root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Never rewrite a caller-owned directory's ACL (or propagate it to
+            // unrelated descendants). Existing roots must already be private.
+            let metadata = fs::symlink_metadata(&lock_root)?;
+            let mut private = metadata.is_dir() && !metadata.file_type().is_symlink();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                private &= metadata.permissions().mode() & 0o077 == 0
+                    && metadata.uid() == unsafe { libc::geteuid() };
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                private &= metadata.file_attributes() & 0x400 == 0;
+                private &= steward_core::private_acl_is_protected(&lock_root)?;
+            }
+            if !private {
+                return Err(GitError::SafetyRefused(
+                    "existing worktree lock directory must be private and not a link".into(),
+                ));
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
     let database = if path_exists(database_path)? {
         canonicalize_existing(database_path)?
     } else {
@@ -290,7 +318,7 @@ pub fn paths_equivalent(left: &Path, right: &Path) -> Result<bool, GitError> {
     let left_exists = path_exists(left)?;
     let right_exists = path_exists(right)?;
     if left_exists && right_exists {
-        return Ok(identify_existing(left)? == identify_existing(right)?);
+        return Ok(identify_existing(left)?.same_object(&identify_existing(right)?));
     }
     // Missing paths have no object identity: only the exact canonical target
     // spelling above can establish equality. Never probe or emulate name rules.
@@ -490,6 +518,14 @@ pub fn local_branch_exists(repo: &Path, branch: &str) -> Result<bool, GitError> 
 }
 
 pub fn list_worktrees(repo: &Path) -> Result<Vec<ObservedWorktree>, GitError> {
+    let mut entries = raw_worktrees(repo)?;
+    for entry in &mut entries {
+        entry.path = canonicalize_target(&entry.path)?;
+    }
+    Ok(entries)
+}
+
+fn raw_worktrees(repo: &Path) -> Result<Vec<ObservedWorktree>, GitError> {
     let output = git_output(
         repo,
         ["worktree", "list", "--porcelain", "-z"],
@@ -509,7 +545,7 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<ObservedWorktree>, GitError> {
                 result.push(item);
             }
             current = Some(ObservedWorktree {
-                path: canonicalize_target(Path::new(path))?,
+                path: PathBuf::from(path),
                 branch: None,
                 head: None,
             });
@@ -531,14 +567,33 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<ObservedWorktree>, GitError> {
 
 pub fn find_worktree(repo: &Path, path: &Path) -> Result<Option<ObservedWorktree>, GitError> {
     let target = canonicalize_target(path)?;
-    let worktrees = list_worktrees(repo)?;
-    if let Some(item) = worktrees.iter().find(|item| item.path == target) {
-        return Ok(Some(item.clone()));
+    let worktrees = raw_worktrees(repo)?;
+    // Select exact spelling without probing unrelated filesystem locations.
+    if let Some(item) = worktrees
+        .iter()
+        .find(|item| git_path_argument(&item.path) == git_path_argument(&target))
+    {
+        let mut item = item.clone();
+        item.path = target;
+        return Ok(Some(item));
     }
-    for item in worktrees {
-        if paths_equivalent(&item.path, &target)? {
-            return Ok(Some(item));
+    let mut observation_error = None;
+    for mut item in worktrees {
+        match paths_equivalent(&item.path, &target) {
+            Ok(true) => {
+                item.path = target;
+                return Ok(Some(item));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                observation_error.get_or_insert(error);
+            }
         }
+    }
+    // An unrelated broken entry cannot poison a positive match, but failure to
+    // observe it is never evidence that the requested registration is absent.
+    if let Some(error) = observation_error {
+        return Err(error);
     }
     Ok(None)
 }
@@ -548,9 +603,21 @@ pub fn find_worktree_registration(
     path: &Path,
 ) -> Result<Option<ObservedWorktree>, GitError> {
     let target = canonicalize_target(path)?;
-    Ok(list_worktrees(repo)?
-        .into_iter()
-        .find(|item| item.path == target))
+    let target_missing = !path_exists(&target)?;
+    let mut ambiguous_missing_registration = false;
+    for mut item in raw_worktrees(repo)? {
+        if paths_equivalent(&item.path, &target)? {
+            item.path = canonicalize_target(&item.path)?;
+            return Ok(Some(item));
+        }
+        // Missing objects have no native identity. Different spelling does not
+        // disprove an alias (Windows case/8.3, or an unavailable mount).
+        ambiguous_missing_registration |= target_missing && !path_exists(&item.path)?;
+    }
+    if ambiguous_missing_registration {
+        return Err(GitError::PathIdentity("cannot exclude a missing worktree registration alias; inspect and reconcile Git registrations before detaching".into()));
+    }
+    Ok(None)
 }
 
 pub fn invoke_worktree_add(repo: &Path, path: &Path, branch: &str) -> GitInvocation {
@@ -996,11 +1063,60 @@ mod tests {
     fn second_task_lock_is_busy() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("db.sqlite");
-        let _first = acquire_worktree_lock(&database, "T-1", Some(temp.path())).unwrap();
+        let locks = temp.path().join("locks");
+        let _first = acquire_worktree_lock(&database, "T-1", Some(&locks)).unwrap();
         assert!(matches!(
-            acquire_worktree_lock(&database, "T-1", Some(temp.path())),
+            acquire_worktree_lock(&database, "T-1", Some(&locks)),
             Err(GitError::OperationBusy)
         ));
+    }
+
+    #[test]
+    fn existing_lock_root_permissions_are_not_rewritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("caller-owned");
+        fs::create_dir(&root).unwrap();
+        let child = root.join("unrelated");
+        fs::write(&child, b"preserve").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        assert!(!steward_core::private_acl_is_protected(&root).unwrap());
+        assert!(matches!(
+            acquire_worktree_lock(&temp.path().join("db.sqlite"), "1", Some(&root)),
+            Err(GitError::SafetyRefused(_))
+        ));
+        #[cfg(windows)]
+        assert!(!steward_core::private_acl_is_protected(&root).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert_eq!(fs::read(&child).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn hard_link_aliases_compare_by_object_not_canonical_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let alias = temp.path().join("alias");
+        fs::write(&first, b"same object").unwrap();
+        fs::hard_link(&first, &alias).unwrap();
+        assert_ne!(
+            canonicalize_existing(&first).unwrap(),
+            canonicalize_existing(&alias).unwrap()
+        );
+        assert!(paths_equivalent(&first, &alias).unwrap());
+        fs::remove_file(&alias).unwrap();
+        fs::write(&alias, b"same object").unwrap();
+        assert!(!paths_equivalent(&first, &alias).unwrap());
     }
 
     #[cfg(windows)]

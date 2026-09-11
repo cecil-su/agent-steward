@@ -81,7 +81,15 @@ pub(crate) async fn subscribe(
             {
                 return None;
             }
-            if !subscription.local && subscription.state.role(&subscription.headers).is_none() {
+            if !subscription.local
+                && subscription
+                    .state
+                    .role_async(subscription.headers.clone())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none()
+            {
                 return Some((
                     Ok(Event::default().event("unauthorized").data("logout")),
                     None,

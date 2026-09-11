@@ -23,6 +23,25 @@ fn child() {
                 .unwrap();
         }
         "sleep" => std::thread::sleep(Duration::from_secs(30)),
+        #[cfg(unix)]
+        "escaped" => {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = fixture("escaped-holder");
+            cmd.process_group(0);
+            let child = cmd.spawn().unwrap();
+            std::mem::forget(child);
+        }
+        #[cfg(unix)]
+        "escaped-holder" => {
+            let release =
+                std::path::PathBuf::from(std::env::var_os("STEWARD_RELEASE_PIPE").unwrap());
+            std::fs::write(release.with_extension("ready"), b"ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !release.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::write(release.with_extension("done"), b"done").unwrap();
+        }
         "descendant" => {
             let mut cmd = fixture("sleep");
             let child = cmd.spawn().unwrap();
@@ -126,6 +145,55 @@ fn descendant_pipe_holder_is_terminated_even_after_parent_exits() {
         }
     }
 }
+#[cfg(unix)]
+#[test]
+fn escaped_group_pipe_holder_does_not_prevent_reader_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = temp.path().join("release");
+    let mut command = fixture("escaped");
+    command.env("STEWARD_RELEASE_PIPE", &release);
+    let start = Instant::now();
+    let result = bounded_output(
+        &mut command,
+        &GitReadControl::new(Duration::from_millis(800)),
+        4096,
+        4096,
+    );
+    let elapsed = start.elapsed();
+    // Always release the finite-lived escaped fixture, even if assertions fail.
+    std::fs::write(&release, b"release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !release.with_extension("done").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(release.with_extension("ready").exists());
+    assert!(release.with_extension("done").exists());
+    assert!(matches!(result, Err(GitError::ReadLimit(_))));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "reader cleanup waited for escaped writer: {elapsed:?}"
+    );
+}
+
+#[test]
+fn nonblocking_reader_checks_stop_between_would_block_reads() {
+    struct Idle;
+    impl Read for Idle {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_stop = stop.clone();
+    let reader = std::thread::spawn(move || read_stream(Idle, 10, reader_stop));
+    std::thread::sleep(Duration::from_millis(10));
+    stop.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        reader.join().unwrap(),
+        Err(GitError::ReadLimit(_))
+    ));
+}
+
 #[test]
 fn generic_git_queries_use_the_installed_scope_limits() {
     let control = GitReadControl::new(Duration::from_secs(5));
@@ -139,6 +207,14 @@ fn generic_git_queries_use_the_installed_scope_limits() {
     assert!(matches!(
         result,
         Err(GitError::ReadLimit("Git read deadline exceeded"))
+    ));
+}
+
+#[test]
+fn unscoped_generic_queries_are_also_bounded() {
+    assert!(matches!(
+        output_if_scoped(&mut fixture("large-stdout")),
+        Err(GitError::ReadLimit("Git read output limit exceeded"))
     ));
 }
 

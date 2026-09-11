@@ -150,6 +150,25 @@ async fn refuses_bad_packages_and_keeps_last_snapshot() {
     assert_eq!(status(&restarted).await["uiVersion"], "embedded");
 }
 #[tokio::test]
+async fn historical_cache_keeps_verified_bytes_and_evicts_after_two_packages() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let app = fixture(root);
+    let a = package(root, "cache-a", 4);
+    let b = package(root, "cache-b", 4);
+    let c = package(root, "cache-c", 4);
+    let url = |id: &str| format!("/ui/releases/{id}/app.js");
+    assert_eq!(get(&app, &url(&a)).await.2, "// cache-a");
+    fs::write(root.join("releases").join(&a).join("app.js"), "tampered").unwrap();
+    assert_eq!(get(&app, &url(&a)).await.2, "// cache-a");
+    assert_eq!(get(&app, &url(&b)).await.0, StatusCode::OK);
+    assert_eq!(get(&app, &url(&c)).await.0, StatusCode::OK);
+    assert_eq!(get(&app, &url(&a)).await.0, StatusCode::NOT_FOUND);
+    // Failed validation must not cache untrusted bytes or evict trusted entries.
+    assert_eq!(get(&app, &url(&b)).await.2, "// cache-b");
+}
+
+#[tokio::test]
 async fn checks_paths_manifest_identity_size_and_security_boundary() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

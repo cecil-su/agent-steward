@@ -63,13 +63,11 @@ impl GitReadControl {
     }
 }
 
-// Existing mutation pre/postcondition paths keep their original semantics. Only
-// a read request installs the shared cancellation scope for generic Git queries.
+// Generic queries are always bounded, including mutation pre/postcondition reads.
+// Without a request scope each query gets a fresh budget, so time spent in a Git
+// mutation cannot exhaust the budget needed to classify its external outcome.
 pub(crate) fn output_if_scoped(command: &mut Command) -> Result<Output, GitError> {
-    match CONTROL.with(|c| c.borrow().clone()) {
-        Some(control) => bounded_output(command, &control, STDOUT_LIMIT, STDERR_LIMIT),
-        None => Ok(command.output()?),
-    }
+    output(command)
 }
 
 pub(crate) fn output(command: &mut Command) -> Result<Output, GitError> {
@@ -77,12 +75,23 @@ pub(crate) fn output(command: &mut Command) -> Result<Output, GitError> {
     bounded_output(command, &control, STDOUT_LIMIT, STDERR_LIMIT)
 }
 
-fn read_stream(mut stream: impl Read, limit: usize) -> Result<Vec<u8>, GitError> {
+fn read_stream(
+    mut stream: impl Read,
+    limit: usize,
+    stopped: Arc<AtomicBool>,
+) -> Result<Vec<u8>, GitError> {
     let mut data = Vec::new();
     let mut buffer = [0; 8192];
     loop {
+        if stopped.load(Ordering::Relaxed) {
+            return Err(GitError::ReadLimit("Git read stopped"));
+        }
         let count = match stream.read(&mut buffer) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            }
             result => result?,
         };
         if count == 0 {
@@ -109,13 +118,30 @@ fn bounded_output(
     let mut process = ProcessTree::spawn(command)?;
     let stdout = process.child.stdout.take().expect("piped stdout");
     let stderr = process.child.stderr.take().expect("piped stderr");
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // Escaped process groups may retain pipe writers. Readers must remain
+        // stoppable independently of process-group termination succeeding.
+        for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags == -1
+                || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+        }
+    }
+    let stopped = Arc::new(AtomicBool::new(false));
+    let out_stopped = stopped.clone();
+    let err_stopped = stopped.clone();
     let (sender, receiver) = mpsc::channel();
     let out_sender = sender.clone();
     let out_thread = std::thread::spawn(move || {
-        let _ = out_sender.send((true, read_stream(stdout, stdout_limit)));
+        let _ = out_sender.send((true, read_stream(stdout, stdout_limit, out_stopped)));
     });
     let err_thread = std::thread::spawn(move || {
-        let _ = sender.send((false, read_stream(stderr, stderr_limit)));
+        let _ = sender.send((false, read_stream(stderr, stderr_limit, err_stopped)));
     });
     let mut out = None;
     let mut err = None;
@@ -140,7 +166,10 @@ fn bounded_output(
             }
         }
     })();
-    // Kill descendants too, including inherited-pipe holders; then reap before releasing a caller's slot.
+    // Stop Unix readers even if a descendant escaped the process group. Windows
+    // uses its non-breakaway Job to close inherited writers. Reap before releasing
+    // the caller's slot; this does not claim containment of escaped Unix groups.
+    stopped.store(true, Ordering::Relaxed);
     process.terminate();
     let status = process.child.wait();
     let _ = out_thread.join();

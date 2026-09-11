@@ -582,7 +582,12 @@ struct Envelope {
 }
 
 fn main() -> ExitCode {
-    let json_requested = std::env::args_os().any(|argument| argument == "--json");
+    // No CLI value accepts a leading hyphen: such values require --name=value
+    // or the positional terminator. Match only the standalone flag before --.
+    let json_requested = std::env::args_os()
+        .skip(1)
+        .take_while(|argument| argument != "--")
+        .any(|argument| argument == "--json");
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -590,7 +595,23 @@ fn main() -> ExitCode {
                 error.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
-                let _ = error.print();
+                if json_requested {
+                    let field = if error.kind() == clap::error::ErrorKind::DisplayVersion {
+                        "version"
+                    } else {
+                        "help"
+                    };
+                    let envelope = Envelope {
+                        schema_version: JSON_SCHEMA_VERSION,
+                        ok: true,
+                        data: Some(json!({field: error.to_string()})),
+                        warnings: Vec::new(),
+                        error: None,
+                    };
+                    println!("{}", serde_json::to_string(&envelope).unwrap());
+                } else {
+                    let _ = error.print();
+                }
                 return ExitCode::SUCCESS;
             }
             return render_error(
@@ -606,6 +627,13 @@ fn main() -> ExitCode {
             );
         }
     };
+    if cli.verbose {
+        eprintln!(
+            "taskctl {}: command parsed; JSON output={}",
+            env!("CARGO_PKG_VERSION"),
+            cli.json
+        );
+    }
     // Offline imports must not even fall back to inspecting the default database path.
     if matches!(cli.command, TopCommand::Database { .. }) && cli.database.is_none() {
         return render_error(
@@ -632,7 +660,13 @@ fn main() -> ExitCode {
     };
     let custom_database = cli.database.is_some();
     let service = Service::new(database);
-    let result = dispatch(&cli, &service);
+    // Query commands share one total Git budget. Mutations use bounded individual
+    // pre/postcondition reads, not a deadline spanning prompts or Git writes.
+    let result = if has_shared_git_read_budget(&cli.command) {
+        git_adapter::GitReadControl::default().within(|| dispatch(&cli, &service))
+    } else {
+        dispatch(&cli, &service)
+    };
     let permission_warnings = database_permission_warning(service.database_path(), custom_database)
         .into_iter()
         .collect::<Vec<_>>();
@@ -643,6 +677,26 @@ fn main() -> ExitCode {
         }
         Err(error) => render_error(error, cli.json, permission_warnings),
     }
+}
+
+fn has_shared_git_read_budget(command: &TopCommand) -> bool {
+    matches!(
+        command,
+        TopCommand::Doctor
+            | TopCommand::Task {
+                command: TaskCommand::Here | TaskCommand::Context { .. }
+            }
+            | TopCommand::Worktree {
+                command: WorktreeCommand::Status { .. }
+            }
+            | TopCommand::Project {
+                command: ProjectCommand::Here { .. }
+                    | ProjectCommand::Context { .. }
+                    | ProjectCommand::Source {
+                        command: SourceCommand::Resolve { .. }
+                    }
+            }
+    )
 }
 
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
@@ -751,7 +805,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             } => {
                 if !cli.yes {
                     confirm(
-                        false,
+                        cli.json,
                         &format!(
                             "Clear observations for Session {session_id}; deduplication markers remain"
                         ),
@@ -1067,7 +1121,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 } => {
                     if !cli.yes {
                         let imported = service.session_import_metadata(import_id)?;
-                        confirm(false, &session_import_remove_confirmation(&imported))?;
+                        confirm(cli.json, &session_import_remove_confirmation(&imported))?;
                     }
                     service.session_import_remove(import_id, *if_version)
                 }
@@ -1100,7 +1154,7 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     let numeric_id = service.task_show(task_id)?.data["task"]["id"]
                         .as_i64()
                         .expect("serialized Task id must be an integer");
-                    confirm(false, &worktree_remove_confirmation(numeric_id, path))?;
+                    confirm(cli.json, &worktree_remove_confirmation(numeric_id, path))?;
                 }
                 service.worktree_remove(task_id, *if_version)
             }
@@ -1142,16 +1196,66 @@ fn parse_task_fields(value: Option<&str>) -> Result<Vec<String>, AppError> {
 }
 
 fn read_input(path: &Path) -> Result<String, AppError> {
-    let bytes = if path == Path::new("-") {
-        let mut bytes = Vec::new();
-        io::stdin()
-            .read_to_end(&mut bytes)
-            .map_err(|error| AppError::invalid("input", format!("cannot read stdin: {error}")))?;
-        bytes
+    // Larger than the dedicated rule/profile limits; also bounds task descriptions.
+    const LIMIT: u64 = 16 * 1024 * 1024;
+    let reader: Box<dyn Read> = if path == Path::new("-") {
+        Box::new(io::stdin())
     } else {
-        fs::read(path)
-            .map_err(|error| AppError::invalid("input", format!("cannot read input: {error}")))?
+        #[cfg(windows)]
+        {
+            use std::path::{Component, Prefix};
+            if let Some(Component::Prefix(prefix)) = path.components().next() {
+                let device = match prefix.kind() {
+                    Prefix::DeviceNS(_) => true,
+                    Prefix::Verbatim(name) => ["GLOBALROOT", "pipe"]
+                        .iter()
+                        .any(|blocked| name.to_string_lossy().eq_ignore_ascii_case(blocked)),
+                    Prefix::UNC(_, share) | Prefix::VerbatimUNC(_, share) => {
+                        share.to_string_lossy().eq_ignore_ascii_case("pipe")
+                    }
+                    _ => false,
+                };
+                if device {
+                    return Err(AppError::invalid(
+                        "input",
+                        "regular file required; device namespaces are not inputs",
+                    ));
+                }
+            }
+        }
+        if !fs::metadata(path)
+            .map_err(|_| AppError::invalid("input", "cannot inspect input file"))?
+            .is_file()
+        {
+            return Err(AppError::invalid("input", "regular file required"));
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| AppError::invalid("input", "cannot open input file"))?;
+        if !file
+            .metadata()
+            .map_err(|_| AppError::invalid("input", "cannot inspect input file"))?
+            .is_file()
+        {
+            return Err(AppError::invalid("input", "regular file required"));
+        }
+        Box::new(file)
     };
+    let mut bytes = Vec::new();
+    reader
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AppError::invalid("input", "cannot read input"))?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(AppError::invalid("input", "input exceeds 16 MiB"));
+    }
     let input = String::from_utf8(bytes)
         .map_err(|error| AppError::invalid("input", format!("must be valid UTF-8: {error}")))?;
     if input.trim().is_empty() {
@@ -1248,14 +1352,11 @@ fn worktree_remove_confirmation(task_id: i64, path: &str) -> String {
     format!("remove registered Worktree\n  Task ID: #{task_id}\n  Worktree path: {path}")
 }
 
-fn confirm(yes: bool, operation: &str) -> Result<(), AppError> {
-    if yes {
-        return Ok(());
-    }
-    if !io::stdin().is_terminal() {
+fn confirm(json: bool, operation: &str) -> Result<(), AppError> {
+    if json || !io::stdin().is_terminal() {
         return Err(AppError::invalid(
             "yes",
-            "--yes is required in a non-interactive environment",
+            "--yes is required in JSON mode or a non-interactive environment",
         ));
     }
     eprint!("Confirm {operation}? [y/N] ");
@@ -1669,7 +1770,11 @@ fn render_error(error: AppError, json_output: bool, warnings: Vec<Warning>) -> E
             eprintln!("warning[{}]: {}", warning.code, warning.message);
         }
     }
-    ExitCode::from(exit_code as u8)
+    checked_exit_code(exit_code)
+}
+
+fn checked_exit_code(exit_code: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(exit_code).unwrap_or(10))
 }
 
 fn default_database_path() -> Option<PathBuf> {
@@ -1679,6 +1784,74 @@ fn default_database_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_codes_never_wrap_into_success() {
+        for code in [2, 4, 5, 6, 10, 255] {
+            assert_eq!(checked_exit_code(code), ExitCode::from(code as u8));
+        }
+        for code in [-1, 256, 512, i32::MAX] {
+            assert_eq!(checked_exit_code(code), ExitCode::from(10));
+        }
+    }
+
+    #[test]
+    fn git_query_routes_share_a_budget_but_mutations_do_not() {
+        for arguments in [
+            vec!["taskctl", "doctor"],
+            vec!["taskctl", "task", "here"],
+            vec!["taskctl", "task", "context", "1"],
+            vec!["taskctl", "project", "here"],
+            vec!["taskctl", "project", "context", "1", "--source", "1"],
+            vec!["taskctl", "project", "source", "resolve", "1", "1"],
+            vec!["taskctl", "worktree", "status", "1"],
+        ] {
+            assert!(has_shared_git_read_budget(
+                &Cli::try_parse_from(arguments).unwrap().command
+            ));
+        }
+        for arguments in [
+            vec!["taskctl", "worktree", "remove", "1", "--if-version", "1"],
+            vec![
+                "taskctl",
+                "worktree",
+                "create",
+                "1",
+                "--repo",
+                "repo",
+                "--path",
+                "worktree",
+                "--branch",
+                "main",
+                "--if-version",
+                "1",
+            ],
+            vec![
+                "taskctl",
+                "task",
+                "resume",
+                "1",
+                "--session",
+                "new",
+                "--if-version",
+                "1",
+            ],
+            vec![
+                "taskctl",
+                "task",
+                "checkpoint",
+                "1",
+                "--session",
+                "current",
+                "--if-version",
+                "1",
+            ],
+        ] {
+            assert!(!has_shared_git_read_budget(
+                &Cli::try_parse_from(arguments).unwrap().command
+            ));
+        }
+    }
 
     #[test]
     fn destructive_confirmation_describes_the_exact_targets() {

@@ -93,8 +93,12 @@ it('holds an uncertain one-use exchange for GET verification without replay', as
   expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   expect(location.hash).toBe('');
 });
-it('automatically restores existing cookie authorization with GET-only requests', async () => {
-  const transport = mount();
+it.each([
+  { role: 'reader', local: false },
+  { role: 'admin', local: false },
+  { role: 'admin', local: true },
+])('restores $role/local=$local with GET-only task and project browsing', async (access) => {
+  const transport = mount(path => path === '/api/access' ? reply({ ...access, projectManagement: true }) : undefined);
   expect(screen.getByText('正在检查授权…')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '连接' })).not.toBeInTheDocument();
   await connect();
@@ -102,6 +106,11 @@ it('automatically restores existing cookie authorization with GET-only requests'
   await screen.findByText('fixture');
   expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
   expect(screen.queryByRole('button', { name: /新建|编辑|改名|关闭任务|保存/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '项目' }));
+  fireEvent.click(await screen.findByRole('button', { name: /隔离测试项目/ }));
+  await screen.findByRole('button', { name: '查看关联任务' });
+  expect(screen.queryByRole('button', { name: /新建|编辑|改名|保存|登记|解除/ })).not.toBeInTheDocument();
+  expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
 });
 it('restores local authorization under StrictMode without showing the login form', async () => {
   const transport = mount((path) => path === '/api/access' ? reply({ role: 'admin', local: true, projectManagement: true }) : undefined, true);
@@ -145,6 +154,33 @@ it('restores the original brand and task views without instructional banners', a
     await waitFor(() => expect(screen.getByRole('button', { name: '刷新' })).not.toBeDisabled());
     expect(transport.mock.calls.some(([path]) => String(path).includes(parameter))).toBe(true);
   }
+});
+it('keeps loaded closed-task pages on refresh failure and never mixes them into another view', async () => {
+  let failSecondPage = false;
+  const transport = mount(path => {
+    if (!path.startsWith('/api/tasks?')) return;
+    const params = new URL(path, 'http://fixture').searchParams;
+    if (params.get('status') !== 'closed') return;
+    expect(params.has('view')).toBe(false);
+    if (params.get('cursor') === 'next') {
+      if (failSecondPage) return Promise.reject(new Error('synthetic read failure'));
+      return reply({ tasks: [{ ...task, id: 41, title: '第二页关闭任务', status: 'closed' }], hasMore: false, nextCursor: null });
+    }
+    return reply({ tasks: [{ ...task, status: 'closed' }], hasMore: true, nextCursor: 'next' });
+  });
+  await connect();
+  fireEvent.click(screen.getByRole('button', { name: '已关闭' }));
+  const more = await screen.findByRole('button', { name: '加载更多' });
+  await waitFor(() => expect(more).not.toBeDisabled()); fireEvent.click(more);
+  await screen.findByRole('button', { name: /#41/ });
+  await waitFor(() => expect(screen.getByRole('button', { name: '刷新' })).not.toBeDisabled());
+  failSecondPage = true; fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+  await screen.findByRole('alert');
+  expect(screen.getByRole('button', { name: /#40/ })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /#41/ })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '未关闭' }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: /#41/ })).not.toBeInTheDocument());
+  expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
 });
 it('changing a search key removes previous rows while a replacement request is pending', async () => {
   let finish: (response: Response) => void = () => {};

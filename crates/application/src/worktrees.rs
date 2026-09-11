@@ -103,7 +103,8 @@ impl Service {
         let target_exists = git_adapter::path_exists(&target);
         let created = match (observed, target_exists) {
             (Ok(Some(item)), Ok(true))
-                if item.path == target && item.branch.as_deref() == Some(branch) =>
+                if git_adapter::paths_equivalent(&item.path, &target).unwrap_or(false)
+                    && item.branch.as_deref() == Some(branch) =>
             {
                 item
             }
@@ -1094,19 +1095,40 @@ fn created_worktree_database_failure(
     task_id: i64,
     repository: &Path,
     created: &git_adapter::ObservedWorktree,
-    expected: i64,
+    _expected: i64,
     phase: &str,
     database_error: Value,
 ) -> AppError {
+    let recovery = if service.database_path().is_file()
+        && service
+            .connection()
+            .and_then(|connection| load_task(&connection, task_id))
+            .is_ok()
+    {
+        git_adapter::repository_info(repository).ok().map(|info| {
+            adopt_recovery_for_created_worktree(
+                service,
+                task_id,
+                repository,
+                &info.common_dir,
+                &created.path,
+            )
+        })
+    } else {
+        None
+    }
+    .unwrap_or_else(|| service.recovery_command(["doctor"]));
     AppError::partial_with_diagnostics(
         repository.to_str(),
         created.path.to_str(),
-        observed_git_state(Some(created), true),
+        Value::Null,
         PartialDatabaseState::Unchanged,
-        adopt_recovery_command(service, task_id, repository, &created.path, expected),
+        recovery,
         json!({
             "phase": phase,
             "databaseError": database_error,
+            "lastObservedGitState": observed_git_state(Some(created), true),
+            "recoveryInstruction": "Stop; restore database access, then reread the task and Git state before choosing a versioned recovery command.",
         }),
     )
 }
@@ -1116,19 +1138,44 @@ fn removed_worktree_database_failure(
     task_id: i64,
     repository: &Path,
     worktree: &Path,
-    expected: i64,
+    _expected: i64,
     phase: &str,
     database_error: Value,
 ) -> AppError {
+    let recovery = if service.database_path().is_file() {
+        service
+            .connection()
+            .and_then(|connection| load_task(&connection, task_id))
+            .ok()
+            .and_then(|task| {
+                let (repo, common, branch, path) = registered_refs(&task).ok()?;
+                if Path::new(repo) != repository || Path::new(path) != worktree {
+                    return None;
+                }
+                Some(detach_recovery_after_update(
+                    service,
+                    task_id,
+                    repository,
+                    Path::new(common),
+                    branch,
+                    worktree,
+                ))
+            })
+    } else {
+        None
+    }
+    .unwrap_or_else(|| service.recovery_command(["doctor"]));
     AppError::partial_with_diagnostics(
         repository.to_str(),
         worktree.to_str(),
-        observed_git_state(None, false),
+        Value::Null,
         PartialDatabaseState::Unchanged,
-        detach_recovery_command(service, task_id, worktree, expected),
+        recovery,
         json!({
             "phase": phase,
             "databaseError": database_error,
+            "lastObservedGitState": observed_git_state(None, false),
+            "recoveryInstruction": "Stop; restore database access, then reread the task and Git registrations before choosing a versioned recovery command.",
         }),
     )
 }
@@ -1147,23 +1194,6 @@ fn adopt_recovery_command(
         "--repo".to_owned(),
         repository.to_string_lossy().into_owned(),
         "--path".to_owned(),
-        worktree.to_string_lossy().into_owned(),
-        "--if-version".to_owned(),
-        expected.to_string(),
-    ])
-}
-
-fn detach_recovery_command(
-    service: &Service,
-    task_id: i64,
-    worktree: &Path,
-    expected: i64,
-) -> RecoveryCommand {
-    service.recovery_command(vec![
-        "worktree".to_owned(),
-        "detach".to_owned(),
-        task_id.to_string(),
-        "--expected-path".to_owned(),
         worktree.to_string_lossy().into_owned(),
         "--if-version".to_owned(),
         expected.to_string(),
@@ -1234,6 +1264,17 @@ fn detach_recovery_after_update(
     branch: &str,
     worktree: &Path,
 ) -> RecoveryCommand {
+    if git_adapter::path_exists(worktree).unwrap_or(true)
+        || !matches!(
+            git_adapter::find_worktree_registration(repository, worktree),
+            Ok(None)
+        )
+        || !git_adapter::repository_info(repository).is_ok_and(|info| {
+            git_adapter::paths_equivalent(&info.common_dir, common_dir).unwrap_or(false)
+        })
+    {
+        return service.recovery_command(["doctor"]);
+    }
     let task = service
         .connection()
         .ok()
@@ -1301,17 +1342,13 @@ fn validated_adopt_recovery(
             .filter(task_without_worktree_references)
     });
     match task {
-        Some(task) => service.recovery_command(vec![
-            "worktree".to_owned(),
-            "adopt".to_owned(),
-            task_id.to_string(),
-            "--repo".to_owned(),
-            info.repository_path.to_string_lossy().into_owned(),
-            "--path".to_owned(),
-            worktree.to_string_lossy().into_owned(),
-            "--if-version".to_owned(),
-            task.version.to_string(),
-        ]),
+        Some(task) => adopt_recovery_command(
+            service,
+            task_id,
+            &info.repository_path,
+            worktree,
+            task.version,
+        ),
         None => service.recovery_command(["doctor"]),
     }
 }
@@ -1457,9 +1494,9 @@ mod tests {
             create_error.body.details["worktreePath"],
             worktree.to_string_lossy().as_ref()
         );
-        assert_eq!(create_error.body.details["gitState"]["pathExists"], true);
+        assert!(create_error.body.details["gitState"].is_null());
         assert_eq!(
-            create_error.body.details["gitState"]["registeredByGit"],
+            create_error.body.details["diagnostics"]["lastObservedGitState"]["pathExists"],
             true
         );
         assert_eq!(create_error.body.details["databaseState"], "unchanged");
@@ -1471,14 +1508,19 @@ mod tests {
             create_error.body.details["diagnostics"]["databaseError"]["details"]["databaseVersion"],
             99
         );
-        assert_eq!(create_error.body.details["recommendedArgs"][4], "adopt");
         assert_eq!(
             create_error.body.details["recommendedArgs"]
                 .as_array()
                 .unwrap()
                 .last()
                 .unwrap(),
-            "7"
+            "doctor"
+        );
+        assert!(
+            !create_error.body.details["recommendedCommand"]
+                .as_str()
+                .unwrap()
+                .contains("--if-version")
         );
 
         let remove_error = removed_worktree_database_failure(
@@ -1495,20 +1537,25 @@ mod tests {
             remove_error.body.details["worktreePath"],
             worktree.to_string_lossy().as_ref()
         );
-        assert_eq!(remove_error.body.details["gitState"]["pathExists"], false);
+        assert!(remove_error.body.details["gitState"].is_null());
         assert_eq!(
-            remove_error.body.details["gitState"]["registeredByGit"],
+            remove_error.body.details["diagnostics"]["lastObservedGitState"]["pathExists"],
             false
         );
         assert_eq!(remove_error.body.details["databaseState"], "unchanged");
-        assert_eq!(remove_error.body.details["recommendedArgs"][4], "detach");
         assert_eq!(
             remove_error.body.details["recommendedArgs"]
                 .as_array()
                 .unwrap()
                 .last()
                 .unwrap(),
-            "8"
+            "doctor"
+        );
+        assert!(
+            !remove_error.body.details["recommendedCommand"]
+                .as_str()
+                .unwrap()
+                .contains("--if-version")
         );
     }
 
@@ -1597,7 +1644,11 @@ mod tests {
             )
             .unwrap();
         let repository = temp.path().join("repository");
-        let common_dir = temp.path().join("common");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, ["init", "-b", "main"]);
+        let common_dir = git_adapter::repository_info(&repository)
+            .unwrap()
+            .common_dir;
         let worktree = temp.path().join("worktree");
         service
             .connection()
@@ -1885,6 +1936,25 @@ mod tests {
     }
 
     #[test]
+    fn owner_lookup_recognizes_different_names_for_one_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = Service::new(temp.path().join("state.sqlite"));
+        service.task_create_minimal().unwrap();
+        let first = temp.path().join("first");
+        let alias = temp.path().join("alias");
+        fs::write(&first, b"identity fixture").unwrap();
+        fs::hard_link(&first, &alias).unwrap();
+        let connection = service.connection().unwrap();
+        connection.execute(
+            "UPDATE tasks SET repository_path=?1,repository_common_dir=?1,repository_branch='main',worktree_path=?1 WHERE id=1",
+            params![first.to_str().unwrap()],
+        ).unwrap();
+        assert_eq!(worktree_path_owner(&connection, &alias).unwrap(), Some(1));
+        fs::remove_file(&alias).unwrap();
+        assert_eq!(worktree_path_owner(&connection, &alias).unwrap(), None);
+    }
+
+    #[test]
     fn uncertain_database_commit_requires_doctor_reconciliation() {
         let temp = tempfile::tempdir().unwrap();
         let service = Service::new(temp.path().join("state.sqlite"));
@@ -1900,7 +1970,7 @@ mod tests {
         assert_eq!(error.body.details["databaseState"], "unknown");
         assert_eq!(
             error.body.details["gitState"],
-            json!({"pathExists": true, "registeredByGit": true})
+            json!({"pathExists": true, "registeredByGit": true, "branch": null, "head": null})
         );
         assert_eq!(
             error.body.details["recommendedArgs"]

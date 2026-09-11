@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 steward-application = { path = "../application" }
 steward-core = { path = "../core" }
+git-adapter = { path = "../git-adapter" }
 
 [dev-dependencies]
 tempfile.workspace = true

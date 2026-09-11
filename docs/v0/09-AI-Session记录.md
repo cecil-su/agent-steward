@@ -1,6 +1,6 @@
 # AI Session 记录
 
-> M4/M5 已有实现；当前服务合同见 [实施合同](11-M4-M5实施合同.md) 与 [使用指南](12-M4-M5使用与验收.md)。文中 M1–M3 指早期 CLI 范围，不能将历史验收记录理解为当前全部功能已验收。
+服务接口见[Hook与HTTP合同](11-Hook与HTTP合同.md)和[使用指南](12-服务使用与验收.md)。
 
 
 ## 1. 目标
@@ -52,12 +52,12 @@ taskctl task show TASK-123 --json
 taskctl task claim TASK-123 --session session-a --if-version 1
 ```
 
-后续每次 mutation 都使用上一条成功结果返回的新 version；遇到 `VERSION_CONFLICT` 时必须重新 `show` 并重新判断，不能盲目重试旧输入。
+示例仅用于显式指定的隔离数据库，TASK及版本必须来自该库查询；每次调用添加`--database DB`。后续每次mutation使用上一条成功结果的新version；遇到 `VERSION_CONFLICT` 时必须重新 `show` 并重新判断，不能盲目重试旧输入。
 
 ### 执行期间
 
 ```bash
-taskctl task update TASK-123 --if-version 2 --input task-patch.json
+taskctl task update TASK-123 --if-version 2 --input task-patch.json --yes --reason '明确的信息维护依据'
 taskctl task note TASK-123 --if-version 3 --type decision --text "沿用现有 JWT 方案"
 taskctl task block TASK-123 --if-version 4 --reason "缺少测试账号" --recovery "取得账号后继续"
 taskctl worktree status TASK-123 --json
@@ -120,16 +120,16 @@ Task 当前内容
 
 ## 5. AI Client Hook / Runtime Adapter
 
-M4 提供通用 `task-hook` 进程适配器。宿主显式配置后，以 JSON stdin 提供稳定 eventId、kind 和 occurredAt；适配器只投影元数据，经 Application Service 写入独立 `session_events`。特定客户端原生配置需要另外验证，不能把通用协议说成已接入某个客户端。
+`task-hook`是通用进程适配器。宿主显式配置后，以 JSON stdin 提供稳定 eventId、kind 和 occurredAt；适配器只投影元数据，经 Application Service 写入独立 `session_events`。特定客户端原生配置需要另外验证，不能把通用协议说成已接入某个客户端。
 
 - 先 `claim/resume`，再用 CAS `session bind` 为已有执行 Session 一次性绑定 source/externalSessionId；事件不自动创建或改绑 Task/Session。
 - started/resumed/idle/closed 及消息/工具事件只作观测，不映射到 `claim/resume/session close`，也不影响 Task version 或 History。
 - 消息正文、工具参数/结果、自由格式错误和附件在适配器投影时丢弃，不存储或写入重试日志。标准接收接口拒绝未知字段。
-- `(sessionId,eventId)` 幂等；同 ID 不同内容拒绝。上限、分页、乱序、迟到和删除后防复活规则见 [实施合同](11-M4-M5实施合同.md)。
+- `(sessionId,eventId)` 幂等；同 ID 不同内容拒绝。上限、分页、乱序、迟到和删除后防复活规则见[HTTP合同](11-Hook与HTTP合同.md)。
 - 用户主动清除观测时，CAS 更新 Task version 并记录不含原文的 History；保留去重标记，且不保证物理擦除。
 - Hook 失败通过稳定错误和非零退出报告，显式 CLI 不依赖它；仅 busy 可做两次有界重试，不创建后台队列或通用 Event 框架。
 
-手工 `session import add` 仍只接受经用户敏感内容审查、不超过 16 MiB 的普通文件，语义与自动元数据事件分开。正文、内容分片、大附件和 model/usage 收集留待明确需求，不属于此轮 M4 实现。
+手工 `session import add` 仍只接受经用户敏感内容审查、不超过 16 MiB 的普通文件，语义与自动元数据事件分开。自动正文、内容分片、大附件和model/usage收集不属于当前实现。
 
 ## 6. CLI 合同
 

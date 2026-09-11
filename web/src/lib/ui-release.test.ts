@@ -29,6 +29,18 @@ it('clears the banner when the server rolls back to the loaded release', async (
   f.release('old'); await vi.advanceTimersByTimeAsync(10_000);
   expect(f.ready).toHaveBeenLastCalledWith(null); expect(watcher.apply()).toBe(false); watcher.stop();
 });
+it('does not reload or replay requests when an update check is unavailable', async () => {
+  vi.useFakeTimers();
+  const reload = vi.fn(), ready = vi.fn();
+  const transport = vi.fn<typeof fetch>().mockRejectedValue(new Error('offline'));
+  const watcher = watchUiRelease({ loaded: 'old', protectedInput: () => false, pendingAuth: () => false, ready, reload, confirm: () => true, fetch: transport });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reload).not.toHaveBeenCalled(); expect(ready).not.toHaveBeenCalled();
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(transport.mock.calls[0][0]).toBe('/ui/status');
+  expect(transport.mock.calls[0][1]?.method).toBeUndefined();
+  watcher.stop();
+});
 it('does not act on a late status response after cleanup', async () => {
   let finish!: (response: Response) => void;
   const reload = vi.fn();

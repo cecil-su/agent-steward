@@ -191,6 +191,22 @@ impl AppError {
         recovery: RecoveryCommand,
         diagnostics: Value,
     ) -> Self {
+        // A completed action is not a current Git observation. Expose either a
+        // complete observation or null, never legacy {created/removed/...} shapes.
+        let git_state = if git_state.get("pathExists").is_some_and(Value::is_boolean)
+            && git_state
+                .get("registeredByGit")
+                .is_some_and(Value::is_boolean)
+        {
+            json!({
+                "pathExists": git_state["pathExists"],
+                "registeredByGit": git_state["registeredByGit"],
+                "branch": git_state.get("branch"),
+                "head": git_state.get("head"),
+            })
+        } else {
+            Value::Null
+        };
         Self::new(
             "PARTIAL_EXTERNAL_STATE",
             "Git and database state require reconciliation",
@@ -451,6 +467,30 @@ mod tests {
     }
 
     #[test]
+    fn partial_git_state_never_exposes_legacy_action_shapes() {
+        for state in [
+            Value::Null,
+            json!("unknown"),
+            json!({"created": true, "branch": "feature"}),
+            json!({"removed": true}),
+            json!({"registered": true}),
+            json!({"pathExists": true}),
+        ] {
+            let error = AppError::partial(
+                None,
+                None,
+                state,
+                PartialDatabaseState::Unknown,
+                RecoveryCommand {
+                    command: "taskctl doctor".into(),
+                    args: vec!["taskctl".into(), "doctor".into()],
+                },
+            );
+            assert!(error.body.details["gitState"].is_null());
+        }
+    }
+
+    #[test]
     fn unprovable_git_state_is_unknown_with_diagnostics_in_a_separate_field() {
         let error = AppError::partial_with_diagnostics(
             Some("repository"),
@@ -464,14 +504,14 @@ mod tests {
             json!({"phase": "afterDatabaseCommit", "observationError": "boom"}),
         );
 
-        assert_eq!(error.body.details["gitState"], "unknown");
+        assert!(error.body.details["gitState"].is_null());
         assert_eq!(
             error.body.details["diagnostics"],
             json!({"phase": "afterDatabaseCommit", "observationError": "boom"})
         );
         assert!(
-            error.body.details["gitState"].is_string(),
-            "gitState must stay a stable string when the Git state cannot be proven"
+            error.body.details["gitState"].is_null(),
+            "unprovable observations must be null, not an action or stale state"
         );
     }
 }

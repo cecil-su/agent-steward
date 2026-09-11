@@ -55,6 +55,8 @@ pub struct UiStore {
     current: Mutex<Current>,
     embedded: Arc<Release>,
     slots: Arc<tokio::sync::Semaphore>,
+    asset_slots: Arc<tokio::sync::Semaphore>,
+    historical: Mutex<Vec<Arc<Release>>>,
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -127,6 +129,8 @@ impl UiStore {
             }),
             embedded,
             slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            asset_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            historical: Mutex::new(Vec::new()),
         }
     }
     fn load(&self, id: &str) -> Result<Arc<Release>, &'static str> {
@@ -183,6 +187,21 @@ impl UiStore {
             files,
         }))
     }
+    fn cached_release(&self, id: &str) -> Result<Arc<Release>, &'static str> {
+        // Immutable verified bytes, at most two historical packages (24 MiB).
+        // Serialize misses to avoid hashing the same release concurrently.
+        let mut cache = self.historical.lock().expect("historical UI lock");
+        if let Some(release) = cache.iter().find(|release| release.id == id) {
+            return Ok(release.clone());
+        }
+        let release = self.load(id)?;
+        if cache.len() == 2 {
+            cache.remove(0);
+        }
+        cache.push(release.clone());
+        Ok(release)
+    }
+
     fn refresh(&self) -> Arc<Release> {
         let mut current = self.current.lock().expect("UI lock");
         if let Some(root) = &self.root {
@@ -290,7 +309,15 @@ pub async fn asset(
     State(state): State<ServerState>,
     Path((id, name)): Path<(String, String)>,
 ) -> Response {
+    let Ok(asset_permit) = state.ui.asset_slots.clone().try_acquire_owned() else {
+        return failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "UI_BUSY",
+            "UI assets temporarily busy",
+        );
+    };
     blocking(state.ui.slots.clone(), move || {
+        let _asset_permit = asset_permit;
         if !matches!(name.as_str(), "app.js" | "style.css") {
             return failure(StatusCode::NOT_FOUND, "NOT_FOUND", "UI resource not found");
         }
@@ -298,7 +325,7 @@ pub async fn asset(
         let release = if id == current.id {
             Ok(current)
         } else {
-            state.ui.load(&id)
+            state.ui.cached_release(&id)
         };
         match release {
             Ok(release) => content(&release, &name),
@@ -306,4 +333,42 @@ pub async fn asset(
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn asset_saturation_reserves_index_and_status_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = ServerState::new(
+            steward_application::Service::new(temp.path().join("isolated.db")),
+            43123,
+            "synthetic".into(),
+        );
+        let permits = state
+            .ui
+            .asset_slots
+            .clone()
+            .acquire_many_owned(2)
+            .await
+            .unwrap();
+        let id = state.ui.embedded.id.clone();
+        assert_eq!(
+            asset(State(state.clone()), Path((id.clone(), "app.js".into())))
+                .await
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(index(State(state.clone())).await.status(), StatusCode::OK);
+        assert_eq!(status(State(state.clone())).await.status(), StatusCode::OK);
+        drop(permits);
+        assert_eq!(
+            asset(State(state), Path((id, "app.js".into())))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
 }
