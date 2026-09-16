@@ -86,6 +86,7 @@ jobs:
         working-directory: web
         env:
           STEWARD_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
+          STEWARD_TEST_BIND: 127.0.0.1
           STEWARD_BROWSER_CHANNEL: chromium
         run: |
           STEWARD_TEST_UI_MODE=embedded npm run test:browser
