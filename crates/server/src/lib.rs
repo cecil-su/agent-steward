@@ -149,7 +149,7 @@ impl ServerState {
         )
     }
 
-    async fn role_async(&self, headers: HeaderMap) -> Result<Option<&'static str>, Response> {
+    async fn role_async(&self, headers: HeaderMap) -> Result<Option<&'static str>, Box<Response>> {
         if headers.contains_key("x-steward-token") {
             return Ok(self.header_role(&headers));
         }
@@ -271,7 +271,7 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
         } else {
             match state.role_async(headers.clone()).await {
                 Ok(role) => role,
-                Err(response) => return response,
+                Err(response) => return *response,
             }
         }
     } else {
@@ -461,13 +461,13 @@ async fn run(
 async fn auth_job<T: Send + 'static>(
     state: &ServerState,
     job: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, Response> {
+) -> Result<T, Box<Response>> {
     let permit = state.auth_slots.clone().try_acquire_owned().map_err(|_| {
-        failure(
+        Box::new(failure(
             StatusCode::SERVICE_UNAVAILABLE,
             "AUTH_STORE_UNAVAILABLE",
             "authorization capacity is busy",
-        )
+        ))
     })?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -475,11 +475,11 @@ async fn auth_job<T: Send + 'static>(
     })
     .await
     .map_err(|_| {
-        failure(
+        Box::new(failure(
             StatusCode::SERVICE_UNAVAILABLE,
             "AUTH_STORE_UNAVAILABLE",
             "authorization storage operation failed",
-        )
+        ))
     })
 }
 
@@ -526,7 +526,7 @@ async fn login(State(state): State<ServerState>, headers: HeaderMap) -> Response
     let worker = state.clone();
     auth_job(&state, move || login_blocking(worker, headers))
         .await
-        .unwrap_or_else(|response| response)
+        .unwrap_or_else(|response| *response)
 }
 fn login_blocking(state: ServerState, headers: HeaderMap) -> Response {
     match state.header_role(&headers) {
@@ -542,7 +542,7 @@ async fn logout(State(state): State<ServerState>, headers: HeaderMap) -> Respons
     let worker = state.clone();
     auth_job(&state, move || logout_blocking(worker, headers))
         .await
-        .unwrap_or_else(|response| response)
+        .unwrap_or_else(|response| *response)
 }
 fn logout_blocking(state: ServerState, headers: HeaderMap) -> Response {
     if let Some(id) = state.cookie(&headers)
@@ -560,7 +560,7 @@ async fn revoke_browsers(State(state): State<ServerState>) -> Response {
     let worker = state.clone();
     auth_job(&state, move || revoke_browsers_blocking(worker))
         .await
-        .unwrap_or_else(|response| response)
+        .unwrap_or_else(|response| *response)
 }
 fn revoke_browsers_blocking(state: ServerState) -> Response {
     if state.browser_auth.revoke_origin(&state.origin).is_err() {
@@ -581,7 +581,7 @@ async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Respon
     let worker = state.clone();
     auth_job(&state, move || connect_blocking(worker, headers))
         .await
-        .unwrap_or_else(|response| response)
+        .unwrap_or_else(|response| *response)
 }
 fn connect_blocking(state: ServerState, headers: HeaderMap) -> Response {
     let supplied = headers.get("x-steward-connect");

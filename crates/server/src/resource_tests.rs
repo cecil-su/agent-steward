@@ -99,6 +99,47 @@ async fn auth_work_does_not_block_runtime_and_retains_capacity_after_cancellatio
     drop(permits);
 }
 
+#[tokio::test]
+async fn boxed_auth_errors_preserve_http_contract_and_release_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ServerState::new(
+        Service::new(temp.path().join("state.db")),
+        43125,
+        "synthetic".into(),
+    );
+    let permits = state
+        .auth_slots
+        .clone()
+        .acquire_many_owned(4)
+        .await
+        .unwrap();
+    let busy: Box<Response> = auth_job(&state, || panic!("busy job must not run"))
+        .await
+        .unwrap_err();
+    drop(permits);
+    let failed: Box<Response> = auth_job(&state, || panic!("synthetic auth worker failure"))
+        .await
+        .unwrap_err();
+    assert_eq!(state.auth_slots.available_permits(), 4);
+    for (response, message) in [
+        (busy, "authorization capacity is busy"),
+        (failed, "authorization storage operation failed"),
+    ] {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert!(!response.headers().contains_key("set-cookie"));
+        let bytes = axum::body::to_bytes((*response).into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["schemaVersion"], 3);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "AUTH_STORE_UNAVAILABLE");
+        assert_eq!(body["error"]["message"], message);
+    }
+    assert_eq!(auth_job(&state, || 42).await.unwrap(), 42);
+}
+
 #[test]
 fn http_device_guards_do_not_change_unc_filesystem_policy() {
     assert!(absolute("/path\0invalid").is_err());
