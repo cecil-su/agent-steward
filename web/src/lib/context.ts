@@ -20,8 +20,7 @@ export function formatTaskContext(context: TaskContext): string {
     '', '## Checkpoint 后的备注', json(context.notesSinceCheckpoint ?? []),
     ...(context.notesTruncated ? ['备注已截断，请查询完整备注。'] : []),
     '', '## 当前执行会话', json(context.session),
-    '', '## 本次代码现场观察', json(context.worktreeStatus),
-    '', '未提供现场不代表干净；以上仅为本次查询快照。',
-    '继续执行前重新读取最新 Task version、Session 归属及 Git 现场；本文不授权自动领取、修改或关闭任务。',
+    '', '以上仅为本次查询快照；Session 与任务状态独立。',
+    '继续执行前重新读取最新 Task version 和 Session；本文不授权自动领取、修改或变更任务状态。',
   ].join('\n');
 }

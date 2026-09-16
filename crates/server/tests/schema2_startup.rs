@@ -31,6 +31,7 @@ impl Drop for Daemon {
 }
 impl Daemon {
     fn start(database: &Path, runtime: &Path, stop: PathBuf) -> Self {
+        let bind = std::env::var("STEWARD_TEST_BIND").unwrap_or_else(|_| "127.0.0.1".into());
         let mut child = Command::new(env!("CARGO_BIN_EXE_taskd"))
             .args([
                 "--database",
@@ -40,7 +41,7 @@ impl Daemon {
                 "--port",
                 "0",
                 "--bind",
-                "127.0.0.1",
+                &bind,
                 "--require-local-auth",
                 "--no-open",
                 "--shutdown-file",
@@ -132,6 +133,8 @@ fn migrated_database_starts_and_restarts_but_old_schemas_are_refused_before_list
         let before = fs::read(&source).unwrap();
         let refused_runtime = temp.path().join("refused-runtime");
         let refused = Command::new(env!("CARGO_BIN_EXE_taskd"))
+            .arg("--bind")
+            .arg(std::env::var("STEWARD_TEST_BIND").unwrap_or_else(|_| "127.0.0.1".into()))
             .args([
                 "--database",
                 source.to_str().unwrap(),

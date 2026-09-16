@@ -26,25 +26,11 @@ fn schema6_copy_preserves_records_and_starts_rules_empty() {
     let s = Service::new(&target);
     let out = s.import_schema6(&source, true).unwrap();
     assert_eq!(out.data["sourceSchema"], 6);
-    assert_eq!(out.data["targetSchema"], 7);
+    assert_eq!(out.data["targetSchema"], 8);
     let old = Connection::open(&source).unwrap();
     let new = Connection::open(&target).unwrap();
     for table in TABLES5.into_iter().chain(["sqlite_sequence"]) {
-        let read = |c: &Connection| {
-            let mut stmt = c
-                .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
-                .unwrap();
-            let n = stmt.column_count();
-            stmt.query_map([], |row| {
-                (0..n)
-                    .map(|i| row.get::<_, Value>(i))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-        };
-        assert_eq!(read(&old), read(&new), "{table}");
+        super::schema7_tests::assert_converted_table(&old, &new, table);
     }
     assert_eq!(
         s.task_context("1").unwrap().data["sessionRules"],
@@ -52,7 +38,7 @@ fn schema6_copy_preserves_records_and_starts_rules_empty() {
     );
     assert_eq!(
         s.task_show("1").unwrap().data["task"]["status"],
-        "pending_release"
+        "in_review"
     );
     assert_eq!(fs::read(&source).unwrap(), before);
     assert!(s.import_schema6(&source, true).is_err());

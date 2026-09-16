@@ -90,7 +90,7 @@ impl Service {
             "INSERT INTO tasks(
                 task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
                 created_at,updated_at,project_id
-             ) VALUES (?1,?2,'open',1,?3,?4,?5,?6,?7,?7,?8)",
+             ) VALUES (?1,?2,'todo',1,?3,?4,?5,?6,?7,?7,?8)",
             params![
                 task_key, title, goal, scope, acceptance, next_step, timestamp, project_id
             ],
@@ -200,8 +200,7 @@ impl Service {
 
         let mut sql = String::from(
             "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
-                    block_reason,block_recovery,current_session_id,repository_path,
-                    repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
+                    block_reason,block_recovery,current_session_id,latest_checkpoint_id,
                     closure_outcome,closure_reason,closed_at,created_at,updated_at,project_id,
                     (SELECT json_group_array(component_id) FROM (SELECT component_id FROM task_components WHERE task_id=tasks.id ORDER BY component_id))
              FROM tasks",
@@ -214,7 +213,7 @@ impl Service {
         }
         if let Some(status) = &status {
             if status == "active" {
-                conditions.push("status != 'closed'");
+                conditions.push("status NOT IN ('done','cancelled')");
             } else {
                 conditions.push("status=?");
                 values.push(SqlValue::Text(status.clone()));
@@ -450,9 +449,6 @@ impl Service {
                 changed.push("nextStep".to_owned());
             }
         }
-        if task.status == TaskStatus::Closed && task.next_step.is_some() {
-            return Err(AppError::constraint("task.closed.next_step"));
-        }
         if changed.is_empty() {
             if change_type != "task.updated" {
                 tx.commit().map_err(AppError::from_sqlite)?;
@@ -573,7 +569,6 @@ impl Service {
         let task = load_task_by_reference(&tx, reference)?;
         let id = task.id;
         check_version(&task, expected)?;
-        ensure_mutable(&task)?;
         tx.execute(
             "INSERT INTO task_notes(task_id,session_id,note_type,text,created_at) VALUES (?1,?2,?3,?4,?5)",
             params![id, task.current_session_id, note_type, text, timestamp],
@@ -604,134 +599,24 @@ impl Service {
         ))
     }
 
-    pub fn task_block(
-        &self,
-        reference: &str,
-        expected: i64,
-        reason: &str,
-        recovery: &str,
-    ) -> AppResult<Outcome> {
-        let reason = required("reason", reason)?;
-        let recovery = required("recovery", recovery)?;
-        let timestamp = now();
-        let mut connection = self.connection()?;
-        let tx =
-            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task_by_reference(&tx, reference)?;
-        let id = task.id;
-        check_version(&task, expected)?;
-        if task.status != TaskStatus::InProgress {
-            return Err(AppError::constraint("task.block.requires_in_progress"));
-        }
-        let changed = tx
-            .execute(
-                "UPDATE tasks SET status='blocked',block_reason=?3,block_recovery=?4,
-                    version=version+1,updated_at=?5 WHERE id=?1 AND version=?2",
-                params![id, expected, reason, recovery, timestamp],
-            )
-            .map_err(AppError::from_sqlite)?;
-        if changed != 1 {
-            return Err(AppError::version(expected, load_task(&tx, id)?.version));
-        }
-        insert_history(
-            &tx,
-            id,
-            "task.blocked",
-            task.current_session_id.as_deref(),
-            "task blocked",
-            json!({"reason": reason, "recovery": recovery}),
-            &timestamp,
-        )?;
-        let response_task = load_task(&tx, id)?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": response_task})))
-    }
-
-    pub fn task_unblock(
-        &self,
-        reference: &str,
-        expected: i64,
-        next_step: &str,
-    ) -> AppResult<Outcome> {
-        let next_step = required("nextStep", next_step)?;
-        let timestamp = now();
-        let mut connection = self.connection()?;
-        let tx =
-            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task_by_reference(&tx, reference)?;
-        let id = task.id;
-        check_version(&task, expected)?;
-        if task.status != TaskStatus::Blocked {
-            return Err(AppError::constraint("task.unblock.requires_blocked"));
-        }
-        let changed = tx
-            .execute(
-                "UPDATE tasks SET status='in_progress',block_reason=NULL,block_recovery=NULL,next_step=?3,
-                    version=version+1,updated_at=?4 WHERE id=?1 AND version=?2",
-                params![id, expected, next_step, timestamp],
-            )
-            .map_err(AppError::from_sqlite)?;
-        if changed != 1 {
-            return Err(AppError::version(expected, load_task(&tx, id)?.version));
-        }
-        insert_history(
-            &tx,
-            id,
-            "task.unblocked",
-            task.current_session_id.as_deref(),
-            "task unblocked",
-            json!({"nextStep": next_step}),
-            &timestamp,
-        )?;
-        let response_task = load_task(&tx, id)?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": response_task})))
-    }
-
-    /// Mark finished development as awaiting release, without ending the execution Session.
-    pub fn task_pending_release(&self, reference: &str, expected: i64) -> AppResult<Outcome> {
-        self.task_release_transition(reference, expected, true)
-    }
-
-    /// Explicitly return to development; resuming a Session alone does not change status.
-    pub fn task_continue(&self, reference: &str, expected: i64) -> AppResult<Outcome> {
-        self.task_release_transition(reference, expected, false)
-    }
-
-    fn task_release_transition(
-        &self,
-        reference: &str,
-        expected: i64,
-        pending: bool,
-    ) -> AppResult<Outcome> {
+    /// Set only the user-selected business status; Session lifecycle is independent.
+    pub fn task_status(&self, reference: &str, expected: i64, status: &str) -> AppResult<Outcome> {
+        let status =
+            TaskStatus::try_from(status).map_err(|message| AppError::invalid("status", message))?;
         let timestamp = now();
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let task = load_task_by_reference(&tx, reference)?;
         check_version(&task, expected)?;
-        let (from, to, event) = if pending {
-            (
-                TaskStatus::InProgress,
-                TaskStatus::PendingRelease,
-                "task.pending_release",
-            )
-        } else {
-            (
-                TaskStatus::PendingRelease,
-                TaskStatus::InProgress,
-                "task.continued",
-            )
-        };
-        if task.status != from {
-            return Err(AppError::constraint("task.release.invalid_transition"));
+        if task.status == status {
+            tx.commit().map_err(AppError::from_sqlite)?;
+            return Ok(Outcome::new(json!({"task": task})));
         }
-        let changed = tx
-            .execute(
-                "UPDATE tasks SET status=?3,version=version+1,updated_at=?4 WHERE id=?1 AND version=?2",
-                params![task.id, expected, to.as_str(), timestamp],
-            )
-            .map_err(AppError::from_sqlite)?;
+        let changed = tx.execute(
+            "UPDATE tasks SET status=?3,version=version+1,updated_at=?4 WHERE id=?1 AND version=?2",
+            params![task.id, expected, status.as_str(), timestamp],
+        ).map_err(AppError::from_sqlite)?;
         if changed != 1 {
             return Err(AppError::version(
                 expected,
@@ -741,116 +626,13 @@ impl Service {
         insert_history(
             &tx,
             task.id,
-            event,
+            "task.status_changed",
             task.current_session_id.as_deref(),
-            "task release status changed",
-            json!({"previousStatus": from, "status": to}),
+            "task status changed",
+            json!({"previousStatus": task.status, "status": status}),
             &timestamp,
         )?;
         let response_task = load_task(&tx, task.id)?;
-        tx.commit().map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"task": response_task})))
-    }
-
-    pub fn task_close(
-        &self,
-        reference: &str,
-        expected: i64,
-        outcome: &str,
-        reason: Option<&str>,
-    ) -> AppResult<Outcome> {
-        if !matches!(
-            outcome,
-            "completed" | "partial" | "cancelled" | "superseded"
-        ) {
-            return Err(AppError::invalid("outcome", "unsupported close outcome"));
-        }
-        let reason = match reason {
-            Some(value) => Some(required("reason", value)?),
-            None => None,
-        };
-        if outcome != "completed" && reason.is_none() {
-            return Err(AppError::invalid(
-                "reason",
-                "required for this close outcome",
-            ));
-        }
-        let timestamp = now();
-        let mut connection = self.connection()?;
-        let tx =
-            storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task_by_reference(&tx, reference)?;
-        let id = task.id;
-        check_version(&task, expected)?;
-        if task.status == TaskStatus::Closed {
-            return Err(AppError::constraint("task.close.already_closed"));
-        }
-        let valid = match outcome {
-            "completed" => matches!(
-                task.status,
-                TaskStatus::InProgress | TaskStatus::PendingRelease
-            ),
-            "partial" => matches!(
-                task.status,
-                TaskStatus::InProgress | TaskStatus::PendingRelease | TaskStatus::Blocked
-            ),
-            _ => true,
-        };
-        if !valid {
-            return Err(AppError::new(
-                "CONSTRAINT_VIOLATION",
-                if outcome == "completed" && task.status == TaskStatus::Blocked {
-                    "completed closure requires in_progress or pending_release; after confirming the blocker is resolved, explicitly unblock the task, re-read its version, then close"
-                } else {
-                    "close outcome is not allowed from the current task status"
-                },
-                false,
-                json!({
-                    "constraint": "task.close.invalid_transition",
-                    "currentStatus": task.status,
-                    "outcome": outcome,
-                }),
-                4,
-            ));
-        }
-        if outcome == "completed"
-            && (task.title.is_none()
-                || task.goal.is_none()
-                || task.scope.is_none()
-                || task.acceptance_criteria.is_none())
-        {
-            return Err(AppError::constraint(
-                "task.close.completed_requires_complete_descriptions",
-            ));
-        }
-        if let Some(session_id) = task.current_session_id.as_deref() {
-            tx.execute(
-                "UPDATE sessions SET ended_at=?2 WHERE id=?1 AND ended_at IS NULL",
-                params![session_id, timestamp],
-            )
-            .map_err(AppError::from_sqlite)?;
-        }
-        let changed = tx
-            .execute(
-                "UPDATE tasks SET status='closed',current_session_id=NULL,next_step=NULL,
-                    block_reason=NULL,block_recovery=NULL,closure_outcome=?3,closure_reason=?4,
-                    closed_at=?5,version=version+1,updated_at=?5 WHERE id=?1 AND version=?2",
-                params![id, expected, outcome, reason, timestamp],
-            )
-            .map_err(AppError::from_sqlite)?;
-        if changed != 1 {
-            return Err(AppError::version(expected, load_task(&tx, id)?.version));
-        }
-        insert_history(
-            &tx,
-            id,
-            "task.closed",
-            task.current_session_id.as_deref(),
-            "task closed",
-            json!({"outcome": outcome, "reason": reason, "closedSessionId": task.current_session_id}),
-            &timestamp,
-        )?;
-        let response_task = load_task(&tx, id)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         Ok(Outcome::new(json!({"task": response_task})))
     }
@@ -870,16 +652,6 @@ impl Service {
         let task = load_task_by_reference(&tx, reference)?;
         let id = task.id;
         check_version(&task, expected)?;
-        if task.status == TaskStatus::Closed {
-            return Err(AppError::constraint("task.claim.closed"));
-        }
-        if matches!(
-            task.status,
-            TaskStatus::InProgress | TaskStatus::PendingRelease | TaskStatus::Blocked
-        ) && task.current_session_id.is_none()
-        {
-            return Err(AppError::session(None, session_id));
-        }
         let existing = tx
             .query_row(
                 "SELECT id,task_id,source,external_session_id,continued_from,record_path,started_at,ended_at
@@ -915,16 +687,11 @@ impl Service {
             ],
         )
         .map_err(AppError::from_sqlite)?;
-        let next_status = if task.status == TaskStatus::Open {
-            "in_progress"
-        } else {
-            task.status.as_str()
-        };
         let changed = tx
             .execute(
-                "UPDATE tasks SET status=?3,current_session_id=?4,version=version+1,updated_at=?5
+                "UPDATE tasks SET current_session_id=?3,version=version+1,updated_at=?4
                  WHERE id=?1 AND version=?2",
-                params![id, expected, next_status, session_id, timestamp],
+                params![id, expected, session_id, timestamp],
             )
             .map_err(AppError::from_sqlite)?;
         if changed != 1 {
@@ -963,30 +730,16 @@ impl Service {
             .map_err(|(field, reason)| AppError::invalid(&field, reason))?;
         validate_string_array("risks", &input.risks)
             .map_err(|(field, reason)| AppError::invalid(&field, reason))?;
-        let initial = self.connection()?;
-        let task = load_task_by_reference(&initial, reference)?;
-        let id = task.id;
-        check_version(&task, expected)?;
-        let git_head = if task.worktree_path.is_some() {
-            self.worktree_status(&id.to_string())?.data["worktreeStatus"]["head"]
-                .as_str()
-                .map(ToOwned::to_owned)
-        } else {
-            None
-        };
-        drop(initial);
+        let git_head: Option<String> = None;
         let checkpoint_id = Uuid::new_v4().to_string();
         let timestamp = now();
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, id)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let id = task.id;
         check_version(&task, expected)?;
-        if !matches!(
-            task.status,
-            TaskStatus::InProgress | TaskStatus::PendingRelease | TaskStatus::Blocked
-        ) || task.current_session_id.as_deref() != Some(session_id)
-        {
+        if task.current_session_id.as_deref() != Some(session_id) {
             return Err(AppError::session(
                 task.current_session_id.as_deref(),
                 session_id,
@@ -1057,7 +810,7 @@ impl Service {
 
 const DEFAULT_TASK_PAGE_SIZE: u32 = 50;
 const MAX_TASK_PAGE_SIZE: u32 = 200;
-const TASK_LIST_FIELDS: [&str; 24] = [
+const TASK_LIST_FIELDS: [&str; 20] = [
     "id",
     "projectId",
     "componentIds",
@@ -1072,10 +825,6 @@ const TASK_LIST_FIELDS: [&str; 24] = [
     "blockReason",
     "blockRecovery",
     "currentSessionId",
-    "repositoryPath",
-    "repositoryCommonDir",
-    "repositoryBranch",
-    "worktreePath",
     "latestCheckpointId",
     "closureOutcome",
     "closureReason",
@@ -1257,14 +1006,6 @@ fn validate_task_title(value: &str) -> AppResult<String> {
         ));
     }
     Ok(value)
-}
-
-fn ensure_mutable(task: &steward_core::TaskView) -> AppResult<()> {
-    if task.status == TaskStatus::Closed {
-        Err(AppError::constraint("task.closed.immutable"))
-    } else {
-        Ok(())
-    }
 }
 
 fn apply_title_patch(

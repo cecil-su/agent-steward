@@ -9,58 +9,50 @@ pub struct ComponentView {
     pub created_at: String,
 }
 
+/// A recorded source directory, not an assertion about the local filesystem.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceRootView {
     pub id: i64,
     pub project_id: i64,
     pub component_id: Option<i64>,
-    pub repository_id: Option<i64>,
-    pub relative_path: Option<String>,
-    pub directory_path: Option<String>,
+    pub directory_path: String,
     pub created_at: String,
 }
 
-/// A portable repository-relative directory, independent of a particular checkout.
-pub fn validate_source_relative_path(value: &str) -> Result<String, String> {
-    if value == "." {
-        return Ok(value.into());
-    }
-    if value.is_empty()
-        || value.len() > 4096
-        || value.contains(['\\', ':'])
-        || value.chars().any(char::is_control)
-    {
-        return Err("expected a slash-separated repository-relative directory (or .)".into());
-    }
-    if value.split('/').any(|part| {
-        part.is_empty()
-            || part == "."
-            || part == ".."
-            || part.eq_ignore_ascii_case(".git")
-            || part.ends_with([' ', '.'])
-    }) {
+/// Validate portable path *text* without accessing or canonicalizing the directory.
+/// A record can refer to a different machine or an unavailable drive.
+pub fn validate_source_directory(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let absolute = value.starts_with('/')
+        || value.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'));
+    if !absolute || value.len() > 4096 || value.chars().any(char::is_control) {
         return Err(
-            "absolute paths, traversal, Git metadata and ambiguous path components are not allowed"
-                .into(),
+            "expected an absolute directory path without control characters (metadata only)".into(),
         );
     }
-    Ok(value.into())
+    Ok(value.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn source_paths_are_portable_not_normalized_into_another_location() {
-        for path in [".", "apps/mailroom", "前端/src", "my project"] {
-            assert!(validate_source_relative_path(path).is_ok());
-        }
+    fn source_paths_are_portable_metadata_not_local_observations() {
         for path in [
-            "", "..", "../app", "/app", "a/../b", "./app", "a//b", "a/", "C:/app", "a\\b", ".git",
-            "a/.GIT", "a/ ", "a.", "a\n",
+            "/missing/project",
+            "E:/ai/项目",
+            "C:\\not-present\\code",
+            "\\\\server\\share\\code",
         ] {
-            assert!(validate_source_relative_path(path).is_err(), "{path}");
+            assert_eq!(validate_source_directory(path).unwrap(), path);
+        }
+        for path in ["", ".", "relative/project", "C:relative", "/code\n"] {
+            assert!(validate_source_directory(path).is_err(), "{path}");
         }
     }
 }

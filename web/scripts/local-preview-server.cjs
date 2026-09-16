@@ -11,10 +11,14 @@ async function startPreview(root) {
   const local = new Set(['127.0.0.1', '::1', ...Object.values(os.networkInterfaces()).flat().filter(Boolean).map(a => a.address)]);
   const upstream = new URL(config.upstream);
   if (!local.has(config.bind) || !local.has(upstream.hostname) || upstream.protocol !== 'http:' || upstream.username || upstream.password || upstream.pathname !== '/' || upstream.search || upstream.hash
-    || !Number.isInteger(config.port) || config.port < 0 || config.port > 65535 || ![1, 4].includes(config.apiContract)) throw new Error('Invalid local readonly preview configuration');
+    || !Number.isInteger(config.port) || config.port < 0 || config.port > 65535 || ![1, 4, 5].includes(config.apiContract)) throw new Error('Invalid local readonly preview configuration');
   const advertised = await (await fetch(new URL('/ui/status', upstream), { signal: AbortSignal.timeout(5000) })).json();
   if (advertised.apiContract !== config.apiContract) throw new Error('Preview UI/upstream API contract mismatch; refusing to listen');
   const files = Object.fromEntries(['index.html', 'app.js', 'style.css'].map(name => [name, fs.readFileSync(path.join(root, 'ui', name))]));
+  // These trusted bundles declare literal request headers (native strings or Vite template literals).
+  // Fail closed for missing, mixed or stale declarations instead of relabelling old UI bytes.
+  const contracts = [...files['app.js'].toString('utf8').matchAll(/["'`]X-Steward-UI-Contract["'`]\s*:\s*["'`](\d+)["'`]/g)].map(match => Number(match[1]));
+  if (!contracts.length || contracts.some(contract => contract !== config.apiContract)) throw new Error('Preview UI resource/config API contract mismatch; refusing to listen');
   const manifest = { packageFormat: 1, uiVersion: config.uiVersion || 'local-preview', requiredApiContract: config.apiContract, entry: 'index.html', files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha(bytes)])) };
   const release = sha(Buffer.from(JSON.stringify(manifest)));
   const requests = new Set();

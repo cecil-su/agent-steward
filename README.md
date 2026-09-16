@@ -1,76 +1,80 @@
 # Agent Steward
 
-Agent Steward V0是本地优先的任务上下文工具。`taskctl`维护Task、Project、Session、Checkpoint、资料和规则；`task-hook`投影显式绑定的客户端事件元数据；`taskd`提供HTTP接口和只读Web工作台。SQLite保存业务状态，Git和文件系统提供实时现场。
+Agent Steward 是本地优先的任务数据中心。用户主导任务方向和状态，AI 辅助理解需求、开发、记录信息并按用户指令操作；Steward 保存和提供这些数据，不替用户判断任务是否完成。
 
-## 版本与方案关系
-
-V0实现与[V1独立设计](docs/v1/README.md)分别管理。V1的Workspace、Actor、Review、TUI/GUI和MCP架构不是V0实现前置条件，也不因名称或编号形成自动继承、兼容或迁移关系。本文运行命令只针对V0，不把V1设计列为已实现能力。
+`taskctl` 提供 CLI，`task-hook` 接收显式绑定的宿主事件元数据，`taskd` 提供 HTTP 与只读工作台。SQLite 保存业务状态。项目源码路径是普通资料，不访问源码目录、不查询 Git，也不管理 Worktree。
 
 ## 当前合同
 
 | 项目 | 值 |
 | --- | --- |
-| 本机业务数据库 | SQLite Schema7，仅空库初始化；不兼容库拒绝普通打开 |
-| CLI/HTTP业务JSON | envelope `schemaVersion:2` |
-| UI API / 包格式 | 4 / 1 |
-| Task引用 | 数字ID、`#数字`或可选且只可设置一次的taskKey |
-| Project引用 | 数字ID、`##数字`或唯一名称 |
-| 并发维护 | Task version、Project revision、Rule revision分别执行CAS |
+| 数据库 | SQLite Schema8，仅空库初始化；旧格式拒绝普通打开 |
+| CLI/HTTP 业务 envelope | `schemaVersion:3` |
+| UI API / 包格式 | 5 / 1 |
+| Task 引用 | 数字 ID、`#ID`、可选且只可设置一次的 taskKey |
+| Project 引用 | 数字 ID、`##ID`、唯一名称 |
+| 并发保护 | Task version、Project revision、Rule revision 独立 CAS |
 
-默认数据库为操作系统用户应用数据目录中的`agent-steward/steward.db`。开发与测试每次显式指定隔离`--database`，不得使用默认库。数据库没有内容级加密，不保存凭据或隐藏推理。
+### 七种任务状态
 
-## 构建与隔离使用
+`backlog` 暂不开始、`todo` 等待开始（创建默认）、`in_progress` 执行中、`in_review` 待审核或验收、`blocked` 受阻、`done` 已完成、`cancelled` 不再推进。
 
-```bash
-cargo build --workspace --locked
-cargo test --workspace --locked
+任意状态间均可按用户指令直接转换，没有领取、完整描述、审核、上线或阻塞理由等流程前置条件。状态通过统一 `task status` / `task-status` 入口修改；同状态在 CAS 校验后无写入。`active` 包含除 `done/cancelled` 外的状态。
 
-cargo run -p taskctl -- --database /tmp/agent-steward-demo.db --json task create
-cargo run -p taskctl -- --database /tmp/agent-steward-demo.db --json --input task.json task create TASK-1
-cargo run -p taskctl -- --database /tmp/agent-steward-demo.db --json task list --query 登录 --page-size 20
-cargo run -p taskctl -- --database /tmp/agent-steward-demo.db project create --name Mailroom
-```
-
-Task可最小创建，描述初始允许null，设置后不能清空。非空标题使用`MMDD｜类型｜主题`。已有任务维护携带刚读取的version，确认和依据遵循对应命令；冲突后重新读取判断，不自动重放。
+状态与 Session 独立：状态变化不新建、结束、恢复 Session，不清空下一步或其他记录；claim/resume/session close 也不改变任务状态。AI 不因测试通过、交付或会话结束自动将任务设为完成。
 
 ```bash
-# 以下DB和TASK必须替换为获准的隔离库与其真实任务引用。
-taskctl --database DB task here
-taskctl --database DB task list --view active
-taskctl --database DB task list --view pending-release
+# DB 必须是明确的隔离路径，TASK/VERSION 来自该库的最新读取。
+taskctl --database DB --json task create
+taskctl --database DB --json task show TASK
+taskctl --database DB --json task status TASK in_review --if-version VERSION
 taskctl --database DB --json task context TASK --require-read-only
 ```
 
-`here`返回候选，不自动选择或领取；`context`在专用只读连接读取任务、项目、Checkpoint、Notes和完整有效规则，再观察Git，不初始化数据库或附带Import正文。Worktree命令只使用本地已有分支，不提供push/force/clean/reset或隐式stash。关闭由用户明确决定，测试、Session结束及Hook事件不等于业务验收。
+Note 可在所有状态追加，不要求领取。正文保留原文，页面对任务描述、Note、Checkpoint 使用安全 Markdown 展示。CLI/HTTP 的输入校验、CAS、事务和 History 保留；冲突后重新读取，不自动重放旧写入。
 
-## 本地工作台与宿主接入
+## 数据与边界
+
+- 默认库位于用户应用数据目录 `agent-steward/steward.db`。开发和自动化测试显式使用隔离 `--database`，不对正式任务造测试数据。
+- 项目、组件、路径资料、规则、Task、Note、Session、Checkpoint、History 由数据库提供；记录路径不表示当前机器存在该目录或内容已验证。
+- 不提供 Worktree 管理、Git 分支/HEAD/dirty 查询、源码文件读取、目录摘要或基于目录自动寻找任务。任务不含 Worktree/仓库关联字段。
+- 旧关闭/阻塞字段和 Checkpoint gitHead 仅为历史事实，不代表当前状态，不再自动采集 Git 信息。原 History 不改写。
+- 显式 Session Import 仍可在确认敏感内容后有界读取指定普通文件；迁移和宿主证据保留必要文件身份/权限检查。这不是源码上下文服务。
+- SQLite 无内容级加密，不保存凭据、授权头或隐藏推理。
+
+## 构建与验证
 
 ```bash
-cargo run -p steward-server --bin taskd -- --database /tmp/steward-service-demo/steward.db
+cargo build --workspace --locked
+STEWARD_TEST_BIND=172.19.10.185 cargo test --workspace --locked
+cd web
+npm ci --ignore-scripts
+npm run typecheck
+npm test
+npm run build
 ```
 
-默认打开`http://127.0.0.1:43123`。本机直接访问免凭据，包括本机监听网卡IP；此模式信任本机用户与程序，不得经代理或隧道暴露。需要隔离本机调用时使用`--require-local-auth`。`--no-open`不打开浏览器，`--port 0`使用临时端口，`--bind`指定本机IPv4。远程/严格模式需要授权，浏览器Cookie有效30天；非回环HTTP不提供传输加密。
+前端 Node 版本见 `.nvmrc`。React 与原生 UI 共用 Markdown 解析与样式，`npm run build:native-markdown` 只更新原生源码的生成前缀。页面保持业务只读；认证登录/退出不是任务写操作。
 
-Web提供任务/项目检索、Checkpoint、Session、History、实时现场、项目资料、规则与上下文复制，所有角色均无业务写入口。管理员HTTP仍具备获准的业务维护和服务端文件导入能力，权限及网络风险见[HTTP合同](docs/v0/11-Hook与HTTP合同.md)。
+## 迁移与运行
 
-React源码为`web/src`，内嵌快照为`crates/server/web-readonly`，UiStore可托管兼容外置包；实际活动版本须查询目标实例。构建/预览见[Web指南](web/README.md)，发布见[UI合同](docs/v0/14-UI独立发布.md)。已安装程序不需要前端运行依赖。
+Schema2/4/5/6/7 的停写快照及独立 archive-v7 格式使用显式离线导入，目标为不存在的 Schema8 新库；不原地升级，不自动切换正式库。旧 Git Source 需要显式提供源码绝对路径映射，不从 common-dir 猜测、不调用 Git、不访问保存的源码路径。详见[迁移合同](docs/v0/18-Schema7隔离导入与验证.md)。
 
-`task-hook`只记录实际提供的种类、时间等元数据，不存消息/工具正文、不自动改变任务执行状态。Codex/pi配置与显式绑定见[宿主适配指南](integrations/README.md)。
+旧状态映射：open→todo，pending_release→in_review，closed+completed→done，其他 closed 结果→cancelled；进行中/受阻保持。原关闭结果、原因、时间和 History 保留。
 
-## 导入与安装边界
+获准的本地服务使用指定网卡地址：
 
-当前CLI支持`database import-schema2`、`import-schema4`、`import-schema5`、`import-schema6`和`import-v7`，没有`import-schema3`。前四者接受对应冻结Schema快照；import-v7接受schema_migrations格式的闭合归档。目标均为Schema7，不可把命令名或源版本改成目标版本。
+```bash
+cargo run -p steward-server --bin taskd -- --database /absolute/isolated/steward.db --bind 172.19.10.185 --no-open
+```
 
-导入只读源并发布到不存在的私有新库，不原地升级、不切换默认路径或服务。停写、WAL一致备份、校验及恢复限制见[Schema7隔离导入与验证](docs/v0/18-Schema7隔离导入与验证.md)。
+访问 `http://172.19.10.185:<端口>`。本机信任、严格认证、Origin/CSRF、Cookie 和网络边界见[HTTP合同](docs/v0/11-Hook与HTTP合同.md)。不向代理或隧道暴露免凭据本机入口。
 
-Windows入口及配置见[启动与更新指南](distribution/windows/README.md)。普通更新不跨Schema，编译与版本预检不能替代迁移或正式切换验收。安装、部署、服务停启、正式数据与远程写入分别确认；源码版本不证明运行实例身份。
+构建不等于部署。外置原生页面、React 内嵌资源、CLI/taskd、宿主扩展与数据库必须匹配合同；安装、正式迁移、服务停启、远程写入各自需要明确授权。内嵌同步是独立操作，不自动覆盖活动发布。
 
 ## 文档
 
-- [V0合同与操作入口](docs/v0/README.md)
-- [CODEMAP](CODEMAP.md)
-- [Agent协作约束](AGENTS.md)
-- [项目与上下文](docs/v0/16-项目与上下文复用.md)
-- [项目资料维护](docs/v0/19-项目资料与CLI维护.md)
-- [项目管理人工验收](docs/v0/17-项目管理验收.md)
-- [V1独立设计](docs/v1/README.md)
+- [V0 合同](docs/v0/README.md) · [CODEMAP](CODEMAP.md) · [协作规则](AGENTS.md)
+- [Web 指南](web/README.md) · [原生 UI](crates/server/web-legacy-readonly/README.md)
+- [宿主接入](integrations/README.md) · [Windows 安装边界](distribution/windows/README.md)
+- [V1 独立设计](docs/v1/README.md)：不是当前实现或 V0 前置条件。

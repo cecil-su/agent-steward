@@ -298,7 +298,7 @@ fn schema2_rejects_windows_trailing_dot_or_space_in_any_path_component() {
 fn schema2_sidecar_validation_uses_the_canonical_identity_not_alias_spelling() {
     let temp = tempfile::tempdir().unwrap();
     // These aliases need ordinary Win32 spelling even if TEMP uses an extended prefix.
-    let source = git_adapter::local_worktree_path(&fixture(temp.path())).unwrap();
+    let source = crate::path_safety::local_path(&fixture(temp.path())).unwrap();
     for suffix in ["-wal", "-shm", "-journal"] {
         let sidecar = source.with_file_name(format!("source.db{suffix}"));
         fs::create_dir(&sidecar).unwrap();
@@ -306,7 +306,7 @@ fn schema2_sidecar_validation_uses_the_canonical_identity_not_alias_spelling() {
             let alias = source.with_file_name(format!("source.db{tail}"));
             // Exercise canonical sidecar selection independently of the lexical
             // gate, which now rejects these aliases before filesystem access.
-            let identity = git_adapter::identify_existing(&alias).unwrap();
+            let identity = crate::path_safety::identify_existing(&alias).unwrap();
             assert_ne!(identity.canonical_path.file_name(), alias.file_name());
             let error = require_regular_source_sidecars(&identity).unwrap_err();
             assert_eq!(

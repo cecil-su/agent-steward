@@ -7,8 +7,9 @@ import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { CONTEXT_MARKER, readTaskContext, registerTaskContext } from '../pi/task-context.mjs';
+import { CONTEXT_MARKER, decodeTaskContext, readTaskContext, registerTaskContext } from '../pi/task-context.mjs';
 const execute = promisify(execFile);
+const testBind = process.env.STEWARD_TEST_BIND || '127.0.0.1';
 if (process.env.STEWARD_REQUIRE_REAL_PI === '1' && !process.env.STEWARD_TEST_PI_BIN) {
   throw new Error('Mandatory real Pi tests require STEWARD_TEST_PI_BIN; refusing silent skip');
 }
@@ -32,6 +33,47 @@ function fixture() {
   put('global-v1', null); put('project-one', 1); put('candidate-hidden', null, 'candidate'); put('disabled-hidden', null, 'disabled'); put('project-two', 2);
   return { root, database, run, put, config: { cli, database, task: '2' }, close: () => rmSync(root, { recursive: true, force: true }) };
 }
+test('envelope3 accepts all seven states as data and rejects incompatible envelopes or snapshots', () => {
+  const envelope = { schemaVersion: 3, ok: true, error: null, warnings: [{ code: 'fixture', message: 'preserve warning' }], data: {
+    task: { id: 2, version: 7, status: 'todo', projectId: null },
+    sessionRules: { formatVersion: 1, rules: [] },
+  } };
+  const decode = value => decodeTaskContext(Buffer.from(JSON.stringify(value)), '2');
+  for (const status of ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']) {
+    const value = structuredClone(envelope); value.data.task.status = status;
+    assert.deepEqual(decode(value), value);
+  }
+  for (const schemaVersion of [2, 4, 7, 8]) assert.throws(() => decode({ ...envelope, schemaVersion }), /UNAVAILABLE/);
+  for (const status of ['open', 'closed', 'pending_release', null]) {
+    const value = structuredClone(envelope); value.data.task.status = status;
+    assert.throws(() => decode(value), /UNAVAILABLE/);
+  }
+  for (const field of ['id', 'version']) {
+    const value = structuredClone(envelope); value.data.task[field] = 0;
+    assert.throws(() => decode(value), /UNAVAILABLE/);
+  }
+  assert.throws(() => decodeTaskContext(Buffer.from([0xff]), '2'), /UNAVAILABLE/);
+  assert.throws(() => decode({ ...envelope, ok: false }), /UNAVAILABLE/);
+});
+
+test('Schema8 task context reads all business statuses without Session or history mutations', async () => {
+  const f = fixture();
+  try {
+    let version = 1;
+    for (const status of ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']) {
+      version = f.run('task', 'status', '2', status, '--if-version', String(version)).task.version;
+      const before = [f.run('task', 'show', '2'), f.run('history', '2'), f.run('session', 'list')];
+      const context = await readTaskContext(f.config);
+      assert.equal(context.schemaVersion, 3);
+      assert.equal(context.data.task.status, status);
+      assert.equal(context.data.task.version, version);
+      assert.equal(context.data.task.currentSessionId, null);
+      assert.equal(Object.hasOwn(context.data, 'worktreeStatus'), false);
+      assert.deepEqual([f.run('task', 'show', '2'), f.run('history', '2'), f.run('session', 'list')], before);
+    }
+  } finally { f.close(); }
+});
+
 test('input gate refreshes context, rejects old session/cwd and blocks errors instead of swallowing them', async () => {
   const f = fixture();
   try {
@@ -91,6 +133,15 @@ test('readTaskContext never initializes zero-byte, SQLite schema0, invalid or mi
     const entries = readdirSync(f.root).sort();
     await assert.rejects(readTaskContext({ ...f.config, database: join(f.root, 'missing-parent', 'db') }), /UNAVAILABLE/);
     assert.deepEqual(readdirSync(f.root).sort(), entries);
+    for (const schema of [6, 7]) {
+      const database = join(f.root, `schema${schema}.db`);
+      const py = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['-c', 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("PRAGMA user_version="+sys.argv[2]); c.close()', database, String(schema)]);
+      assert.equal(py.status, 0, py.stderr?.toString());
+      const bytes = readFileSync(database), entries = readdirSync(f.root).sort();
+      await assert.rejects(readTaskContext({ ...f.config, database }), /UNAVAILABLE/);
+      assert.deepEqual(readFileSync(database), bytes);
+      assert.deepEqual(readdirSync(f.root).sort(), entries);
+    }
     const before = readFileSync(f.database);
     assert.equal((await readTaskContext(f.config)).data.task.id, 2);
     await assert.rejects(readTaskContext({ ...f.config, task: '999' }), /UNAVAILABLE/);
@@ -108,11 +159,14 @@ test('fresh real Pi sessions deliver A feedback to B model context through the c
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end(`data: ${JSON.stringify({ id: 'synthetic', object: 'chat.completion.chunk', model: 'capture', choices: [{ index: 0, delta: { role: 'assistant', content: 'SYNTHETIC_OK' }, finish_reason: null }] })}\n\ndata: ${JSON.stringify({ id: 'synthetic', object: 'chat.completion.chunk', model: 'capture', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, testBind, resolve);
+  });
   try {
     const agent = join(f.root, 'agent'); const project = join(f.root, 'project'); mkdirSync(agent); mkdirSync(project);
     writeFileSync(join(project, 'AGENTS.md'), 'Synthetic repository instructions remain independent. No tools or task mutations.');
-    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'synthetic-steward': { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'synthetic-local-only', models: [{ id: 'capture', contextWindow: 200000, maxTokens: 100 }] } } }));
+    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'synthetic-steward': { baseUrl: `http://${testBind}:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'synthetic-local-only', models: [{ id: 'capture', contextWindow: 200000, maxTokens: 100 }] } } }));
     const env = Object.fromEntries(['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'].filter(k => process.env[k]).map(k => [k, process.env[k]]));
     Object.assign(env, { HOME: f.root, USERPROFILE: f.root, APPDATA: f.root, LOCALAPPDATA: f.root, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: '1', PI_TELEMETRY: '0' });
     const piBin = resolve(process.env.STEWARD_TEST_PI_BIN);

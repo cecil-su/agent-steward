@@ -83,7 +83,7 @@ export function App() {
   const tasks = useInfiniteQuery({
     queryKey: ['tasks', ui.view, ui.query, projectFilter], initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) => {
-      const params = new URLSearchParams(ui.view === 'closed' ? { status: 'closed', pageSize: '30' } : { view: ui.view, pageSize: '30' });
+      const params = new URLSearchParams(['active', 'recent', 'in-progress', 'in-review', 'blocked'].includes(ui.view) ? { view: ui.view, pageSize: '30' } : { status: ui.view, pageSize: '30' });
       if (ui.query) params.set('query', ui.query);
       if (projectFilter !== null && client.getQueryData<Access>(['access'])?.projectManagement === true) params.set('project', `##${projectFilter}`);
       if (pageParam) params.set('cursor', pageParam);

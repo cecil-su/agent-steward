@@ -11,6 +11,45 @@ const SCHEMA2: &str = include_str!("schema2.sql");
 const SCHEMA4: &str = include_str!("schema4.sql");
 const SCHEMA5: &str = include_str!("schema5.sql");
 const SCHEMA6: &str = include_str!("schema6.sql");
+const SCHEMA7: &str = include_str!("schema7.sql");
+const TABLES7: [&str; 16] = [
+    "projects",
+    "project_history",
+    "components",
+    "repositories",
+    "source_roots",
+    "tasks",
+    "sessions",
+    "checkpoints",
+    "task_notes",
+    "history",
+    "session_imports",
+    "session_events",
+    "task_components",
+    "project_profiles",
+    "rules",
+    "rule_history",
+];
+const SEQUENCES7: [(&str, &str); 11] = [
+    SEQUENCES4[0],
+    SEQUENCES4[1],
+    SEQUENCES4[2],
+    SEQUENCES4[3],
+    SEQUENCES4[4],
+    SEQUENCES4[5],
+    SEQUENCES4[6],
+    SEQUENCES4[7],
+    SEQUENCES4[8],
+    ("rules", "id"),
+    ("rule_history", "id"),
+];
+pub(super) const STATUS_PROJECTION: &str = "CASE status WHEN 'open' THEN 'todo' WHEN 'pending_release' THEN 'in_review' WHEN 'closed' THEN CASE closure_outcome WHEN 'completed' THEN 'done' ELSE 'cancelled' END ELSE status END";
+pub(super) fn retired_task_field(field: &str) -> bool {
+    matches!(
+        field,
+        "repository_path" | "repository_common_dir" | "repository_branch" | "worktree_path"
+    )
+}
 const TABLES5: [&str; 14] = [
     "projects",
     "project_history",
@@ -88,7 +127,7 @@ fn layout(c: &Connection) -> AppResult<Vec<SchemaEntry>> {
         .map_err(AppError::from_sqlite)
 }
 
-fn integrity(c: &Connection) -> AppResult<()> {
+pub(super) fn integrity(c: &Connection) -> AppResult<()> {
     // Unlike quick_check, integrity_check verifies index/table agreement. Missing
     // index entries must not make ordered source queries silently omit records.
     let checks = c
@@ -104,13 +143,13 @@ fn integrity(c: &Connection) -> AppResult<()> {
     super::integrity(c)
 }
 
-fn data_version(c: &Connection) -> AppResult<i64> {
+pub(super) fn data_version(c: &Connection) -> AppResult<i64> {
     c.pragma_query_value(None, "data_version", |r| r.get(0))
         .map_err(AppError::from_sqlite)
 }
 
 fn local_path(path: &Path) -> AppResult<()> {
-    git_adapter::local_worktree_path(path).map_err(|_| AppError::invalid(
+    crate::path_safety::local_path(path).map_err(|_| AppError::invalid(
         "database", "source and destination require local absolute paths without traversal or device/network prefixes",
     ))?;
     // Win32 and SQLite normalize these names, whereas publication through a
@@ -148,7 +187,7 @@ pub(super) fn local_file_path(path: &Path) -> AppResult<()> {
 }
 
 pub(super) fn require_regular_source_sidecars(
-    source: &git_adapter::ExistingPathIdentity,
+    source: &crate::path_safety::ExistingPathIdentity,
 ) -> AppResult<()> {
     // Always derive these from the same canonical filename passed to SQLite,
     // never the input spelling (for example, a Windows 8.3 basename alias).
@@ -170,7 +209,7 @@ pub(super) fn require_regular_source_sidecars(
     Ok(())
 }
 
-fn private_parent(path: &Path) -> AppResult<()> {
+pub(super) fn private_parent(path: &Path) -> AppResult<()> {
     if !path.is_dir() {
         return Err(AppError::invalid(
             "database",
@@ -206,6 +245,23 @@ fn private_parent(path: &Path) -> AppResult<()> {
 }
 
 impl Service {
+    /// Explicit offline Schema7 to Schema8 copy. Git sources require an explicit absolute path.
+    pub fn import_schema7(
+        &self,
+        source: &Path,
+        confirmed: bool,
+        source_paths: &str,
+    ) -> AppResult<Outcome> {
+        import_version_paths(
+            source,
+            self.database_path(),
+            confirmed,
+            7,
+            source_paths,
+            |_, _| Ok(()),
+        )
+    }
+
     /// Copy a supported, quiescent Schema 2 snapshot to an absent current-schema destination.
     /// The operator must stop writers; identity/data_version rechecks are not a write fence.
     pub fn import_schema2(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
@@ -214,16 +270,64 @@ impl Service {
 
     /// Preserve Schema 4 task/project records in a separate, explicitly confirmed copy.
     pub fn import_schema4(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
-        import_version(source, self.database_path(), confirmed, 4, |_, _| Ok(()))
+        self.import_schema4_with_paths(source, confirmed, "{}")
     }
 
-    /// Copy Schema 5 unchanged; never infer pending-release status for existing tasks.
+    /// Convert a Schema 6 snapshot without inferring additional business changes.
     pub fn import_schema6(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
-        import_version(source, self.database_path(), confirmed, 6, |_, _| Ok(()))
+        self.import_schema6_with_paths(source, confirmed, "{}")
     }
 
     pub fn import_schema5(&self, source: &Path, confirmed: bool) -> AppResult<Outcome> {
-        import_version(source, self.database_path(), confirmed, 5, |_, _| Ok(()))
+        self.import_schema5_with_paths(source, confirmed, "{}")
+    }
+
+    pub fn import_schema4_with_paths(
+        &self,
+        source: &Path,
+        confirmed: bool,
+        source_paths: &str,
+    ) -> AppResult<Outcome> {
+        import_version_paths(
+            source,
+            self.database_path(),
+            confirmed,
+            4,
+            source_paths,
+            |_, _| Ok(()),
+        )
+    }
+
+    pub fn import_schema5_with_paths(
+        &self,
+        source: &Path,
+        confirmed: bool,
+        source_paths: &str,
+    ) -> AppResult<Outcome> {
+        import_version_paths(
+            source,
+            self.database_path(),
+            confirmed,
+            5,
+            source_paths,
+            |_, _| Ok(()),
+        )
+    }
+
+    pub fn import_schema6_with_paths(
+        &self,
+        source: &Path,
+        confirmed: bool,
+        source_paths: &str,
+    ) -> AppResult<Outcome> {
+        import_version_paths(
+            source,
+            self.database_path(),
+            confirmed,
+            6,
+            source_paths,
+            |_, _| Ok(()),
+        )
     }
 }
 
@@ -249,6 +353,24 @@ fn import_version(
     destination: &Path,
     confirmed: bool,
     source_version: i64,
+    observe: impl FnMut(&str, &Path) -> AppResult<()>,
+) -> AppResult<Outcome> {
+    import_version_paths(
+        source,
+        destination,
+        confirmed,
+        source_version,
+        "{}",
+        observe,
+    )
+}
+
+fn import_version_paths(
+    source: &Path,
+    destination: &Path,
+    confirmed: bool,
+    source_version: i64,
+    source_paths: &str,
     mut observe: impl FnMut(&str, &Path) -> AppResult<()>,
 ) -> AppResult<Outcome> {
     let (definition, tables, sequence_fields, empty_tables): SchemaCopyLayout<'_> =
@@ -257,6 +379,7 @@ fn import_version(
             4 => (SCHEMA4, &TABLES4, &SEQUENCES4, &["project_profiles"]),
             5 => (SCHEMA5, &TABLES5, &SEQUENCES4, &[]),
             6 => (SCHEMA6, &TABLES5, &SEQUENCES4, &[]),
+            7 => (SCHEMA7, &TABLES7, &SEQUENCES7, &[]),
             _ => return Err(refused("unsupported source schema")),
         };
     if !confirmed {
@@ -278,7 +401,7 @@ fn import_version(
             "expected an existing regular database file, not a link",
         ));
     }
-    let source_identity = git_adapter::identify_existing(source)
+    let source_identity = crate::path_safety::identify_existing(source)
         .map_err(|_| refused("cannot establish source file identity"))?;
     local_path(&source_identity.canonical_path)?;
     // SQLite may access sidecars even for a read-only WAL snapshot.
@@ -312,6 +435,10 @@ fn import_version(
         )));
     }
     integrity(&snapshot)?;
+    let source_paths = validate_source_paths(&snapshot, source_version, source_paths)?;
+    if source_version >= 4 {
+        validate_legacy_source_records(&snapshot)?;
+    }
     // Reject oversized imports before materializing their BLOBs (same bound as session import).
     if snapshot
         .query_row(
@@ -332,7 +459,7 @@ fn import_version(
         steward_core::set_private_dir(parent).map_err(io_error)?;
     }
     private_parent(parent)?;
-    let parent_identity = git_adapter::identify_existing(parent).map_err(|_| {
+    let parent_identity = crate::path_safety::identify_existing(parent).map_err(|_| {
         AppError::invalid("database", "cannot establish destination parent identity")
     })?;
     local_path(&parent_identity.canonical_path)?;
@@ -356,7 +483,21 @@ fn import_version(
     let mut counts = serde_json::Map::new();
     let mut hashes = serde_json::Map::new();
     for &table in tables {
-        let fields = columns(&snapshot, table)?;
+        if table == "repositories" {
+            continue;
+        }
+        let mut fields = columns(&snapshot, table)?;
+        if table == "tasks" {
+            fields.retain(|f| !retired_task_field(f));
+        }
+        if table == "source_roots" {
+            fields.retain(|f| {
+                !matches!(
+                    f.as_str(),
+                    "repository_id" | "relative_path" | "directory_identity_json"
+                )
+            });
+        }
         let mut target_fields = columns(&tx, table)?;
         if source_version == 2 && table == "tasks" {
             target_fields.retain(|f| f != "project_id");
@@ -369,7 +510,30 @@ fn import_version(
         } else {
             "1"
         };
-        let select = format!("SELECT {} FROM {table} ORDER BY {order}", fields.join(","));
+        let projection = fields
+            .iter()
+            .map(|field| {
+                if table == "tasks" && field == "status" {
+                    STATUS_PROJECTION.to_owned()
+                } else if table == "source_roots" && field == "directory_path" {
+                    let cases = source_paths
+                        .iter()
+                        .map(|(id, path)| format!("WHEN {id} THEN '{}'", path.replace('\'', "''")))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if cases.is_empty() {
+                        field.clone()
+                    } else {
+                        format!("CASE id {cases} ELSE directory_path END")
+                    }
+                } else {
+                    field.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let select = format!("SELECT {projection} FROM {table} ORDER BY {order}");
+        let target_select = format!("SELECT {} FROM {table} ORDER BY {order}", fields.join(","));
         let insert = format!(
             "INSERT INTO {table} ({}) VALUES ({})",
             fields.join(","),
@@ -390,7 +554,7 @@ fn import_version(
             count += 1;
         }
         drop(rows);
-        let mut check = tx.prepare(&select).map_err(AppError::from_sqlite)?;
+        let mut check = tx.prepare(&target_select).map_err(AppError::from_sqlite)?;
         let mut copied = check.query([]).map_err(AppError::from_sqlite)?;
         let mut original = read.query([]).map_err(AppError::from_sqlite)?;
         let mut hash = Sha256::new();
@@ -432,7 +596,7 @@ fn import_version(
         if highwater.contains_key(&name) {
             return Err(refused("duplicate autoincrement high-water mark"));
         }
-        let maximum: i64 = tx
+        let maximum: i64 = snapshot
             .query_row(
                 &format!("SELECT coalesce(max({field}),0) FROM {name}"),
                 [],
@@ -441,6 +605,10 @@ fn import_version(
             .map_err(AppError::from_sqlite)?;
         if seq < maximum || seq < 0 {
             return Err(refused("invalid autoincrement high-water mark"));
+        }
+        if name == "repositories" {
+            highwater.insert(name, json!(seq));
+            continue;
         }
         tx.execute("DELETE FROM sqlite_sequence WHERE name=?1", [&name])
             .map_err(AppError::from_sqlite)?;
@@ -452,13 +620,21 @@ fn import_version(
         highwater.insert(name, json!(seq));
     }
     for &(table, _) in sequence_fields {
-        if counts[table].as_u64().unwrap_or(0) > 0 && !highwater.contains_key(table) {
+        let populated: bool = snapshot
+            .query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
+                r.get(0)
+            })
+            .map_err(AppError::from_sqlite)?;
+        if populated && !highwater.contains_key(table) {
             return Err(refused("missing autoincrement high-water mark"));
         }
     }
     drop(sequences);
     drop(sequence_rows);
     for &table in empty_tables {
+        if table == "repositories" {
+            continue;
+        }
         if tx
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
                 r.get::<_, i64>(0)
@@ -473,7 +649,7 @@ fn import_version(
         let count: i64 = tx
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .map_err(AppError::from_sqlite)?;
-        if count != 0 {
+        if source_version < 7 && count != 0 {
             return Err(refused("new rule tables must be empty"));
         }
     }
@@ -481,6 +657,24 @@ fn import_version(
         .map_err(|_| refused("source records are incompatible or contain invalid metadata"))?;
     integrity(&tx)?;
     tx.commit().map_err(AppError::from_sqlite)?;
+    // Validate current and historical rule DTOs without rewriting their source JSON.
+    if source_version == 7 {
+        let staged_service = Service::new(&staged_path);
+        staged_service.rule_list(None, None, None)?;
+        // Enumerate history directly: an orphan must not disappear through a join to rules.
+        let rule_ids = current
+            .prepare("SELECT DISTINCT rule_id FROM rule_history ORDER BY rule_id")
+            .map_err(AppError::from_sqlite)?
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(AppError::from_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from_sqlite)?;
+        for id in rule_ids {
+            staged_service
+                .rule_history(id)
+                .map_err(|_| refused("invalid persisted rule history"))?;
+        }
+    }
     // Reads above only decode DB records. Do not call task_context here: persisted Worktree
     // paths are metadata, not authorization to run Git or probe another machine during migration.
     let mode: String = current
@@ -503,9 +697,9 @@ fn import_version(
             "source changed during copy; stop writers and take a new snapshot",
         ));
     }
-    git_adapter::verify_existing_identity(&source_identity)
+    crate::path_safety::verify_existing_identity(&source_identity)
         .map_err(|_| refused("source file identity changed"))?;
-    git_adapter::verify_existing_identity(&parent_identity)
+    crate::path_safety::verify_existing_identity(&parent_identity)
         .map_err(|_| AppError::invalid("database", "destination parent identity changed"))?;
     private_parent(&parent_identity.canonical_path)?;
     require_unused_destination(&destination)?;
@@ -514,10 +708,89 @@ fn import_version(
         "source":source_identity.canonical_path,"destination":destination,
         "sourceSchema":source_version,"targetSchema":storage_sqlite::SCHEMA_VERSION,
         "counts":counts,"tableSha256":hashes,"digestEncoding":"sqlite-typed-rows-v1",
+        "digestScope":"retained-fields-after-explicit-schema8-conversion",
+        "omittedTables":["repositories"],
+        "omittedTaskFields":["repository_path","repository_common_dir","repository_branch","worktree_path"],
         "highWaterMarks":highwater,"verified":true,"sourceOpenedReadOnly":true,
         "sourceQuiescenceVerified":false,"externalPathsObserved":false,
-        "note":"No Task versions, History, sessions or execution bindings changed. No installation or default database switch. Stop all writers before cutover."
+        "note":"Task statuses mapped to Schema8; retired repository/worktree fields removed. History, versions, sessions and historical closure/block fields preserved. No installation or default database switch. Stop all writers before cutover."
     })))
+}
+
+// Parse strictly: duplicate/unknown IDs and mappings for Directory sources are errors,
+// rather than silently ignoring an operator's typo. Never inspect mapped paths.
+fn validate_source_paths(
+    c: &Connection,
+    version: i64,
+    text: &str,
+) -> AppResult<std::collections::BTreeMap<i64, String>> {
+    use serde::de::{MapAccess, Visitor};
+    struct Paths;
+    impl<'de> Visitor<'de> for Paths {
+        type Value = std::collections::BTreeMap<i64, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an object mapping source IDs to absolute paths")
+        }
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut result = std::collections::BTreeMap::new();
+            while let Some((key, path)) = map.next_entry::<String, String>()? {
+                let id = key.parse::<i64>().map_err(serde::de::Error::custom)?;
+                if id <= 0 || id.to_string() != key || result.insert(id, path).is_some() {
+                    return Err(serde::de::Error::custom("invalid or duplicate source ID"));
+                }
+            }
+            Ok(result)
+        }
+    }
+    let mut decoder = serde_json::Deserializer::from_str(text);
+    let paths = serde::de::Deserializer::deserialize_map(&mut decoder, Paths).map_err(|_| {
+        AppError::invalid(
+            "sourcePaths",
+            "expected a JSON object of unique source IDs and absolute paths",
+        )
+    })?;
+    decoder
+        .end()
+        .map_err(|_| AppError::invalid("sourcePaths", "unexpected trailing JSON"))?;
+    let git_ids: Vec<i64> = if version >= 4 {
+        c.prepare("SELECT id FROM source_roots WHERE repository_id IS NOT NULL ORDER BY id")
+            .map_err(AppError::from_sqlite)?
+            .query_map([], |r| r.get(0))
+            .map_err(AppError::from_sqlite)?
+            .collect::<Result<_, _>>()
+            .map_err(AppError::from_sqlite)?
+    } else {
+        vec![]
+    };
+    for (id, path) in &paths {
+        if !git_ids.contains(id) {
+            return Err(AppError::invalid(
+                "sourcePaths",
+                "mapping must reference an existing Git source; Directory sources retain their original path",
+            ));
+        }
+        if path.trim().is_empty() || path.contains('\0') {
+            return Err(AppError::invalid(
+                "sourcePaths",
+                "mapped paths must be nonempty absolute paths",
+            ));
+        }
+        steward_core::validate_source_directory(path).map_err(|_| {
+            AppError::invalid(
+                "sourcePaths",
+                "mapped paths must be absolute directory metadata without control characters",
+            )
+        })?;
+    }
+    if git_ids.iter().any(|id| !paths.contains_key(id)) {
+        return Err(AppError::invalid(
+            "sourcePaths",
+            format!(
+                "Git source requires explicit sourceId-to-absolute-path mapping; use import-schema{version} --source-paths with this source schema"
+            ),
+        ));
+    }
+    Ok(paths)
 }
 
 fn hash_value(hash: &mut Sha256, value: &Value) {
@@ -557,7 +830,7 @@ fn decode<T>(
     Ok(())
 }
 
-fn validate_records(c: &Connection, allow_projects: bool) -> AppResult<()> {
+pub(super) fn validate_records(c: &Connection, allow_projects: bool) -> AppResult<()> {
     if allow_projects {
         validate_project_records(c)?;
     }
@@ -698,6 +971,10 @@ fn validate_project_records(c: &Connection) -> AppResult<()> {
         serde_json::from_str::<serde_json::Value>(&text)
             .map_err(|_| refused("invalid project history JSON"))?;
     }
+    Ok(())
+}
+
+fn validate_legacy_source_records(c: &Connection) -> AppResult<()> {
     for sql in [
         "SELECT common_dir,common_identity_json FROM repositories",
         "SELECT directory_path,directory_identity_json FROM source_roots WHERE directory_path IS NOT NULL",
@@ -707,8 +984,9 @@ fn validate_project_records(c: &Connection) -> AppResult<()> {
         while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
             let path: String = row.get(0).map_err(AppError::from_sqlite)?;
             let text: String = row.get(1).map_err(AppError::from_sqlite)?;
-            let identity: git_adapter::ExistingPathIdentityRecord = serde_json::from_str(&text)
-                .map_err(|_| refused("invalid persisted source identity"))?;
+            let identity: crate::path_safety::ExistingPathIdentityRecord =
+                serde_json::from_str(&text)
+                    .map_err(|_| refused("invalid persisted source identity"))?;
             if identity.canonical_path.to_str() != Some(path.as_str()) {
                 return Err(refused("source path differs from persisted identity"));
             }
@@ -720,8 +998,13 @@ fn validate_project_records(c: &Connection) -> AppResult<()> {
     let mut rows = statement.query([]).map_err(AppError::from_sqlite)?;
     while let Some(row) = rows.next().map_err(AppError::from_sqlite)? {
         let path: String = row.get(0).map_err(AppError::from_sqlite)?;
-        steward_core::validate_source_relative_path(&path)
-            .map_err(|_| refused("invalid relative source path"))?;
+        if path.is_empty()
+            || path.starts_with(['/', '\\'])
+            || path.contains(':')
+            || path.split(['/', '\\']).any(|p| p == "..")
+        {
+            return Err(refused("invalid relative source path"));
+        }
     }
     Ok(())
 }
@@ -734,5 +1017,7 @@ mod schema4_tests;
 mod schema5_tests;
 #[cfg(test)]
 mod schema6_tests;
+#[cfg(test)]
+mod schema7_tests;
 #[cfg(test)]
 mod tests;

@@ -5,7 +5,7 @@ pub use host_evidence::{
 mod projects;
 pub use projects::{ProjectReference, ProjectView, normalize_project_name};
 mod sources;
-pub use sources::{ComponentView, SourceRootView, validate_source_relative_path};
+pub use sources::{ComponentView, SourceRootView, validate_source_directory};
 
 use std::path::{Path, PathBuf};
 
@@ -15,21 +15,25 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
-    Open,
+    Backlog,
+    Todo,
     InProgress,
-    PendingRelease,
+    InReview,
     Blocked,
-    Closed,
+    Done,
+    Cancelled,
 }
 
 impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Open => "open",
+            Self::Backlog => "backlog",
+            Self::Todo => "todo",
             Self::InProgress => "in_progress",
-            Self::PendingRelease => "pending_release",
+            Self::InReview => "in_review",
             Self::Blocked => "blocked",
-            Self::Closed => "closed",
+            Self::Done => "done",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -39,11 +43,13 @@ impl TryFrom<&str> for TaskStatus {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "open" => Ok(Self::Open),
+            "backlog" => Ok(Self::Backlog),
+            "todo" => Ok(Self::Todo),
             "in_progress" => Ok(Self::InProgress),
-            "pending_release" => Ok(Self::PendingRelease),
+            "in_review" => Ok(Self::InReview),
             "blocked" => Ok(Self::Blocked),
-            "closed" => Ok(Self::Closed),
+            "done" => Ok(Self::Done),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(format!("unknown task status: {value}")),
         }
     }
@@ -68,10 +74,6 @@ pub struct TaskView {
     pub block_reason: Option<String>,
     pub block_recovery: Option<String>,
     pub current_session_id: Option<String>,
-    pub repository_path: Option<String>,
-    pub repository_common_dir: Option<String>,
-    pub repository_branch: Option<String>,
-    pub worktree_path: Option<String>,
     pub latest_checkpoint_id: Option<String>,
     pub closure_outcome: Option<String>,
     pub closure_reason: Option<String>,
@@ -130,23 +132,6 @@ pub struct SessionImportView {
     pub sha256: String,
     pub size_bytes: i64,
     pub imported_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WorktreeStatus {
-    pub registered: bool,
-    pub repository_path: Option<String>,
-    pub repository_common_dir: Option<String>,
-    pub path: Option<String>,
-    pub exists: bool,
-    pub branch: Option<String>,
-    pub head: Option<String>,
-    pub staged: Option<Vec<String>>,
-    pub unstaged: Option<Vec<String>>,
-    pub untracked: Option<Vec<String>>,
-    pub ignored: Option<Vec<String>>,
-    pub observed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

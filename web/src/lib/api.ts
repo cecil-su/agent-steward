@@ -43,7 +43,7 @@ export function createApi(options: ApiOptions = {}) {
           cache: 'no-store',
           redirect: 'error',
           headers: {
-            'X-Steward-UI-Contract': '4',
+            'X-Steward-UI-Contract': '5',
             ...(write ? { 'Content-Type': 'application/json', 'X-Steward-CSRF': '1' } : {}),
             ...(token ? { 'X-Steward-Token': token } : {}),
             ...(connectionCode ? { 'X-Steward-Connect': connectionCode } : {}),
@@ -52,7 +52,7 @@ export function createApi(options: ApiOptions = {}) {
           signal: controller.signal,
         });
       } catch {
-        throw new ApiError(write ? '结果未确认：请核对任务和现场，不要直接重复提交。' : '无法读取服务，请检查连接。', 'NETWORK_ERROR', write);
+        throw new ApiError(write ? '结果未确认：请核对当前授权，不要直接重复提交。' : '无法读取服务，请检查连接。', 'NETWORK_ERROR', write);
       }
       checkCurrent();
       // Clear data even when an expired-grant response has a malformed body.

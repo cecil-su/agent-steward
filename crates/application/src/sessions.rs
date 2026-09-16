@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use steward_core::{SessionImportView, TaskStatus};
+use steward_core::SessionImportView;
 use storage_sqlite::now;
 use uuid::Uuid;
 
@@ -14,7 +14,7 @@ use crate::db::{
     insert_history, load_session, load_task, load_task_by_reference, resolve_task_id,
     session_from_row,
 };
-use crate::{AppError, AppResult, Outcome, RecoveryCommand, Service, warning};
+use crate::{AppError, AppResult, Outcome, Service, warning};
 
 const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
 const IMPORT_READ_BUFFER_BYTES: usize = 64 * 1024;
@@ -66,73 +66,11 @@ impl Service {
         tx.commit().map_err(AppError::from_sqlite)?;
         let mut outcome = Outcome::new(json!({"task": task, "checkpoint": checkpoint,
             "session": session, "project": project, "projectProfile": project_profile, "sessionRules": session_rules, "notesSinceCheckpoint": notes,
-            "notesTruncated": notes_truncated, "worktreeStatus": null}));
+            "notesTruncated": notes_truncated}));
         if notes_truncated {
             outcome.warnings.push(warning("CONTEXT_NOTES_TRUNCATED", "Only the latest 50 notes after the checkpoint are included; use task notes to read all notes", json!({"taskId":task.id})));
         }
-        if let (Some(repo), Some(common), Some(path), Some(branch)) = (
-            task.repository_path.as_deref(),
-            task.repository_common_dir.as_deref(),
-            task.worktree_path.as_deref(),
-            task.repository_branch.as_deref(),
-        ) {
-            match git_adapter::observe_status(repo, common, path, branch) {
-                Ok(status) => outcome.data["worktreeStatus"] = json!(status),
-                Err(error) => outcome.warnings.push(warning(
-                    "WORKTREE_OBSERVATION_FAILED",
-                    "Task context is available, but live Git state could not be verified",
-                    json!({"reason": error.to_string()}),
-                )),
-            }
-        }
         Ok(outcome)
-    }
-
-    /// Prefer a registered worktree containing this directory; otherwise list this repo's tasks.
-    pub fn task_here(&self, directory: &Path) -> AppResult<Outcome> {
-        let directory = git_adapter::canonicalize_existing(directory)
-            .map_err(|error| AppError::from_git(error, directory.to_str()))?;
-        let repository = git_adapter::repository_info(&directory).ok();
-        let mut connection = self.connection()?;
-        let tx = connection.transaction().map_err(AppError::from_sqlite)?;
-        let ids = {
-            let mut statement = tx.prepare("SELECT id FROM tasks WHERE worktree_path IS NOT NULL ORDER BY updated_at DESC,id ASC")
-                .map_err(AppError::from_sqlite)?;
-            statement
-                .query_map([], |row| row.get::<_, i64>(0))
-                .map_err(AppError::from_sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(AppError::from_sqlite)?
-        };
-        let mut direct = Vec::new();
-        let mut related = Vec::new();
-        for id in ids {
-            let task = load_task(&tx, id)?;
-            let contains = task
-                .worktree_path
-                .as_deref()
-                .and_then(|path| git_adapter::canonicalize_existing(Path::new(path)).ok())
-                .is_some_and(|path| directory.starts_with(path));
-            let same_repository = repository.as_ref().is_some_and(|repo| {
-                task.repository_common_dir.as_deref() == repo.common_dir.to_str()
-            });
-            if contains && (repository.is_none() || same_repository) {
-                direct.push(task);
-            } else if same_repository {
-                related.push(task);
-            }
-        }
-        tx.commit().map_err(AppError::from_sqlite)?;
-        let (matched_by, tasks) = if !direct.is_empty() {
-            ("worktree", direct)
-        } else if !related.is_empty() {
-            ("repository", related)
-        } else {
-            ("none", related)
-        };
-        Ok(Outcome::new(
-            json!({"directory": directory, "matchedBy": matched_by, "tasks": tasks}),
-        ))
     }
 
     pub fn session_show(&self, id: &str) -> AppResult<Outcome> {
@@ -222,8 +160,8 @@ impl Service {
         let (record_path, missing) = match record_path {
             Some(path) if path.exists() => (
                 Some(
-                    git_adapter::canonicalize_existing(path)
-                        .map_err(|error| AppError::from_git(error, path.to_str()))?
+                    crate::path_safety::canonicalize_existing(path)
+                        .map_err(|error| AppError::from_path(error, path.to_str()))?
                         .to_string_lossy()
                         .into_owned(),
                 ),
@@ -231,8 +169,8 @@ impl Service {
             ),
             Some(path) => (
                 Some(
-                    git_adapter::canonicalize_target(path)
-                        .map_err(|error| AppError::from_git(error, path.to_str()))?
+                    crate::path_safety::canonicalize_target(path)
+                        .map_err(|error| AppError::from_path(error, path.to_str()))?
                         .to_string_lossy()
                         .into_owned(),
                 ),
@@ -247,9 +185,6 @@ impl Service {
         let task = load_task_by_reference(&tx, task_reference)?;
         let task_id = task.id;
         check_version(&task, expected)?;
-        if task.status == TaskStatus::Closed {
-            return Err(AppError::constraint("session.attach.closed_task"));
-        }
         let existing = tx
             .query_row(
                 "SELECT id,task_id,source,external_session_id,continued_from,record_path,started_at,ended_at
@@ -373,29 +308,13 @@ impl Service {
         from_session: Option<&str>,
         take_over: bool,
     ) -> AppResult<Outcome> {
-        let initial = self.connection()?;
-        let initial_task = load_task_by_reference(&initial, task_reference)?;
-        let task_id = initial_task.id;
-        check_version(&initial_task, expected)?;
-        let _ = load_latest_checkpoint(&initial, &initial_task)?;
-        let worktree_status = if initial_task.worktree_path.is_some() {
-            Some(self.worktree_status(&task_id.to_string())?.data["worktreeStatus"].clone())
-        } else {
-            None
-        };
-        drop(initial);
         let timestamp = now();
         let mut connection = self.connection()?;
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
-        let task = load_task(&tx, task_id)?;
+        let task = load_task_by_reference(&tx, task_reference)?;
+        let task_id = task.id;
         check_version(&task, expected)?;
-        if !matches!(
-            task.status,
-            TaskStatus::InProgress | TaskStatus::PendingRelease | TaskStatus::Blocked
-        ) {
-            return Err(AppError::constraint("task.resume.requires_active_task"));
-        }
         let source_id = from_session
             .map(ToOwned::to_owned)
             .or_else(|| task.current_session_id.clone())
@@ -468,7 +387,6 @@ impl Service {
             "checkpoint": response_checkpoint,
             "sessions": response_sessions,
             "sessionRules": session_rules,
-            "worktreeStatus": worktree_status,
             "nextStep": next_step,
         })))
     }
@@ -487,8 +405,8 @@ impl Service {
                 "sensitive content review must be confirmed before importing",
             ));
         }
-        let canonical = git_adapter::canonicalize_existing(file_path)
-            .map_err(|error| AppError::from_git(error, file_path.to_str()))?;
+        let canonical = crate::path_safety::canonicalize_existing(file_path)
+            .map_err(|error| AppError::from_path(error, file_path.to_str()))?;
         let path_metadata = fs::metadata(&canonical)
             .map_err(|error| AppError::invalid("file", error.to_string()))?;
         if !path_metadata.file_type().is_file() {
@@ -757,176 +675,6 @@ impl Service {
             "details":{"registered":record_paths.len(),"missing":missing_records}
         }));
 
-        let mut task_statement = connection
-            .prepare(
-                "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
-                        block_reason,block_recovery,current_session_id,repository_path,
-                        repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
-                        closure_outcome,closure_reason,closed_at,created_at,updated_at,project_id,
-                        (SELECT json_group_array(component_id) FROM (SELECT component_id FROM task_components WHERE task_id=tasks.id ORDER BY component_id))
-                 FROM tasks WHERE worktree_path IS NOT NULL ORDER BY id",
-            )
-            .map_err(AppError::from_sqlite)?;
-        let tasks = task_statement
-            .query_map([], crate::db::task_from_row)
-            .map_err(AppError::from_sqlite)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(AppError::from_sqlite)?;
-        if tasks.is_empty() {
-            checks.push(json!({
-                "code":"WORKTREE_REFERENCES",
-                "status":"ok",
-                "details":{"registered":0,"issues":[]}
-            }));
-        } else {
-            let mut issues = Vec::new();
-            for task in &tasks {
-                let (repository, common, branch, path) = match (
-                    task.repository_path.as_deref(),
-                    task.repository_common_dir.as_deref(),
-                    task.repository_branch.as_deref(),
-                    task.worktree_path.as_deref(),
-                ) {
-                    (Some(repository), Some(common), Some(branch), Some(path)) => {
-                        (repository, common, branch, path)
-                    }
-                    _ => {
-                        let RecoveryCommand { command, args } = self.recovery_command(["doctor"]);
-                        issues.push(json!({
-                            "taskId":task.id,
-                            "reason":"incomplete database references",
-                            "recommendedCommand":command,
-                            "recommendedArgs":args,
-                        }));
-                        continue;
-                    }
-                };
-                match git_adapter::observe_status(repository, common, path, branch) {
-                    Ok(status) if status.exists => {}
-                    Ok(status) => {
-                        let repository_info = match git_adapter::repository_info(Path::new(
-                            repository,
-                        )) {
-                            Ok(info) if info.common_dir.to_string_lossy() == common => info,
-                            Ok(_) => {
-                                let RecoveryCommand { command, args } =
-                                    self.recovery_command(["doctor"]);
-                                issues.push(json!({
-                                    "taskId":task.id,
-                                    "reason":"repository identity no longer matches the registered common directory",
-                                    "observed":status,
-                                    "registeredByGit":null,
-                                    "recommendedCommand":command,
-                                    "recommendedArgs":args,
-                                }));
-                                continue;
-                            }
-                            Err(error) => {
-                                let RecoveryCommand { command, args } =
-                                    self.recovery_command(["doctor"]);
-                                issues.push(json!({
-                                    "taskId":task.id,
-                                    "reason":"registered repository identity could not be verified",
-                                    "observed":status,
-                                    "registeredByGit":null,
-                                    "observationError":error.to_string(),
-                                    "recommendedCommand":command,
-                                    "recommendedArgs":args,
-                                }));
-                                continue;
-                            }
-                        };
-                        let registered_by_git = match git_adapter::find_worktree_registration(
-                            &repository_info.repository_path,
-                            Path::new(path),
-                        ) {
-                            Ok(found) => Some(found.is_some()),
-                            Err(error) => {
-                                let RecoveryCommand { command, args } =
-                                    self.recovery_command(["doctor"]);
-                                issues.push(json!({
-                                        "taskId":task.id,
-                                        "reason":"registered worktree registration could not be verified",
-                                        "observed":status,
-                                        "registeredByGit":null,
-                                        "observationError":error.to_string(),
-                                        "recommendedCommand":command,
-                                        "recommendedArgs":args,
-                                    }));
-                                None
-                            }
-                        };
-                        if registered_by_git.is_none() {
-                            continue;
-                        }
-                        if let Err(error) =
-                            git_adapter::verify_repository_identity(&repository_info)
-                        {
-                            let RecoveryCommand { command, args } =
-                                self.recovery_command(["doctor"]);
-                            issues.push(json!({
-                                "taskId":task.id,
-                                "reason":"registered repository identity could not be verified",
-                                "observed":status,
-                                "registeredByGit":null,
-                                "observationError":error.to_string(),
-                                "recommendedCommand":command,
-                                "recommendedArgs":args,
-                            }));
-                            continue;
-                        }
-                        let (reason, recovery, message) = if registered_by_git == Some(true) {
-                            (
-                                "registered worktree is absent but Git still registers it",
-                                self.recovery_command(["doctor"]),
-                                Some(
-                                    "prune the stale Git registration or restore the directory before detaching",
-                                ),
-                            )
-                        } else {
-                            (
-                                "registered worktree is absent",
-                                self.recovery_command(vec![
-                                    "worktree".to_owned(),
-                                    "detach".to_owned(),
-                                    task.id.to_string(),
-                                    "--expected-path".to_owned(),
-                                    path.to_owned(),
-                                    "--if-version".to_owned(),
-                                    task.version.to_string(),
-                                ]),
-                                None,
-                            )
-                        };
-                        let RecoveryCommand { command, args } = recovery;
-                        issues.push(json!({
-                            "taskId":task.id,
-                            "reason":reason,
-                            "observed":status,
-                            "registeredByGit":registered_by_git,
-                            "recoveryNote":message,
-                            "recommendedCommand":command,
-                            "recommendedArgs":args,
-                        }));
-                    }
-                    Err(error) => {
-                        let RecoveryCommand { command, args } = self.recovery_command(["doctor"]);
-                        issues.push(json!({
-                            "taskId":task.id,
-                            "reason":error.to_string(),
-                            "worktreePath":path,
-                            "recommendedCommand":command,
-                            "recommendedArgs":args,
-                        }));
-                    }
-                }
-            }
-            checks.push(json!({
-                "code":"WORKTREE_REFERENCES",
-                "status":if issues.is_empty() {"ok"} else {"warning"},
-                "details":{"registered":tasks.len(),"issues":issues}
-            }));
-        }
         Ok(Outcome::new(json!({"checks": checks})))
     }
 }

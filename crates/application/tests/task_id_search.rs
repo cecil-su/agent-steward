@@ -38,8 +38,8 @@ fn numeric_queries_match_exact_ids_and_keep_status_project_and_text_filters() {
         ids(search("1", None, Some("1")).unwrap().data),
         vec![json!(1)]
     );
-    service.task_claim("1", 1, "search-session", false).unwrap();
-    assert!(ids(search("#1", Some("open"), None).unwrap().data).is_empty());
+    service.task_status("1", 1, "in_progress").unwrap();
+    assert!(ids(search("#1", Some("todo"), None).unwrap().data).is_empty());
     assert_eq!(
         ids(search("#1", Some("in_progress"), None).unwrap().data),
         vec![json!(1)]

@@ -48,6 +48,8 @@ impl Daemon {
         let stop = temp.path().join("stop");
         let mut child = Command::new(env!("CARGO_BIN_EXE_taskd"))
             .env("LOCALAPPDATA", temp.path())
+            .arg("--bind")
+            .arg(std::env::var("STEWARD_TEST_BIND").unwrap_or_else(|_| "127.0.0.1".into()))
             .args(["--no-open", "--port", "0", "--database"])
             .arg(&database)
             .arg("--runtime-dir")
@@ -85,7 +87,7 @@ impl Daemon {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        write!(stream, "GET {path} HTTP/1.1\r\nHost: {}\r\nX-Steward-UI-Contract: 4\r\nConnection: close\r\n\r\n", self.address).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: {}\r\nX-Steward-UI-Contract: 5\r\nConnection: close\r\n\r\n", self.address).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200"));

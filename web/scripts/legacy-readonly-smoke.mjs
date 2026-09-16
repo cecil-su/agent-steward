@@ -11,7 +11,7 @@ import { chromium } from 'playwright';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const source = path.join(root, 'crates/server/web-legacy-readonly');
 const binDir = process.env.STEWARD_TEST_BIN_DIR;
-const bind = process.env.STEWARD_TEST_BIND ?? '127.0.0.1';
+const bind = process.env.STEWARD_TEST_BIND ?? '172.19.10.185';
 assert(Object.values(os.networkInterfaces()).flat().some(entry => entry?.family === 'IPv4' && entry.address === bind), 'Bind must be a local IPv4 address');
 assert(binDir && path.isAbsolute(binDir), 'Set STEWARD_TEST_BIN_DIR to an absolute development binary directory');
 const binary = name => path.join(binDir, name + (process.platform === 'win32' ? '.exe' : ''));
@@ -40,7 +40,7 @@ try {
   const empty = cli('project', 'create', '--name', '空资料项目').project;
   const noTasks = cli('project', 'create', '--name', '无任务项目').project;
   const createTask = (name, project = p.id) => cli('task', 'create', '--input', input('task', { title: `0909｜功能｜${name}`, goal: '任务主体目标', scope: '任务主体范围', acceptanceCriteria: '任务主体验收', ...(project ? { project: String(project) } : {}) })).task;
-  const origin = createTask('已关闭来源任务');
+  const origin = createTask('不再推进来源任务');
   const profile = { summary: '简介长文本\n' + '原生展示LongText'.repeat(170), architecture: '架构入口独占项目页\n<script>不可执行</script>', development: '开发验证独占项目页\ncargo test', evidence: '合成核实依据，不是正式事实', sourceTaskId: origin.id, sourceTaskVersion: origin.version };
   let revision = p.revision;
   const setProfile = value => { revision = cli('project', 'profile', 'set', String(p.id), '--if-revision', String(revision), '--input', input('profile', value)).project.revision; };
@@ -48,15 +48,13 @@ try {
   const component = cli('project', 'component', 'add', String(p.id), '--name', 'frontend', '--if-revision', String(revision)).component;
   revision++;
   const directory = path.join(temp, 'registered-directory'); fs.mkdirSync(directory);
-  fs.writeFileSync(path.join(directory, 'README.md'), 'Synthetic navigation only');
+  // Directory records are documentation only; paths need not exist.
   cli('project', 'source', 'add', String(p.id), '--directory', directory, '--if-revision', String(revision)); revision++;
-  const repo = path.join(temp, 'registered-repo'); fs.mkdirSync(repo);
-  execFileSync('git', ['-C', repo, 'init', '-b', 'main'], { stdio: 'pipe' });
-  fs.writeFileSync(path.join(repo, 'README.md'), 'Synthetic repository navigation');
-  cli('project', 'source', 'add', String(p.id), '--repo', repo, '--path', '.', '--component', 'frontend', '--if-revision', String(revision)); revision++;
+  const componentDirectory = path.join(temp, 'unverified-component-directory');
+  cli('project', 'source', 'add', String(p.id), '--directory', componentDirectory, '--component', 'frontend', '--if-revision', String(revision)); revision++;
   // More than one real API page for both tasks and project history.
   for (let i = 0; i < 46; i++) { cli('project', 'rename', String(p.id), '--name', i % 2 ? p.name : '历史临时名称', '--if-revision', String(revision)); revision++; }
-  cli('task', 'close', String(origin.id), '--if-version', String(origin.version), '--outcome', 'cancelled', '--reason', '隔离已关闭导航用例', '--yes');
+  cli('task', 'status', String(origin.id), 'cancelled', '--if-version', String(origin.version));
   for (let i = 0; i < 30; i++) createTask('分页任务' + i);
   const unbounded = createTask('未限定组件任务');
   const scoped = createTask('指定组件任务');
@@ -64,14 +62,14 @@ try {
   const noProject = createTask('无项目任务', null);
   const emptyTask = createTask('资料未填写任务', empty.id);
   cli('task', 'claim', String(noProject.id), '--session', 'synthetic-pending', '--if-version', String(noProject.version));
-  cli('task', 'pending-release', String(noProject.id), '--if-version', String(noProject.version + 1));
+  cli('task', 'status', String(noProject.id), 'in_review', '--if-version', String(noProject.version + 1));
   const ruleBody = '规则完整正文\n<img src=x onerror=alert(1)>';
   for (const [name, projectId, ruleStatus] of [['合成通用规则', null, 'active'], ['合成项目规则', p.id, 'active'], ['candidate-hidden', null, 'candidate'], ['disabled-hidden', null, 'disabled']]) {
     cli('rule', 'create', '--reason', 'Synthetic native rules fixture', '--input', input('rule', { scope: projectId ? 'project' : 'global', projectId, status: ruleStatus, contentVersion: 1, content: { name, body: ruleBody, sources: [{ kind: 'explicit', evidence: '历史版本依据', taskId: origin.id, taskVersion: origin.version }] } }));
   }
   const baseline = snapshot();
   const resources = Object.fromEntries(['index.html', 'app.js', 'style.css'].map(name => [name, fs.readFileSync(path.join(source, name))]));
-  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'native-task45-test', requiredApiContract: 4, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
+  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'native-task45-test', requiredApiContract: 5, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
   const release = sha(manifest), uiRoot = path.join(temp, 'ui'), releaseDir = path.join(uiRoot, 'releases', release);
   fs.mkdirSync(releaseDir, { recursive: true });
   fs.writeFileSync(path.join(releaseDir, 'manifest.json'), manifest);
@@ -111,7 +109,7 @@ try {
   const project = async name => { await page.locator('#projects').click(); await page.locator('#project-list .task-card').filter({ hasText: name }).click(); await page.locator('#project-detail h2').filter({ hasText: name }).waitFor(); };
   const projectRoot = page.locator('#project-detail');
   await task('无项目任务'); await page.getByText('未关联项目', { exact: true }).waitFor();
-  await page.locator('#detail .badge.pending_release').waitFor();
+  await page.locator('#detail .badge.in_review').waitFor();
   await task('资料未填写任务'); await page.locator('#detail summary').filter({ hasText: '展开项目简介' }).click(); await page.getByText('项目简介尚未填写。', { exact: true }).waitFor();
   await task('未限定组件任务'); await page.getByText('当前组件范围：未限定组件', { exact: true }).waitFor();
   const rulesPanel = page.locator('#detail .session-rules');
@@ -131,7 +129,7 @@ try {
   await page.locator('#refresh').click(); await page.locator('#detail').getByText(profile.summary, { exact: true }).waitFor();
   await page.locator('#detail').screenshot({ path: path.join(artifacts, 'task-desktop.png') });
   await task('指定组件任务'); await page.getByText(`当前组件范围：frontend (#${component.id})`, { exact: true }).waitFor();
-  await page.getByRole('tab', { name: '代码现场' }).click(); await page.getByText('未关联 Worktree', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('tab', { name: '代码现场' }).count(), 0);
   assert.equal(await page.locator('#detail').getByText(directory, { exact: false }).count(), 0);
   await page.getByRole('tab', { name: '概览' }).click();
   await page.getByRole('button', { name: '查看完整项目资料', exact: true }).click();
@@ -142,9 +140,10 @@ try {
   await projectRoot.getByText(profile.development, { exact: true }).waitFor();
   await projectRoot.getByText(profile.evidence, { exact: true }).waitFor();
   await projectRoot.locator('p').filter({ hasText: /^普通目录：.*registered-directory$/ }).waitFor();
-  await projectRoot.getByText('登记 common-dir：', { exact: false }).waitFor();
+  await projectRoot.getByText(`普通目录：${componentDirectory}`, { exact: true }).waitFor();
+  assert.equal(await projectRoot.getByRole('button', { name: '查看源码上下文' }).count(), 0);
   await projectRoot.getByRole('button', { name: '加载更多关联任务', exact: true }).click();
-  await projectRoot.getByRole('button', { name: `#${origin.id} · 0909｜功能｜已关闭来源任务`, exact: true }).waitFor();
+  await projectRoot.getByRole('button', { name: `#${origin.id} · 0909｜功能｜不再推进来源任务`, exact: true }).waitFor();
   await projectRoot.getByRole('button', { name: '加载更多维护历史', exact: true }).click();
   await projectRoot.getByText(`revision ${revision} ·`, { exact: false }).waitFor();
   const changes = projectRoot.locator('.timeline-item').filter({ hasText: 'project.profile_updated' });
@@ -158,14 +157,14 @@ try {
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Project mobile overflow');
     await page.screenshot({ path: path.join(artifacts, `project-${width}.png`), fullPage: true });
   }
-  await projectRoot.getByRole('button', { name: `#${origin.id} · 0909｜功能｜已关闭来源任务`, exact: true }).click();
-  await page.locator('#detail h2').filter({ hasText: '已关闭来源任务' }).waitFor();
-  await page.locator('#detail .badge.closed').waitFor();
+  await projectRoot.getByRole('button', { name: `#${origin.id} · 0909｜功能｜不再推进来源任务`, exact: true }).click();
+  await page.locator('#detail h2').filter({ hasText: '不再推进来源任务' }).waitFor();
+  await page.locator('#detail .badge.cancelled').waitFor();
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Task mobile overflow');
   await page.screenshot({ path: path.join(artifacts, 'task-320.png'), fullPage: true });
   await page.locator('#detail').getByRole('button', { name: `${p.name} (##${p.id})`, exact: true }).click();
   await projectRoot.getByRole('button', { name: `来源任务 #${origin.id}`, exact: true }).first().click();
-  await page.locator('#detail .badge.closed').waitFor();
+  await page.locator('#detail .badge.cancelled').waitFor();
   await project(empty.name); await projectRoot.getByText('项目资料尚未填写。', { exact: true }).waitFor();
   await projectRoot.getByText('尚未登记组件。', { exact: true }).waitFor(); await projectRoot.getByText('尚未登记源码。', { exact: true }).waitFor();
   // Distinguish errors from empty values; retry only reads and late responses cannot replace another selection.
@@ -213,7 +212,7 @@ try {
   await projectRoot.getByText('关联任务读取失败：', { exact: false }).waitFor();
   assert.equal(await projectRoot.getByRole('button', { name: /^#\d+ ·/ }).count(), firstCount);
   await page.unroute('**/api/tasks?**', failLater); await projectRoot.getByRole('button', { name: '重试读取关联任务', exact: true }).click();
-  await projectRoot.getByRole('button', { name: `#${origin.id} · 0909｜功能｜已关闭来源任务`, exact: true }).waitFor();
+  await projectRoot.getByRole('button', { name: `#${origin.id} · 0909｜功能｜不再推进来源任务`, exact: true }).waitFor();
   assert.equal(await projectRoot.getByRole('button', { name: /^#\d+ ·/ }).count(), 33);
   // Task component lookup failures retain the selected IDs, never claim an unrestricted scope.
   await page.locator('#back-tasks').click();
@@ -251,7 +250,7 @@ try {
   await page.locator('#logout').click();
   assert.deepEqual(posts, ['/api/login', '/api/logout', '/api/login', '/api/logout']);
   assert.equal(snapshot(), baseline, 'Browser changed synthetic database tables');
-  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['numeric and hash-prefixed task search', 'contract4 and pending release', 'full rules/source copy and missing-rule copy rejection', 'full profile/provenance', 'compact task project', 'component scope', 'project source versus task Worktree', 'closed task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'reader/admin readonly boundary', 'all SQLite tables unchanged'] };
+  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['numeric and hash-prefixed task search', 'contract5 and in-review status', 'full rules/source copy and missing-rule copy rejection', 'full profile/provenance', 'compact task project', 'component scope', 'source directory documentation without filesystem queries', 'cancelled task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'reader/admin readonly boundary', 'all SQLite tables unchanged'] };
   fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2)); success = true;
 } finally {
   try { if (browser) await browser.close(); }

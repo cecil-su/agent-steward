@@ -1,5 +1,6 @@
 import type { DetailTab, HistoryEntry, Note, Session, TaskContext, ProjectProfile, SessionRules } from '../lib/contracts';
 import { EmptyState } from '../components/ui/empty-state';
+import { Markdown } from '../components/markdown';
 
 export function SessionRulesPanel({ rules }: { rules?: SessionRules }) {
   return <section aria-label="有效个人与项目规则" className="space-y-3 rounded-lg border border-border bg-card p-4">
@@ -71,7 +72,7 @@ function NotesPanel({ notes }: { notes?: Note[] }) {
   return <ul className="list-none space-y-3 p-0">{notes.map((note) => (
     <li key={note.id} className="rounded-lg border border-border p-4 text-sm">
       <p className="text-xs text-muted-foreground">#{note.id} · {note.noteType} · {note.createdAt}</p>
-      <p className="whitespace-pre-wrap break-words">{note.text}</p>
+      <Markdown text={note.text} />
     </li>
   ))}</ul>;
 }
@@ -95,25 +96,18 @@ export function TaskDetailPanel({ tab, context, notes, sessions, history }: {
   if (tab === 'notes') return <NotesPanel notes={notes} />;
   if (tab === 'sessions') return <SessionPanel sessions={sessions} />;
   if (tab === 'history') return <HistoryPanel entries={history} />;
-  if (tab === 'worktree') return (
-    <section aria-label="代码现场" className="space-y-3">
-      <p className="text-sm text-muted-foreground">仅展示后端提供的代码现场观测 JSON，不执行 Git 写操作。</p>
-      {context.worktreeStatus == null
-        ? <EmptyState className="px-4 py-8" title="代码现场不可观察" description="未提供 worktreeStatus，不能据此认定工作树为 clean。" />
-        : <Json value={context.worktreeStatus} />}
-    </section>
-  );
+
   const checkpoint = context.checkpoint;
   return <div className="space-y-6">
     <section aria-label="Checkpoint">
       <h3 className="font-semibold">Checkpoint</h3>
       {checkpoint ? <div className="space-y-3 text-sm">
         <p className="text-xs text-muted-foreground">{checkpoint.createdAt} · {checkpoint.sessionId}</p>
-        <p className="whitespace-pre-wrap break-words">{checkpoint.summary}</p>
+        <Markdown text={checkpoint.summary} />
         {([['已完成', checkpoint.completed], ['决策', checkpoint.decisions], ['待办', checkpoint.pending], ['风险', checkpoint.risks]] as const).map(([label, items]) => (
-          <div key={label}><h4 className="text-muted-foreground">{label}</h4>{items.length ? <ul className="list-disc pl-5">{items.map((item, index) => <li key={index} className="whitespace-pre-wrap break-words">{item}</li>)}</ul> : <p>无</p>}</div>
+          <div key={label}><h4 className="text-muted-foreground">{label}</h4>{items.length ? <ul className="list-disc pl-5">{items.map((item, index) => <li key={index}><Markdown text={item} /></li>)}</ul> : <p>无</p>}</div>
         ))}
-        <p className="whitespace-pre-wrap break-words">下一步：{checkpoint.nextStep ?? '未提供'}</p>
+        <div>下一步：<Markdown text={checkpoint.nextStep ?? '未提供'} /></div>
       </div> : <EmptyState className="px-4 py-8" title="暂无 Checkpoint" />}
     </section>
     <section aria-label="近期备注">

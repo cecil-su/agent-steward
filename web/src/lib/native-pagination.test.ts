@@ -19,7 +19,7 @@ function fixture() {
     if (u.pathname === '/api/projects') data = { projects: [project], hasMore: false };
     else if (/^\/api\/projects\/\d+$/.test(u.pathname)) data = { project: { ...project, id: Number(u.pathname.split('/').at(-1)) }, profile: null };
     else if (u.pathname.endsWith('/components')) data = { project, components: [] };
-    else if (u.pathname.endsWith('/sources')) data = { project, sources: [], repositories: [] };
+    else if (u.pathname.endsWith('/sources')) data = { project, sources: [] };
     else if (u.pathname.endsWith('/history')) {
       const after = Number(u.searchParams.get('after')); cursors.push(after);
       if (hold) await hold();
@@ -27,7 +27,7 @@ function fixture() {
       data = { history: [after + 1, after + 2].map(revision => ({ revision, occurredAt: '', changeType: 'project.created', payload: { name: 'fixture' } })), hasMore: after < 4, nextAfter: after + 2 };
     } else if (u.pathname === '/api/tasks') {
       const after = Number(u.searchParams.get('cursor'));
-      data = { tasks: [after + 1, after + 2].map(id => ({ id, title: 'Task ' + id, status: 'closed' })), hasMore: after < 4, nextCursor: String(after + 2) };
+      data = { tasks: [after + 1, after + 2].map(id => ({ id, title: 'Task ' + id, status: 'done' })), hasMore: after < 4, nextCursor: String(after + 2) };
     } else throw new Error(path);
     return { ok: true, status: 200, json: async () => ({ ok: true, data, warnings: [] }) };
   });

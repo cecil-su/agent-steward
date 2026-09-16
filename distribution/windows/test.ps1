@@ -14,14 +14,14 @@ $InstallRoot = Join-Path $temp "install with spaces $unicode"
 New-Item -ItemType Directory -Path $InstallRoot,(Join-Path $InstallRoot 'versions'),(Join-Path $InstallRoot 'runs') | Out-Null
 try {
     Assert-Fails { Assert-Version '../v1.0.0' }
-    foreach ($schema in @(0,1,2,3,4,5,6,8)) {
+    foreach ($schema in @(0,1,2,3,4,5,6,7,9)) {
         Assert-Fails { Assert-Manifest @{version='v1.0.0';databaseSchema=$schema;launcherProtocol=1;target='x86_64-pc-windows-msvc'} }
     }
-    Assert-Manifest @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Assert-Manifest @{version='v1.0.0';databaseSchema=8;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     Assert-Fails { Assert-Settings @{bind='0.0.0.0';port=43123;database='C:\tasks.db';runtimeDir='C:\runtime';requireLocalAuth=$false} }
     $bundle = Join-Path $temp 'bundle'; New-Item -ItemType Directory -Path $bundle | Out-Null
     foreach ($file in @('taskd.exe','taskctl.exe','task-hook.exe','steward.ps1','Start.cmd','Update.cmd','Stop.cmd','README.md')) { [IO.File]::WriteAllText((Join-Path $bundle $file), 'synthetic') }
-    Write-Json (Join-Path $bundle 'manifest.json') @{version='v1.0.1';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $bundle 'manifest.json') @{version='v1.0.1';databaseSchema=8;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     $zip = Join-Path $temp 'release.zip'; Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $zip
     $sum = "$zip.sha256"; [IO.File]::WriteAllText($sum, (Get-FileHash $zip).Hash)
     Expand-Release $zip $sum (Join-Path $temp 'expanded')
@@ -45,15 +45,31 @@ try {
     if ($Taskd) {
         $Taskd = [IO.Path]::GetFullPath($Taskd)
         Copy-Item $Taskd (Join-Path $InstallRoot 'versions\v1.0.1\taskd.exe') -Force
-        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop()
-        $settings = @{bind='127.0.0.1';port=$port;database=(Join-Path $temp "$unicode tasks.db");runtimeDir=(Join-Path $temp "$unicode runtime");requireLocalAuth=$false}
+        $bind = if ($env:STEWARD_TEST_BIND) { $env:STEWARD_TEST_BIND } else { '127.0.0.1' }
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($bind), 0); $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop()
+        $settings = @{bind=$bind;port=$port;database=(Join-Path $temp "$unicode tasks.db");runtimeDir=(Join-Path $temp "$unicode runtime");requireLocalAuth=$false}
         Write-Json (Join-Path $InstallRoot 'settings.json') $settings
         try {
             $url = Start-Managed 'v1.0.1'
             $access = Invoke-RestMethod "$url/api/access"
             Assert ($access.data.local -and $access.data.role -eq 'admin') 'Local browser still requires credentials.'
             $result = Invoke-RestMethod "$url/api/commands/task-create" -Method Post -ContentType 'application/json' -Headers @{Origin=$url;'X-Steward-CSRF'='1'} -Body '{"input":{}}'
-            Assert $result.ok 'Local write failed.'
+            Assert ($result.ok -and $result.schemaVersion -eq 3 -and $result.data.task.status -eq 'todo') 'Schema 8 default status/envelope contract failed.'
+            $version = $result.data.task.version
+            foreach ($status in @('backlog','todo','in_progress','in_review','blocked','done','cancelled','todo')) {
+                $body = @{taskId=1;expectedVersion=$version;status=$status} | ConvertTo-Json
+                $changed = Invoke-RestMethod "$url/api/commands/task-status" -Method Post -ContentType 'application/json' -Headers @{Origin=$url;'X-Steward-CSRF'='1';'X-Steward-UI-Contract'='5'} -Body $body
+                Assert ($changed.schemaVersion -eq 3 -and $changed.data.task.status -ceq $status -and $null -eq $changed.data.task.currentSessionId) 'Status change altered the Session or violated the contract.'
+                $version = $changed.data.task.version
+                $noop = Invoke-RestMethod "$url/api/commands/task-status" -Method Post -ContentType 'application/json' -Headers @{Origin=$url;'X-Steward-CSRF'='1'} -Body (@{taskId=1;expectedVersion=$version;status=$status} | ConvertTo-Json)
+                Assert ($noop.data.task.version -eq $version) 'Same-status CAS was not a no-op.'
+            }
+            foreach ($command in @('task-close','task-block','task-unblock','task-pending-release','task-continue','worktree-create','worktree-adopt','worktree-remove','worktree-detach')) {
+                Assert-Fails { Invoke-RestMethod "$url/api/commands/$command" -Method Post -ContentType 'application/json' -Headers @{Origin=$url;'X-Steward-CSRF'='1'} -Body '{}' }
+            }
+            $context = Invoke-RestMethod "$url/api/tasks/1/context"
+            Assert (-not $context.data.PSObject.Properties['worktreeStatus']) 'Task context still exposes Worktree observations.'
+            Assert ((Invoke-RestMethod "$url/ui/status").apiContract -eq 5) 'Wrong UI API contract.'
             Stop-Managed
             # Build the synthetic old-schema fixture while the owned database is
             # quiescent. Never copy a live WAL database's main file; taskd now keeps
@@ -80,7 +96,7 @@ try {
         $packageOutput = Join-Path $temp 'packaged'
         & (Join-Path $PSScriptRoot 'package.ps1') -Version 'v9.0.0' -Binaries ([IO.Path]::GetDirectoryName($Taskd)) -Output $packageOutput
         $packaged = Read-Json (Join-Path $packageOutput 'bundle\manifest.json')
-        Assert ($packaged.databaseSchema -eq 7) 'Release package mislabeled Schema 7.'
+        Assert ($packaged.databaseSchema -eq 8) 'Release package mislabeled Schema 8.'
         Expand-Release (Join-Path $packageOutput 'agent-steward-windows-x64.zip') (Join-Path $packageOutput 'agent-steward-windows-x64.zip.sha256') (Join-Path $temp 'package-verified')
         # Restore the synthetic binary for immutable-package retry checks below.
         [IO.File]::WriteAllText((Join-Path $InstallRoot 'versions\v1.0.1\taskd.exe'), 'synthetic')
@@ -96,7 +112,7 @@ try {
     foreach ($p in @((Join-Path $entryRoot 'steward.ps1'),(Join-Path $entryVersion 'steward.ps1'))) { Copy-Item (Join-Path $PSScriptRoot 'steward.ps1') $p }
     Write-Json (Join-Path $entryRoot 'current.json') @{version='v1.0.0'}
     Write-Json (Join-Path $entryRoot 'settings.json') @{bind='127.0.0.1';port=43123;database=(Join-Path $entryRoot 'entry.db');runtimeDir=(Join-Path $entryRoot 'runtime');requireLocalAuth=$false}
-    Write-Json (Join-Path $entryVersion 'manifest.json') @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $entryVersion 'manifest.json') @{version='v1.0.0';databaseSchema=8;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     $savedLocalAppData = $env:LOCALAPPDATA
     try {
         $env:LOCALAPPDATA = Join-Path $temp 'unused default'
@@ -106,7 +122,7 @@ try {
     } finally { $env:LOCALAPPDATA = $savedLocalAppData }
     # Offline update orchestration: download first; failure restarts the old version.
     New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'versions\v1.0.0') | Out-Null
-    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=8;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     $script:failPreflight = $false
     function Assert-StartCompatible([string]$Version) {
         if ($script:failPreflight) { throw 'synthetic schema mismatch' }
@@ -128,7 +144,7 @@ try {
     Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=2;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     Assert-Fails { Update-Managed }
     Assert ($script:stops -eq 0 -and $script:starts.Count -eq 0) 'Cross-schema update touched the daemon.'
-    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=7;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
+    Write-Json (Join-Path $InstallRoot 'versions\v1.0.0\manifest.json') @{version='v1.0.0';databaseSchema=8;launcherProtocol=1;target='x86_64-pc-windows-msvc'}
     Assert-Fails { Update-Managed }
     Assert (($script:starts -join ',') -eq 'v1.0.1,v1.0.0') "Failed startup did not restart old version: $script:lastFailure"
     Assert ((Read-Json (Join-Path $InstallRoot 'current.json')).version -eq 'v1.0.0') 'Failed update changed current version.'

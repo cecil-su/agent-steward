@@ -1,12 +1,14 @@
 # Codex 与 pi 原生适配
 
-当前源码 Schema7/UI合同4；未获迁移/部署授权前，不按下列部署示例覆盖正式 CLI/Hook。上下文采集器仅为仓库内实验模块，见下文。
+当前源码 Schema8、CLI/HTTP envelope3、UI合同5；未获迁移/部署授权前，不按下列部署示例覆盖正式 CLI/Hook。项目源码路径仅作为资料保存，不执行 Git 验证或源码读取。宿主规则证据采集器仍为独立实验模块，见下文。
 
 ## 任务需求与规则入口
 
-[task-context.ts 候选启动入口](pi/task-context.md)可由 Herdr原生Agent参数或手工Pi命令显式加载。它在真实Pi input事件中调用 `taskctl --database DB --json task context TASK --require-read-only`，不修改输入；在技能/模板展开后的context阶段完整交付需求与sessionRules。读取失败直接阻断输入，晚到的身份变化触发Agent abort，不将扩展抛错视为阻断；不领取、绑定或恢复Session。已用隔离真实Pi新进程及本地合成provider验证最终模型请求。观测适配器仍保持独立；全局已安装管理扩展未替换，候选不自动部署。启动参数、会话边界、外部源码位置和人工验证限制见上述入口说明；规则合同见[个人偏好与项目规则](../docs/v0/22-个人偏好与项目规则.md)。
+[task-context.ts 候选启动入口](pi/task-context.md)可由 Herdr原生Agent参数或手工Pi命令显式加载。它在真实Pi input事件中调用 `taskctl --database DB --json task context TASK --require-read-only`，不修改输入；在技能/模板展开后的context阶段完整交付需求与sessionRules。读取失败直接阻断输入，晚到的身份变化触发Agent abort，不将扩展抛错视为阻断；不领取、绑定或恢复Session。Schema8/envelope3 的隔离 CLI/门控合同及现有 Pi 0.85.1 新进程/合成 provider 最终请求验证通过；正式工作流仍须独立验收。观测适配器仍保持独立；全局已安装管理扩展未替换，候选不自动部署。启动参数、会话边界、外部源码位置和人工验证限制见上述入口说明；规则合同见[个人偏好与项目规则](../docs/v0/22-个人偏好与项目规则.md)。
 
-先运行 `cargo build --workspace --locked`。适配器需要显式绑定，不读取 transcript，不保存消息正文，不改变 Task 执行状态。
+[agent-steward.ts 管理候选](pi/agent-steward.md)提供显式任务资料写入及七状态 `status`/CAS 工具；与只读 `task-context.ts`、观测 Hook `steward.ts` 分离。普通会话不自动关联、领取或接管；业务状态不构成执行权限；没有替换运行中的全局管理扩展。
+
+先运行 `cargo build --workspace --locked`。以下观测 Hook 需要显式绑定，不读取 transcript，不保存消息正文，不改变 Task 业务状态。
 
 ## 绑定
 
@@ -81,7 +83,7 @@ pi -e /absolute/agent-steward/integrations/pi/steward.ts
 - 双次同步快照不一致、时钟回退/采集超时、重复/未知工具、超限或异常均返回固定错误，不带原始异常/正文。64 个规则、256 个工具；规则256 KiB/项及4 MiB合计；JSON元数据128 KiB/项及工具合计2 MiB；输出最多64000 UTF-8 bytes，不静默省略。
 - 观察生命周期最多60秒，fingerprint绑定版本/实例/Session/CWD/采集阶段/加载内容及工具元数据；返回 expiresAtMs 不构成复用许可。hostClaimVerified/reuseAllowed恒false，无磁盘缓存、数据库写入、消息注入、日志、子进程或网络操作。
 
-**权威边界：** Pi 默认每目录优先 AGENTS.override.md，否则 AGENTS.md，再否则 CLAUDE.md；global/祖先/CWD 规则按加载顺序合并，`--no-context-files` 可以禁用。SDK还可替换/提供虚拟contextFiles。因此 Rust 的宿主无关文件导航不等于 Pi 已加载清单。`getSystemPromptOptions()` 只表示基础输入，before_agent_start 只表示当前处理器阶段；后续处理器、context、before_provider_request 仍可改写，不能称为最终发给模型的规则全集。
+**权威边界：** Pi 默认每目录优先 AGENTS.override.md，否则 AGENTS.md，再否则 CLAUDE.md；global/祖先/CWD 规则按加载顺序合并，`--no-context-files` 可以禁用。SDK还可替换/提供虚拟contextFiles。Steward 不提供项目源码导航；其宿主证据文件核验也不等于 Pi 已加载清单。`getSystemPromptOptions()` 只表示基础输入，before_agent_start 只表示当前处理器阶段；后续处理器、context、before_provider_request 仍可改写，不能称为最终发给模型的规则全集。
 
 **不直接转换为 Rust HostEvidence。** 加载文本是 Pi 解码后的字符串，不是本机原始字节/对象身份；Pi Session ID 也不是 Steward Session ID。后续须显式绑定当前请求与本机身份，核对加载内容和规则覆盖，不能填造 objectSha256、把元数据摘要充当工具配置摘要，或用 Pi 版本冒充每个工具版本。当前 native identity/config/final payload/rule scope/dependency blocker 均保留。
 
@@ -104,8 +106,10 @@ STEWARD_TEST_PI_BIN=/absolute/pi.exe node --test integrations/tests/pi-context.t
 
 ```bash
 cargo build --workspace --locked
-node --test integrations/tests/native.test.mjs
+STEWARD_TEST_BIND=172.19.10.185 node --test integrations/tests/native.test.mjs
 ```
+
+涉及本地 HTTP 监听的集成测试读取 `STEWARD_TEST_BIND`：本机显式使用 `172.19.10.185`，CI 未设置时保留回环默认值，不要求 runner 具备该网卡。指定地址失败不自动回退。
 
 原生测试读取 `CARGO_TARGET_DIR`（未设置时仍为 target）下的 debug 构建，允许使用 #34 隔离构建目录，不调用全局 taskctl。CI及Windows发布入口还包括 pi-context.test.mjs；真实Pi子测试仅在显式提供二进制时执行，不因单元测试通过宣称真实会话验收。
 

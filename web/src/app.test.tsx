@@ -6,7 +6,7 @@ import { App } from './app';
 import { createQueryClient } from './lib/query-client';
 import { useWorkspaceStore } from './stores/workspace';
 
-const task = { id: 40, title: '隔离测试任务', status: 'open', version: 1, goal: 'fixture', scope: null, acceptanceCriteria: null, nextStep: null, projectId: null, componentIds: [] };
+const task = { id: 40, title: '隔离测试任务', status: 'todo', version: 1, goal: 'fixture', scope: null, acceptanceCriteria: null, nextStep: null, projectId: null, componentIds: [] };
 const project = { id: 1, name: '隔离测试项目', revision: 1, createdAt: '', updatedAt: '' };
 const reply = (data: unknown) => new Response(JSON.stringify({ ok: true, data, warnings: [] }));
 let client: ReturnType<typeof createQueryClient>;
@@ -39,18 +39,18 @@ async function connect() {
   await screen.findByRole('button', { name: /#40/ });
 }
 it('shows pending release in list and detail without a task write entry', async () => {
-  const pending = { ...task, status: 'pending_release' };
+  const pending = { ...task, status: 'in_review' };
   const transport = mount(path => {
     if (path.startsWith('/api/tasks?')) return reply({ tasks: [pending], hasMore: false, nextCursor: null });
     if (path === '/api/tasks/40/context') return reply({ task: pending, project: null });
   });
   await connect();
-  expect(screen.getAllByText('待上线').length).toBeGreaterThanOrEqual(2);
+  expect(screen.getAllByText('待审核或验收').length).toBeGreaterThanOrEqual(2);
   fireEvent.click(screen.getByRole('button', { name: /#40/ }));
   await screen.findByText('fixture');
-  expect(screen.getAllByText('待上线').length).toBeGreaterThanOrEqual(3);
+  expect(screen.getAllByText('待审核或验收').length).toBeGreaterThanOrEqual(3);
   expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
-  expect(screen.queryByRole('button', { name: /继续修改|关闭任务|标记待上线/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /继续修改|关闭任务|标记待审核或验收/ })).not.toBeInTheDocument();
 });
 it('exchanges a one-use link once under StrictMode and clears it before any request', async () => {
   const code = 'a'.repeat(64);
@@ -146,10 +146,10 @@ it('restores the original brand and task views without instructional banners', a
   const transport = mount(); await connect();
   expect(screen.getByRole('link', { name: 'Agent Steward · 本地任务工作台' })).toHaveTextContent('S');
   const views = screen.getByLabelText('任务状态视图');
-  expect([...views.querySelectorAll('button')].map(button => button.textContent)).toEqual(['未关闭', '进行中', '待上线', '有阻塞', '已关闭', '最近全部']);
+  expect([...views.querySelectorAll('button')].map(button => button.textContent)).toEqual(['未结束', '暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进', '最近全部']);
   expect(screen.queryByText(/项目资料和任务由 AI/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Web 仅用于检索和展示/)).not.toBeInTheDocument();
-  for (const [name, parameter] of [['进行中', 'view=in-progress'], ['待上线', 'view=pending-release'], ['有阻塞', 'view=blocked'], ['已关闭', 'status=closed'], ['最近全部', 'view=recent'], ['未关闭', 'view=active']]) {
+  for (const [name, parameter] of [['暂不开始', 'status=backlog'], ['等待开始', 'status=todo'], ['不再推进', 'status=cancelled'], ['执行中', 'view=in-progress'], ['待审核或验收', 'view=in-review'], ['受阻', 'view=blocked'], ['已完成', 'status=done'], ['最近全部', 'view=recent'], ['未结束', 'view=active']]) {
     fireEvent.click(screen.getByRole('button', { name }));
     await waitFor(() => expect(screen.getByRole('button', { name: '刷新' })).not.toBeDisabled());
     expect(transport.mock.calls.some(([path]) => String(path).includes(parameter))).toBe(true);
@@ -160,16 +160,16 @@ it('keeps loaded closed-task pages on refresh failure and never mixes them into 
   const transport = mount(path => {
     if (!path.startsWith('/api/tasks?')) return;
     const params = new URL(path, 'http://fixture').searchParams;
-    if (params.get('status') !== 'closed') return;
+    if (params.get('status') !== 'done') return;
     expect(params.has('view')).toBe(false);
     if (params.get('cursor') === 'next') {
       if (failSecondPage) return Promise.reject(new Error('synthetic read failure'));
-      return reply({ tasks: [{ ...task, id: 41, title: '第二页关闭任务', status: 'closed' }], hasMore: false, nextCursor: null });
+      return reply({ tasks: [{ ...task, id: 41, title: '第二页关闭任务', status: 'done' }], hasMore: false, nextCursor: null });
     }
-    return reply({ tasks: [{ ...task, status: 'closed' }], hasMore: true, nextCursor: 'next' });
+    return reply({ tasks: [{ ...task, status: 'done' }], hasMore: true, nextCursor: 'next' });
   });
   await connect();
-  fireEvent.click(screen.getByRole('button', { name: '已关闭' }));
+  fireEvent.click(screen.getByRole('button', { name: '已完成' }));
   const more = await screen.findByRole('button', { name: '加载更多' });
   await waitFor(() => expect(more).not.toBeDisabled()); fireEvent.click(more);
   await screen.findByRole('button', { name: /#41/ });
@@ -178,7 +178,7 @@ it('keeps loaded closed-task pages on refresh failure and never mixes them into 
   await screen.findByRole('alert');
   expect(screen.getByRole('button', { name: /#40/ })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /#41/ })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: '未关闭' }));
+  fireEvent.click(screen.getByRole('button', { name: '未结束' }));
   await waitFor(() => expect(screen.queryByRole('button', { name: /#41/ })).not.toBeInTheDocument());
   expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
 });
@@ -225,13 +225,14 @@ it('clears task data when authorization expires', async () => {
   expect(screen.queryByRole('button', { name: /#40/ })).not.toBeInTheDocument();
   expect(client.getQueryData(['tasks', 'active', '', null])).toBeUndefined();
 });
-it('loads notes, sessions, history and unavailable worktree only through reads', async () => {
+it('loads notes, sessions and history only through reads without worktree queries', async () => {
   const transport = mount(); await connect();
   fireEvent.click(screen.getByRole('button', { name: /#40/ })); await screen.findByText('fixture');
   fireEvent.click(screen.getByRole('button', { name: '进展备注' })); await screen.findByText('可追溯的进展');
   fireEvent.click(screen.getByRole('button', { name: 'Session' })); await screen.findByText('fixture-session');
   fireEvent.click(screen.getByRole('button', { name: '历史' })); await screen.findByText('隔离创建记录');
-  fireEvent.click(screen.getByRole('button', { name: '代码现场' })); await screen.findByText('代码现场不可观察');
+  expect(screen.queryByRole('button', { name: '代码现场' })).toBeNull();
+  expect(transport.mock.calls.every(([path]) => !/worktree|\/projects\/\d+\/context/.test(String(path)))).toBe(true);
   expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
 });
 it('looks up a project by unique name and filters its tasks without changing membership', async () => {

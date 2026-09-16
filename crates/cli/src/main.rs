@@ -7,9 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::{Value, json};
 use steward_application::database_permission_warning;
-use steward_application::{
-    AppError, ErrorBody, Outcome, ProjectContextOptions, Service, SourceLocation, TaskListOptions,
-};
+use steward_application::{AppError, ErrorBody, Outcome, Service, SourceLocation, TaskListOptions};
 use steward_core::Warning;
 
 #[derive(Debug, Parser)]
@@ -62,10 +60,6 @@ enum TopCommand {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    Worktree {
-        #[command(subcommand)]
-        command: WorktreeCommand,
-    },
     History {
         task_id: String,
     },
@@ -110,10 +104,20 @@ enum RuleCommand {
 
 #[derive(Debug, Subcommand)]
 enum DatabaseCommand {
+    /// Copy a quiescent Schema 7 snapshot into a new Schema 8 database.
+    ImportSchema7 {
+        #[arg(long)]
+        source: PathBuf,
+        /// JSON object mapping source IDs to absolute directory paths.
+        #[arg(long)]
+        source_paths: Option<PathBuf>,
+    },
     /// Copy a quiescent Schema 6 snapshot; new rules start empty.
     ImportSchema6 {
         #[arg(long)]
         source: PathBuf,
+        #[arg(long)]
+        source_paths: Option<PathBuf>,
     },
     /// Copy a quiescent Schema 2 snapshot into a new current-schema database; never switches services.
     ImportSchema2 {
@@ -124,11 +128,15 @@ enum DatabaseCommand {
     ImportSchema4 {
         #[arg(long)]
         source: PathBuf,
+        #[arg(long)]
+        source_paths: Option<PathBuf>,
     },
     /// Copy a quiescent Schema 5 snapshot into a new current-schema database; never switches services.
     ImportSchema5 {
         #[arg(long)]
         source: PathBuf,
+        #[arg(long)]
+        source_paths: Option<PathBuf>,
     },
     /// Copy a legacy v7 closed-task archive into a new current-schema database.
     ImportV7 {
@@ -143,28 +151,6 @@ enum ProjectCommand {
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
-    },
-    /// Live source navigation; snippets only for explicit --file requests. Never a reusable authority snapshot.
-    Context {
-        project: String,
-        #[arg(long)]
-        source: i64,
-        #[arg(long)]
-        worktree: Option<PathBuf>,
-        #[arg(long = "file")]
-        files: Vec<String>,
-        #[arg(long = "dependency")]
-        dependencies: Vec<String>,
-        /// Compact JSON data bytes, not tokens or full CLI output bytes.
-        #[arg(long, default_value_t = 8000)]
-        budget_bytes: usize,
-    },
-    /// Only returns candidates; never selects a project or claims a task.
-    Here {
-        #[arg(long)]
-        directory: Option<PathBuf>,
-        #[arg(long)]
-        project: Option<String>,
     },
     Component {
         #[command(subcommand)]
@@ -238,28 +224,13 @@ enum SourceCommand {
         if_revision: i64,
         #[arg(long)]
         component: Option<String>,
-        #[arg(
-            long,
-            required_unless_present = "directory",
-            conflicts_with = "directory",
-            requires = "path"
-        )]
-        repo: Option<PathBuf>,
-        #[arg(long, requires = "repo", conflicts_with = "directory")]
-        path: Option<String>,
-        #[arg(long, conflicts_with_all = ["repo", "path"])]
-        directory: Option<PathBuf>,
+        #[arg(long)]
+        directory: PathBuf,
     },
     List {
         project: String,
     },
-    Resolve {
-        project: String,
-        source_id: i64,
-        #[arg(long)]
-        worktree: Option<PathBuf>,
-    },
-    /// Remove only this metadata link; never delete any files or Git worktrees.
+    /// Remove only this metadata link; never delete any files.
     Remove {
         project: String,
         source_id: i64,
@@ -278,7 +249,11 @@ enum TaskListFormat {
 enum TaskListView {
     Active,
     InProgress,
-    PendingRelease,
+    InReview,
+    Backlog,
+    Todo,
+    Done,
+    Cancelled,
     Blocked,
     Recent,
 }
@@ -305,8 +280,6 @@ enum TaskCommand {
     Notes {
         task_id: String,
     },
-    /// Find tasks associated with the current directory (does not select or claim one).
-    Here,
     /// Export task context through a read-only SQLite connection; never initialize a missing/empty database.
     Context {
         task_id: String,
@@ -321,7 +294,7 @@ enum TaskCommand {
         view: Option<TaskListView>,
         #[arg(
             long,
-            help = "open, in_progress, pending_release, blocked, closed, or active (all unclosed tasks)"
+            help = "backlog, todo, in_progress, in_review, blocked, done, cancelled, or active (excludes done/cancelled)"
         )]
         status: Option<String>,
         #[arg(long = "task-key")]
@@ -347,7 +320,7 @@ enum TaskCommand {
         #[arg(long)]
         project: Option<String>,
     },
-    /// Explicitly change project membership; does not claim or adopt a worktree.
+    /// Explicitly change project membership; does not claim a Session.
     Project {
         task_id: String,
         #[arg(long = "if-version")]
@@ -391,33 +364,13 @@ enum TaskCommand {
         #[arg(long)]
         text: String,
     },
-    Block {
+    /// Change task status independently of its Session; requires the current version.
+    Status {
         task_id: String,
+        #[arg(value_parser = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"])]
+        status: String,
         #[arg(long = "if-version")]
         if_version: i64,
-        #[arg(long)]
-        reason: String,
-        #[arg(long)]
-        recovery: String,
-    },
-    /// Mark development finished and awaiting release; preserves the current Session.
-    PendingRelease {
-        task_id: String,
-        #[arg(long = "if-version")]
-        if_version: i64,
-    },
-    /// Return a pending-release task to development; does not resume or replace its Session.
-    Continue {
-        task_id: String,
-        #[arg(long = "if-version")]
-        if_version: i64,
-    },
-    Unblock {
-        task_id: String,
-        #[arg(long = "if-version")]
-        if_version: i64,
-        #[arg(long = "next-step")]
-        next_step: String,
     },
     Checkpoint {
         task_id: String,
@@ -436,15 +389,6 @@ enum TaskCommand {
         from_session: Option<String>,
         #[arg(long = "take-over")]
         take_over: bool,
-    },
-    Close {
-        task_id: String,
-        #[arg(long = "if-version")]
-        if_version: i64,
-        #[arg(long)]
-        outcome: String,
-        #[arg(long)]
-        reason: Option<String>,
     },
 }
 
@@ -530,46 +474,7 @@ enum ImportCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum WorktreeCommand {
-    Create {
-        task_id: String,
-        #[arg(long)]
-        repo: PathBuf,
-        #[arg(long)]
-        branch: String,
-        #[arg(long)]
-        path: PathBuf,
-        #[arg(long = "if-version")]
-        if_version: i64,
-    },
-    Status {
-        task_id: String,
-    },
-    Remove {
-        task_id: String,
-        #[arg(long = "if-version")]
-        if_version: i64,
-    },
-    Adopt {
-        task_id: String,
-        #[arg(long)]
-        repo: PathBuf,
-        #[arg(long)]
-        path: PathBuf,
-        #[arg(long = "if-version")]
-        if_version: i64,
-    },
-    Detach {
-        task_id: String,
-        #[arg(long = "expected-path")]
-        expected_path: PathBuf,
-        #[arg(long = "if-version")]
-        if_version: i64,
-    },
-}
-
-const JSON_SCHEMA_VERSION: u32 = 2;
+const JSON_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -660,13 +565,7 @@ fn main() -> ExitCode {
     };
     let custom_database = cli.database.is_some();
     let service = Service::new(database);
-    // Query commands share one total Git budget. Mutations use bounded individual
-    // pre/postcondition reads, not a deadline spanning prompts or Git writes.
-    let result = if has_shared_git_read_budget(&cli.command) {
-        git_adapter::GitReadControl::default().within(|| dispatch(&cli, &service))
-    } else {
-        dispatch(&cli, &service)
-    };
+    let result = dispatch(&cli, &service);
     let permission_warnings = database_permission_warning(service.database_path(), custom_database)
         .into_iter()
         .collect::<Vec<_>>();
@@ -677,26 +576,6 @@ fn main() -> ExitCode {
         }
         Err(error) => render_error(error, cli.json, permission_warnings),
     }
-}
-
-fn has_shared_git_read_budget(command: &TopCommand) -> bool {
-    matches!(
-        command,
-        TopCommand::Doctor
-            | TopCommand::Task {
-                command: TaskCommand::Here | TaskCommand::Context { .. }
-            }
-            | TopCommand::Worktree {
-                command: WorktreeCommand::Status { .. }
-            }
-            | TopCommand::Project {
-                command: ProjectCommand::Here { .. }
-                    | ProjectCommand::Context { .. }
-                    | ProjectCommand::Source {
-                        command: SourceCommand::Resolve { .. }
-                    }
-            }
-    )
 }
 
 fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
@@ -736,14 +615,49 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 ));
             }
             match command {
-                DatabaseCommand::ImportSchema4 { source } => {
-                    service.import_schema4(source, cli.yes)
+                DatabaseCommand::ImportSchema7 {
+                    source,
+                    source_paths,
+                } => {
+                    let paths = source_paths
+                        .as_deref()
+                        .map(read_input)
+                        .transpose()?
+                        .unwrap_or_else(|| "{}".into());
+                    service.import_schema7(source, cli.yes, &paths)
                 }
-                DatabaseCommand::ImportSchema5 { source } => {
-                    service.import_schema5(source, cli.yes)
+                DatabaseCommand::ImportSchema4 {
+                    source,
+                    source_paths,
+                } => {
+                    let paths = source_paths
+                        .as_deref()
+                        .map(read_input)
+                        .transpose()?
+                        .unwrap_or_else(|| "{}".into());
+                    service.import_schema4_with_paths(source, cli.yes, &paths)
                 }
-                DatabaseCommand::ImportSchema6 { source } => {
-                    service.import_schema6(source, cli.yes)
+                DatabaseCommand::ImportSchema5 {
+                    source,
+                    source_paths,
+                } => {
+                    let paths = source_paths
+                        .as_deref()
+                        .map(read_input)
+                        .transpose()?
+                        .unwrap_or_else(|| "{}".into());
+                    service.import_schema5_with_paths(source, cli.yes, &paths)
+                }
+                DatabaseCommand::ImportSchema6 {
+                    source,
+                    source_paths,
+                } => {
+                    let paths = source_paths
+                        .as_deref()
+                        .map(read_input)
+                        .transpose()?
+                        .unwrap_or_else(|| "{}".into());
+                    service.import_schema6_with_paths(source, cli.yes, &paths)
                 }
                 DatabaseCommand::ImportV7 { source } => service.import_legacy_v7(source, cli.yes),
                 DatabaseCommand::ImportSchema2 { source } => {
@@ -815,31 +729,6 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             }
         },
         TopCommand::Project { command } => match command {
-            ProjectCommand::Context {
-                project,
-                source,
-                worktree,
-                files,
-                dependencies,
-                budget_bytes,
-            } => service.project_context(
-                project,
-                *source,
-                ProjectContextOptions {
-                    worktree: worktree.as_deref(),
-                    files,
-                    dependencies,
-                    budget_bytes: *budget_bytes,
-                },
-            ),
-            ProjectCommand::Here { directory, project } => service.project_here(
-                &directory
-                    .clone()
-                    .map(Ok)
-                    .unwrap_or_else(std::env::current_dir)
-                    .map_err(|error| AppError::invalid("directory", error.to_string()))?,
-                project.as_deref(),
-            ),
             ProjectCommand::Component { command } => match command {
                 ComponentCommand::Add {
                     project,
@@ -853,23 +742,9 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     project,
                     if_revision,
                     component,
-                    repo,
-                    path,
                     directory,
                 } => {
-                    let location = match (repo, path, directory) {
-                        (Some(repo), Some(path), None) => SourceLocation::Git {
-                            worktree: repo,
-                            relative_path: path,
-                        },
-                        (None, None, Some(directory)) => SourceLocation::Directory(directory),
-                        _ => {
-                            return Err(AppError::invalid(
-                                "source",
-                                "provide either --repo with --path, or --directory",
-                            ));
-                        }
-                    };
+                    let location = SourceLocation::Directory(directory);
                     service.project_source_add(
                         project,
                         *if_revision,
@@ -878,11 +753,6 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     )
                 }
                 SourceCommand::List { project } => service.project_sources(project),
-                SourceCommand::Resolve {
-                    project,
-                    source_id,
-                    worktree,
-                } => service.project_source_resolve(project, *source_id, worktree.as_deref()),
                 SourceCommand::Remove {
                     project,
                     source_id,
@@ -922,10 +792,6 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 ..
             } => service.task_set_components(task_id, *if_version, components, cli.yes, reason),
             TaskCommand::Notes { task_id } => service.task_notes(task_id),
-            TaskCommand::Here => service.task_here(
-                &std::env::current_dir()
-                    .map_err(|error| AppError::invalid("directory", error.to_string()))?,
-            ),
             TaskCommand::Context { task_id, .. } => service.task_context(task_id),
             TaskCommand::List {
                 view,
@@ -955,7 +821,11 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     status: match view {
                         Some(TaskListView::Active) => Some("active".into()),
                         Some(TaskListView::InProgress) => Some("in_progress".into()),
-                        Some(TaskListView::PendingRelease) => Some("pending_release".into()),
+                        Some(TaskListView::InReview) => Some("in_review".into()),
+                        Some(TaskListView::Backlog) => Some("backlog".into()),
+                        Some(TaskListView::Todo) => Some("todo".into()),
+                        Some(TaskListView::Done) => Some("done".into()),
+                        Some(TaskListView::Cancelled) => Some("cancelled".into()),
                         Some(TaskListView::Blocked) => Some("blocked".into()),
                         Some(TaskListView::Recent) => None,
                         None => status.clone(),
@@ -1014,25 +884,11 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 note_type,
                 text,
             } => service.task_note(task_id, *if_version, note_type, text),
-            TaskCommand::Block {
+            TaskCommand::Status {
                 task_id,
                 if_version,
-                reason,
-                recovery,
-            } => service.task_block(task_id, *if_version, reason, recovery),
-            TaskCommand::PendingRelease {
-                task_id,
-                if_version,
-            } => service.task_pending_release(task_id, *if_version),
-            TaskCommand::Continue {
-                task_id,
-                if_version,
-            } => service.task_continue(task_id, *if_version),
-            TaskCommand::Unblock {
-                task_id,
-                if_version,
-                next_step,
-            } => service.task_unblock(task_id, *if_version, next_step),
+                status,
+            } => service.task_status(task_id, *if_version, status),
             TaskCommand::Checkpoint {
                 task_id,
                 session,
@@ -1056,12 +912,6 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 from_session.as_deref(),
                 *take_over,
             ),
-            TaskCommand::Close {
-                task_id,
-                if_version,
-                outcome,
-                reason,
-            } => service.task_close(task_id, *if_version, outcome, reason.as_deref()),
         },
         TopCommand::Session { command } => match command {
             SessionCommand::Bind {
@@ -1130,45 +980,6 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                 session_id,
                 if_version,
             } => service.session_close(session_id, *if_version),
-        },
-        TopCommand::Worktree { command } => match command {
-            WorktreeCommand::Create {
-                task_id,
-                repo,
-                branch,
-                path,
-                if_version,
-            } => service.worktree_create(task_id, *if_version, repo, branch, path),
-            WorktreeCommand::Status { task_id } => service.worktree_status(task_id),
-            WorktreeCommand::Remove {
-                task_id,
-                if_version,
-            } => {
-                if !cli.yes {
-                    let status = service.worktree_status(task_id)?;
-                    let path = status.data["worktreeStatus"]["path"]
-                        .as_str()
-                        .ok_or_else(|| {
-                            AppError::worktree_safety("task has no registered worktree", None)
-                        })?;
-                    let numeric_id = service.task_show(task_id)?.data["task"]["id"]
-                        .as_i64()
-                        .expect("serialized Task id must be an integer");
-                    confirm(cli.json, &worktree_remove_confirmation(numeric_id, path))?;
-                }
-                service.worktree_remove(task_id, *if_version)
-            }
-            WorktreeCommand::Adopt {
-                task_id,
-                repo,
-                path,
-                if_version,
-            } => service.worktree_adopt(task_id, *if_version, repo, path),
-            WorktreeCommand::Detach {
-                task_id,
-                expected_path,
-                if_version,
-            } => service.worktree_detach(task_id, *if_version, expected_path),
         },
         TopCommand::History { task_id } => service.history(task_id),
         TopCommand::Doctor => service.doctor(),
@@ -1348,10 +1159,6 @@ fn session_import_remove_confirmation(imported: &steward_core::SessionImportView
     )
 }
 
-fn worktree_remove_confirmation(task_id: i64, path: &str) -> String {
-    format!("remove registered Worktree\n  Task ID: #{task_id}\n  Worktree path: {path}")
-}
-
 fn confirm(json: bool, operation: &str) -> Result<(), AppError> {
     if json || !io::stdin().is_terminal() {
         return Err(AppError::invalid(
@@ -1400,23 +1207,6 @@ fn render_success(outcome: Outcome, cli: &Cli) -> ExitCode {
         } = &cli.command
         {
             print!("{}", render_task_context(&data));
-        } else if let TopCommand::Task {
-            command: TaskCommand::Here,
-        } = &cli.command
-        {
-            println!("Directory: {}", terminal_cell(&data["directory"]));
-            if data["matchedBy"] == "none" {
-                println!(
-                    "No task is associated with this directory. Use task list --view active to find work."
-                );
-            } else {
-                println!(
-                    "Matched by {}. No task was selected or claimed.",
-                    terminal_cell(&data["matchedBy"])
-                );
-                render_task_list(&data, &[], TaskListFormat::Table);
-                println!("Read a task with: taskctl task context <id>");
-            }
         } else {
             println!("{}", serde_json::to_string_pretty(&data).unwrap());
         }
@@ -1512,40 +1302,11 @@ fn render_task_context(data: &Value) -> String {
     if data["notesTruncated"] == true {
         output.push_str("Notes truncated to the latest 50; use task notes to read all notes.\n\n");
     }
-    if task["status"] == "closed" {
-        output.push_str(&format!(
-            "## Closure\n\n{}: {}\n\n",
-            text(&task["closureOutcome"]),
-            text(&task["closureReason"])
-        ));
-    }
     output.push_str(&format!(
-        "## Working context\n\n- Directory: {}\n- Branch: {}\n- Current session: {}\n",
-        text(&task["worktreePath"]),
-        text(&task["repositoryBranch"]),
+        "## Session\n\nCurrent session: {}\n",
         text(&task["currentSessionId"])
     ));
-    let status = &data["worktreeStatus"];
-    if status.is_null() {
-        output.push_str("- Git state: not observed\n");
-    } else {
-        output.push_str(&format!(
-            "- Directory exists: {}\n- HEAD: {}\n- Observed at: {}\n",
-            text(&status["exists"]),
-            text(&status["head"]),
-            text(&status["observedAt"])
-        ));
-        for field in ["staged", "unstaged", "untracked", "ignored"] {
-            output.push_str(&format!(
-                "- {field}: {}\n",
-                status[field]
-                    .as_array()
-                    .map(|files| files.len().to_string())
-                    .unwrap_or_else(|| "unknown".into())
-            ));
-        }
-    }
-    output.push_str("\nRead the latest task version before making changes. This context does not grant permission to close the task.\n");
+    output.push_str("\nRead the latest task version before making changes. This context does not grant permission to change task status.\n");
     output
 }
 
@@ -1633,10 +1394,6 @@ fn task_field_header(field: &str) -> &str {
         "blockReason" => "BLOCK REASON",
         "blockRecovery" => "BLOCK RECOVERY",
         "currentSessionId" => "CURRENT SESSION ID",
-        "repositoryPath" => "REPOSITORY PATH",
-        "repositoryCommonDir" => "REPOSITORY COMMON DIR",
-        "repositoryBranch" => "REPOSITORY BRANCH",
-        "worktreePath" => "WORKTREE PATH",
         "latestCheckpointId" => "LATEST CHECKPOINT ID",
         "closureOutcome" => "CLOSURE OUTCOME",
         "closureReason" => "CLOSURE REASON",
@@ -1796,60 +1553,43 @@ mod tests {
     }
 
     #[test]
-    fn git_query_routes_share_a_budget_but_mutations_do_not() {
+    fn retired_commands_are_not_aliases() {
         for arguments in [
-            vec!["taskctl", "doctor"],
             vec!["taskctl", "task", "here"],
-            vec!["taskctl", "task", "context", "1"],
             vec!["taskctl", "project", "here"],
             vec!["taskctl", "project", "context", "1", "--source", "1"],
             vec!["taskctl", "project", "source", "resolve", "1", "1"],
             vec!["taskctl", "worktree", "status", "1"],
         ] {
-            assert!(has_shared_git_read_budget(
-                &Cli::try_parse_from(arguments).unwrap().command
-            ));
+            assert!(Cli::try_parse_from(arguments).is_err());
         }
-        for arguments in [
-            vec!["taskctl", "worktree", "remove", "1", "--if-version", "1"],
-            vec![
-                "taskctl",
-                "worktree",
-                "create",
-                "1",
-                "--repo",
-                "repo",
-                "--path",
-                "worktree",
-                "--branch",
-                "main",
-                "--if-version",
-                "1",
-            ],
-            vec![
-                "taskctl",
-                "task",
-                "resume",
-                "1",
-                "--session",
-                "new",
-                "--if-version",
-                "1",
-            ],
-            vec![
-                "taskctl",
-                "task",
-                "checkpoint",
-                "1",
-                "--session",
-                "current",
-                "--if-version",
-                "1",
-            ],
+        for command in ["block", "unblock", "pending-release", "continue", "close"] {
+            assert!(
+                Cli::try_parse_from(["taskctl", "task", command, "1", "--if-version", "1"])
+                    .is_err()
+            );
+        }
+        for status in [
+            "backlog",
+            "todo",
+            "in_progress",
+            "in_review",
+            "blocked",
+            "done",
+            "cancelled",
         ] {
-            assert!(!has_shared_git_read_budget(
-                &Cli::try_parse_from(arguments).unwrap().command
-            ));
+            assert!(
+                Cli::try_parse_from([
+                    "taskctl",
+                    "task",
+                    "status",
+                    "1",
+                    status,
+                    "--if-version",
+                    "1"
+                ])
+                .is_ok()
+            );
         }
     }
 
@@ -1869,10 +1609,5 @@ mod tests {
         assert!(import_confirmation.contains("session-1"));
         assert!(import_confirmation.contains("abc123"));
         assert!(import_confirmation.contains("42 bytes"));
-
-        let worktree_confirmation =
-            worktree_remove_confirmation(12, r"C:\workspace with spaces\feature");
-        assert!(worktree_confirmation.contains("#12"));
-        assert!(worktree_confirmation.contains(r"C:\workspace with spaces\feature"));
     }
 }

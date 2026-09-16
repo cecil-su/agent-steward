@@ -158,6 +158,6 @@ fn schema4_cli_copy_requires_explicit_confirmation_and_keeps_source_unchanged() 
     );
     assert_eq!(out["ok"], true);
     assert_eq!(out["data"]["sourceSchema"], 4);
-    assert_eq!(out["data"]["targetSchema"], 7);
+    assert_eq!(out["data"]["targetSchema"], 8);
     assert_eq!(fs::read(source).unwrap(), before);
 }

@@ -3,15 +3,19 @@ use std::{fs, path::Path};
 use steward_application::Service;
 
 fn legacy(path: &Path) {
-    let service = Service::new(path);
-    service.task_create("LEGACY", r#"{"title":"0904｜功能｜Archive","goal":"Goal","scope":"Scope","acceptanceCriteria":"Accept"}"#).unwrap();
-    service.task_claim("1", 1, "s1", false).unwrap();
-    service
-        .task_note("1", 2, "progress", "Original note")
-        .unwrap();
-    service.task_checkpoint("1", 3, "s1", r#"{"summary":"Original checkpoint","completed":[],"decisions":[],"pending":[],"nextStep":"Close","risks":[]}"#).unwrap();
-    service.task_close("1", 4, "completed", None).unwrap();
+    steward_core::set_private_dir(path.parent().unwrap()).unwrap();
     let c = Connection::open(path).unwrap();
+    c.execute_batch(include_str!("../src/migration/schema7.sql"))
+        .unwrap();
+    c.execute_batch("BEGIN;
+        INSERT INTO tasks(id,task_key,title,status,version,goal,scope,acceptance_criteria,latest_checkpoint_id,closure_outcome,closed_at,created_at,updated_at) VALUES(1,'LEGACY','0904｜功能｜Archive','closed',5,'Goal','Scope','Accept','checkpoint','completed','now','now','now');
+        INSERT INTO sessions(id,task_id,started_at,ended_at) VALUES('s1',1,'now','now');
+        INSERT INTO task_notes(task_id,session_id,note_type,text,created_at) VALUES(1,'s1','progress','Original note','now');
+        INSERT INTO checkpoints(id,task_id,session_id,summary,completed_json,decisions_json,pending_json,next_step,risks_json,created_at) VALUES('checkpoint',1,'s1','Original checkpoint','[]','[]','[]','Close','[]','now');
+        COMMIT;").unwrap();
+    for sequence in 1..=5 {
+        c.execute("INSERT INTO history(task_id,sequence,change_type,occurred_at,summary,payload_json) VALUES(1,?1,'task.created','now','legacy','{ \"status\": \"closed\" }')", [sequence]).unwrap();
+    }
     c.execute_batch("PRAGMA journal_mode=DELETE; DROP TABLE session_events;
         DROP TABLE rule_history;
         DROP TABLE rules;
@@ -37,7 +41,13 @@ fn legacy(path: &Path) {
         )
         .unwrap();
     }
-    c.execute("INSERT INTO session_imports VALUES ('import-1','s1','archive.txt',NULL,'synthetic',?1,'now')", params![vec![0u8,1,255]]).unwrap();
+    use sha2::{Digest, Sha256};
+    let bytes = vec![0u8, 1, 255];
+    c.execute(
+        "INSERT INTO session_imports VALUES ('import-1','s1','archive.txt',NULL,?1,?2,'now')",
+        params![hex::encode(Sha256::digest(&bytes)), bytes],
+    )
+    .unwrap();
 }
 
 #[test]
@@ -76,7 +86,7 @@ fn v7_archive_preserves_rows_relations_history_and_high_water_mark() {
     }
     let task = Service::new(&target).task_show("1").unwrap();
     assert_eq!(task.data["task"]["version"], 5);
-    assert_eq!(task.data["task"]["status"], "closed");
+    assert_eq!(task.data["task"]["status"], "done");
     assert!(task.data["task"]["projectId"].is_null());
     assert_eq!(
         c.query_row("SELECT count(*) FROM projects", [], |row| row

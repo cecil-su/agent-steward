@@ -6,6 +6,7 @@ import { stat } from 'node:fs/promises';
 const execute = promisify(execFile);
 const positive = n => Number.isSafeInteger(n) && n > 0;
 const text = s => typeof s === 'string' && s.trim().length > 0;
+const TASK_STATUSES = new Set(['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']);
 export const CONTEXT_MARKER = 'Steward task context (read-only snapshot; not execution authorization):\n';
 const unavailable = () => new Error('STEWARD_CONTEXT_UNAVAILABLE: input blocked; verify explicit CLI/database/task and supported context format. No empty-rule fallback.');
 function reportBlocked(ctx) {
@@ -22,10 +23,17 @@ export async function readTaskContext({ cli, database, task }) {
     const { stdout } = await execute(cli, ['--database', database, '--json', 'task', 'context', task, '--require-read-only'], {
       timeout: 15000, maxBuffer: 8 * 1024 * 1024, encoding: 'buffer', windowsHide: true,
     });
+    return decodeTaskContext(stdout, task);
+  } catch { throw unavailable(); }
+}
+
+// Decode the data-center envelope, not a project-source or live Git observation.
+export function decodeTaskContext(stdout, task) {
+  try {
     const result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(stdout));
     const data = result.data;
-    if (result.schemaVersion !== 2 || result.ok !== true || result.error !== null || !Array.isArray(result.warnings)
-      || data?.task?.id !== Number(task) || !positive(data.task.version)
+    if (result.schemaVersion !== 3 || result.ok !== true || result.error !== null || !Array.isArray(result.warnings)
+      || data?.task?.id !== Number(task) || !positive(data.task.version) || !TASK_STATUSES.has(data.task.status)
       || !(data.task.projectId === null || positive(data.task.projectId))
       || data.sessionRules?.formatVersion !== 1 || !Array.isArray(data.sessionRules.rules)) throw unavailable();
     const ids = new Set();
@@ -98,7 +106,7 @@ export function registerTaskContext(pi) {
     try {
       if (!enabled()) return;
       if (!matches(snapshot, ctx)) throw unavailable();
-      const content = `${CONTEXT_MARKER}${JSON.stringify(snapshot.context)}\n\nOnly this snapshot supplies current effective rules. Read applicable repository AGENTS independently. Historical source versions are references, not current-version assertions. This snapshot does not claim/resume, authorize deployment, close tasks, or override the user's request.`;
+      const content = `${CONTEXT_MARKER}${JSON.stringify(snapshot.context)}\n\nOnly this snapshot supplies current effective rules. Read applicable repository AGENTS independently. Historical source versions are references, not current-version assertions. This snapshot does not claim/resume, change business status, authorize execution or deployment, or override the user's request. Business status and Session ownership do not grant execution permission; source paths are saved metadata, not verified filesystem or Git evidence.`;
       return { messages: [...event.messages, { role: 'user', content: [{ type: 'text', text: content }], timestamp: Date.now() }] };
     } catch {
       // The agent's signal is active here. Do not await its idle promise inside its own loop.

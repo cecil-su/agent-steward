@@ -1,14 +1,12 @@
-//! Bind host claims to independently read Task/Session and live context observations.
+//! Bind host claims to independently read Task/Session and registered source metadata.
 #[cfg(test)]
 #[path = "host_context_tests.rs"]
 mod tests;
 use crate::db::{check_version, load_session, load_task_by_reference};
-use crate::{
-    AppError, HostEvidenceAssessment, ProjectContextOptions, Service, assess_host_evidence,
-};
+use crate::{AppError, HostEvidenceAssessment, Service, assess_host_evidence};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use steward_core::{HostBinding, HostEvidence, SessionView, TaskStatus, TaskView};
+use steward_core::{HostBinding, HostEvidence, SessionView, TaskView};
 
 /// Values supplied by the adapter's current runtime, not copied out of a report.
 pub struct HostInstance<'a> {
@@ -17,13 +15,12 @@ pub struct HostInstance<'a> {
     pub instance_id: &'a str,
 }
 
-/// Explicit read request. Does not claim a task, change its scope, or adopt a worktree.
+/// Explicit metadata read request. Does not claim a task or read source files.
 pub struct HostContextRequest<'a> {
     pub task: &'a str,
     pub task_version: i64,
     pub session_id: &'a str,
     pub source_id: i64,
-    pub context: ProjectContextOptions<'a>,
 }
 
 fn invalid(message: &str) -> AppError {
@@ -42,10 +39,8 @@ impl Service {
         let tx = connection.transaction().map_err(AppError::from_sqlite)?;
         let task = load_task_by_reference(&tx, request.task)?;
         check_version(&task, request.task_version)?;
-        if task.status == TaskStatus::Closed
-            || task.current_session_id.as_deref() != Some(request.session_id)
-        {
-            return Err(invalid("request must use the open task's current Session"));
+        if task.current_session_id.as_deref() != Some(request.session_id) {
+            return Err(invalid("request must use the task's current Session"));
         }
         let session = load_session(&tx, request.session_id)?;
         if session.task_id != task.id || session.ended_at.is_some() {
@@ -66,22 +61,14 @@ impl Service {
         host: &HostInstance<'_>,
     ) -> Result<HostBinding, AppError> {
         let before = self.host_task_snapshot(request)?;
-        let database_identity = git_adapter::identify_existing(self.database_path())
-            .map_err(|e| AppError::from_git(e, None))?;
+        let database_identity = crate::path_safety::identify_existing(self.database_path())
+            .map_err(|e| AppError::from_path(e, None))?;
         let project = before.0.project_id.expect("project checked");
         let context = self
-            .project_context(
-                &format!("##{project}"),
-                request.source_id,
-                ProjectContextOptions {
-                    worktree: request.context.worktree,
-                    files: request.context.files,
-                    dependencies: request.context.dependencies,
-                    budget_bytes: request.context.budget_bytes,
-                },
-            )?
+            .project_source(&format!("##{project}"), request.source_id)?
             .data;
-        if let Some(component) = context["source"]["componentId"].as_i64()
+        let source = &context["source"];
+        if let Some(component) = source["componentId"].as_i64()
             && !before.0.component_ids.is_empty()
             && !before.0.component_ids.contains(&component)
         {
@@ -93,13 +80,21 @@ impl Service {
         if before != after {
             return Err(invalid("Task or Session changed during context binding"));
         }
-        git_adapter::verify_existing_identity(&database_identity)
-            .map_err(|e| AppError::from_git(e, None))?;
-        // Bind request presentation as well: one observation hash may produce different prefixes.
-        let scope = json!({"bindingVersion":1,"databaseIdentity":database_identity,"taskId":before.0.id,"taskVersion":before.0.version,
-            "projectId":project,"componentIds":before.0.component_ids,"sessionId":before.1.id,"sessionStartedAt":before.1.started_at,
-            "sourceId":request.source_id,"contextVersion":context["contextVersion"],"contextFingerprint":context["fingerprint"],
-            "files":request.context.files,"dependencies":request.context.dependencies,"budgetBytes":request.context.budget_bytes});
+        if context
+            != self
+                .project_source(&format!("##{project}"), request.source_id)?
+                .data
+        {
+            return Err(invalid(
+                "project source metadata changed during context binding",
+            ));
+        }
+        crate::path_safety::verify_existing_identity(&database_identity)
+            .map_err(|e| AppError::from_path(e, None))?;
+        // Version 2 binds registration data only, not source contents or Git state.
+        let scope = json!({"bindingVersion":2,"databaseIdentity":database_identity,"taskId":before.0.id,"taskVersion":before.0.version,
+            "projectId":project,"project":context["project"],"componentIds":before.0.component_ids,"sessionId":before.1.id,"sessionStartedAt":before.1.started_at,
+            "sourceId":request.source_id,"source":source});
         let binding = HostBinding {
             host: host.name.into(),
             host_version: host.version.into(),

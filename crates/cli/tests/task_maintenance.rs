@@ -31,21 +31,7 @@ fn update_requires_explicit_authorization_and_atomically_maintains_closed_task()
         .0
     );
     assert!(run(&["task", "create"]).0);
-    assert!(
-        run(&[
-            "task",
-            "close",
-            "1",
-            "--if-version",
-            "1",
-            "--outcome",
-            "cancelled",
-            "--reason",
-            "fixture",
-            "--yes"
-        ])
-        .0
-    );
+    assert!(run(&["task", "status", "1", "cancelled", "--if-version", "1"]).0);
     let patch = temp.path().join("patch.json");
     std::fs::write(
         &patch,
@@ -70,7 +56,7 @@ fn update_requires_explicit_authorization_and_atomically_maintains_closed_task()
     confirmed.push("--yes");
     let (ok, out) = run(&confirmed);
     assert!(ok, "{out}");
-    assert_eq!(out["data"]["task"]["status"], "closed");
+    assert_eq!(out["data"]["task"]["status"], "cancelled");
     assert_eq!(out["data"]["task"]["version"], 3);
     assert_eq!(out["data"]["task"]["projectId"], 1);
     assert_eq!(out["data"]["task"]["componentIds"], json!([1]));

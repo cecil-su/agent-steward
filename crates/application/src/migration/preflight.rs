@@ -22,13 +22,13 @@ impl Service {
                 "expected an existing regular database, not a link or directory",
             ));
         }
-        let identity = git_adapter::identify_existing(&path)
+        let identity = crate::path_safety::identify_existing(&path)
             .map_err(|_| AppError::invalid("database", "cannot establish database identity"))?;
         local_file_path(&identity.canonical_path)?;
         require_regular_source_sidecars(&identity)?;
         let connection = storage_sqlite::open_database_readonly(&identity.canonical_path)
             .map_err(AppError::from_storage)?;
-        git_adapter::verify_existing_identity(&identity).map_err(|_| {
+        crate::path_safety::verify_existing_identity(&identity).map_err(|_| {
             AppError::invalid("database", "database identity changed during context open")
         })?;
         Ok(connection)
@@ -55,7 +55,7 @@ impl Service {
             }
             Err(error) => return Err(io_error(error)),
         }
-        let identity = git_adapter::identify_existing(path)
+        let identity = crate::path_safety::identify_existing(path)
             .map_err(|_| AppError::invalid("database", "cannot establish database identity"))?;
         local_file_path(&identity.canonical_path)?;
         require_regular_source_sidecars(&identity)?;
@@ -85,7 +85,7 @@ impl Service {
                 ),
             ));
         }
-        git_adapter::verify_existing_identity(&identity).map_err(|_| {
+        crate::path_safety::verify_existing_identity(&identity).map_err(|_| {
             AppError::invalid("database", "database identity changed during preflight")
         })?;
         Ok(storage_sqlite::SCHEMA_VERSION)

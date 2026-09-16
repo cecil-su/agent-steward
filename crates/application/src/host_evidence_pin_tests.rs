@@ -18,7 +18,10 @@ fn report(path: &Path, present: bool) -> HostEvidence {
             path: path.to_str().unwrap().into(),
             sha256: present.then(|| sha(b"fixture")),
             object_sha256: present.then(|| {
-                sha(&serde_json::to_vec(&git_adapter::identify_existing(path).unwrap()).unwrap())
+                sha(
+                    &serde_json::to_vec(&crate::path_safety::identify_existing(path).unwrap())
+                        .unwrap(),
+                )
             }),
         }],
         tools: vec![],
@@ -75,7 +78,9 @@ fn rules_remain_pinned_through_the_gap_between_passes() {
     let path = fs::canonicalize(temp.path()).unwrap().join("rule.md");
     fs::write(&path, "fixture").unwrap();
     let r = report(&path, true); // Report creation retains no live identity.
-    let original = git_adapter::identify_existing(&path).unwrap().record();
+    let original = crate::path_safety::identify_existing(&path)
+        .unwrap()
+        .record();
     assert!(
         assess_host_evidence_between_passes(
             &r,
@@ -87,7 +92,9 @@ fn rules_remain_pinned_through_the_gap_between_passes() {
                     fs::write(&path, "fixture").unwrap();
                     assert_ne!(
                         original,
-                        git_adapter::identify_existing(&path).unwrap().record()
+                        crate::path_safety::identify_existing(&path)
+                            .unwrap()
+                            .record()
                     );
                 }
             }

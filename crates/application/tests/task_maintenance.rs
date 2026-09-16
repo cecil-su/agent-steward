@@ -26,26 +26,19 @@ fn fixture() -> (tempfile::TempDir, Service) {
 }
 
 #[test]
-fn every_status_and_closure_outcome_preserves_execution_and_old_history() {
+fn every_status_preserves_execution_and_old_history() {
     for state in [
-        "open",
+        "backlog",
+        "todo",
         "in_progress",
+        "in_review",
         "blocked",
-        "completed",
-        "partial",
+        "done",
         "cancelled",
-        "superseded",
     ] {
         let (_temp, s) = fixture();
-        if state != "open" {
-            s.task_claim("1", 1, "execution", false).unwrap();
-        }
-        if state == "blocked" {
-            s.task_block("1", 2, "dependency", "wait").unwrap();
-        } else if !["open", "in_progress"].contains(&state) {
-            s.task_close("1", 2, state, Some("original closure"))
-                .unwrap();
-        }
+        s.task_claim("1", 1, "execution", false).unwrap();
+        s.task_status("1", 2, state).unwrap();
         let before = task(&s);
         let sessions = s.session_list(Some("1")).unwrap().data;
         let history = s.history("1").unwrap().data["history"]
@@ -71,8 +64,6 @@ fn every_status_and_closure_outcome_preserves_execution_and_old_history() {
             "blockRecovery",
             "latestCheckpointId",
             "createdAt",
-            "repositoryPath",
-            "worktreePath",
         ] {
             assert_eq!(after[key], before[key], "{state}: {key}");
         }
@@ -117,7 +108,7 @@ fn authorization_validation_cas_and_history_failure_are_atomic() {
         ),
         (2, true, "duplicate", json!({"components":["api","API"]})),
         (2, true, "wrong type", json!({"components":null})),
-        (2, true, "status forbidden", json!({"status":"closed"})),
+        (2, true, "status forbidden", json!({"status":"done"})),
         (
             2,
             true,
@@ -161,9 +152,9 @@ fn authorization_validation_cas_and_history_failure_are_atomic() {
 }
 
 #[test]
-fn wrappers_share_closed_authorization_and_cas_contract() {
+fn wrappers_share_terminal_task_authorization_and_cas_contract() {
     let (_temp, s) = fixture();
-    s.task_close("1", 1, "cancelled", Some("fixture")).unwrap();
+    s.task_status("1", 1, "cancelled").unwrap();
     assert!(
         s.task_set_project("1", 2, Some("Second"), false, "fixture")
             .is_err()
@@ -188,13 +179,14 @@ fn wrappers_share_closed_authorization_and_cas_contract() {
         s.task_update(
             "1",
             4,
-            &json!({"nextStep":"not allowed"}).to_string(),
+            &json!({"nextStep":"record a follow-up"}).to_string(),
             true,
             "fixture"
         )
-        .is_err()
+        .is_ok()
     );
-    assert_eq!(task(&s)["status"], "closed");
+    assert_eq!(task(&s)["status"], "cancelled");
+    assert_eq!(task(&s)["nextStep"], "record a follow-up");
     assert_eq!(
         s.session_list(Some("1")).unwrap().data["sessions"],
         json!([])

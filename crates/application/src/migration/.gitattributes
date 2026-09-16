@@ -1,0 +1,2 @@
+# Frozen DDL must match sqlite_schema SQL emitted by Rust string literals.
+schema7.sql text eol=lf

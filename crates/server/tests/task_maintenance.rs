@@ -15,7 +15,7 @@ async fn maintenance_api_enforces_authorization_cas_and_closed_invariants() {
     s.project_component_add("1", 1, "api").unwrap();
     s.task_create_minimal().unwrap();
     s.task_claim("1", 1, "execution", false).unwrap();
-    s.task_close("1", 2, "cancelled", Some("fixture")).unwrap();
+    s.task_status("1", 2, "cancelled").unwrap();
     let sessions = s.session_list(Some("1")).unwrap().data;
     let app = router(
         ServerState::new(s.clone(), 43123, "fixture-admin".into())
@@ -80,6 +80,9 @@ async fn maintenance_api_enforces_authorization_cas_and_closed_invariants() {
             assert_eq!(out["data"]["task"]["componentIds"], json!([1]));
         }
         assert_eq!(s.session_list(Some("1")).unwrap().data, sessions);
-        assert_eq!(s.task_show("1").unwrap().data["task"]["status"], "closed");
+        assert_eq!(
+            s.task_show("1").unwrap().data["task"]["status"],
+            "cancelled"
+        );
     }
 }

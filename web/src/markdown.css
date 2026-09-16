@@ -1,0 +1,24 @@
+.steward-markdown { min-width: 0; max-width: 100%; line-height: 1.75; overflow-wrap: anywhere; white-space: normal; }
+.steward-markdown.steward-markdown p { white-space: normal; color: inherit; font-size: inherit; }
+.steward-markdown > :first-child { margin-top: 0; }
+.steward-markdown > :last-child { margin-bottom: 0; }
+.steward-markdown p, .steward-markdown ul, .steward-markdown ol, .steward-markdown blockquote, .steward-markdown pre, .steward-markdown table { margin: .65em 0; }
+.steward-markdown.steward-markdown h1, .steward-markdown.steward-markdown h2, .steward-markdown.steward-markdown h3, .steward-markdown.steward-markdown h4, .steward-markdown.steward-markdown h5, .steward-markdown.steward-markdown h6 { margin: 1em 0 .45em; font-weight: 650; line-height: 1.4; color: inherit; }
+.steward-markdown.steward-markdown h1 { font-size: 1.5em; }
+.steward-markdown.steward-markdown h2 { font-size: 1.3em; }
+.steward-markdown.steward-markdown h3 { font-size: 1.15em; }
+.steward-markdown h4, .steward-markdown h5, .steward-markdown h6 { font-size: 1em; }
+.steward-markdown ul { list-style: disc; padding-left: 1.6em; }
+.steward-markdown ol { list-style: decimal; padding-left: 1.6em; }
+.steward-markdown li { margin: .2em 0; }
+.steward-markdown li > p { margin: .25em 0; }
+.steward-markdown blockquote { border-left: 3px solid #8ca89a; padding: .1em 1em; color: #52685e; }
+.steward-markdown code { background: #edf3ee; border-radius: 4px; padding: .12em .3em; font-family: ui-monospace, Consolas, monospace; font-size: .9em; }
+.steward-markdown.steward-markdown pre { max-width: 100%; overflow-x: auto; white-space: pre; overflow-wrap: normal; background: #edf3ee; border: 1px solid #d6e2d9; border-radius: 8px; padding: 1em; }
+.steward-markdown pre code { padding: 0; background: none; }
+.steward-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.steward-markdown th, .steward-markdown td { border: 1px solid #d6e2d9; padding: .4em .7em; text-align: left; }
+.steward-markdown th { background: #edf3ee; font-weight: 650; }
+.steward-markdown a { color: #176347; text-decoration: underline; text-underline-offset: 2px; }
+.steward-markdown hr { border: 0; border-top: 1px solid #d6e2d9; margin: 1em 0; }
+.steward-markdown input[type=checkbox] { width: auto; margin-right: .4em; }

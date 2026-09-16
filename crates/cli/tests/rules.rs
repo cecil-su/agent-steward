@@ -151,7 +151,7 @@ fn schema6_cli_copy_is_explicit_and_preserves_source() {
         ],
     );
     assert_eq!(out["ok"], true, "{out}");
-    assert_eq!(out["data"]["targetSchema"], 7);
+    assert_eq!(out["data"]["targetSchema"], 8);
     assert_eq!(
         run(&target, &["task", "context", "1"])["data"]["sessionRules"]["rules"],
         json!([])

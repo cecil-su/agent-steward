@@ -73,8 +73,7 @@ pub(crate) fn load_task(connection: &Connection, id: i64) -> AppResult<TaskView>
     connection
         .query_row(
             "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,
-                    block_reason,block_recovery,current_session_id,repository_path,
-                    repository_common_dir,repository_branch,worktree_path,latest_checkpoint_id,
+                    block_reason,block_recovery,current_session_id,latest_checkpoint_id,
                     closure_outcome,closure_reason,closed_at,created_at,updated_at,project_id,
                     (SELECT json_group_array(component_id) FROM (SELECT component_id FROM task_components WHERE task_id=tasks.id ORDER BY component_id))
              FROM tasks WHERE id=?1",
@@ -111,18 +110,14 @@ pub(crate) fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskView> {
         block_reason: row.get(9)?,
         block_recovery: row.get(10)?,
         current_session_id: row.get(11)?,
-        repository_path: row.get(12)?,
-        repository_common_dir: row.get(13)?,
-        repository_branch: row.get(14)?,
-        worktree_path: row.get(15)?,
-        latest_checkpoint_id: row.get(16)?,
-        closure_outcome: row.get(17)?,
-        closure_reason: row.get(18)?,
-        closed_at: row.get(19)?,
-        created_at: row.get(20)?,
-        updated_at: row.get(21)?,
-        project_id: row.get(22)?,
-        component_ids: json_from_column(23, "task_components", &row.get::<_, String>(23)?)?,
+        latest_checkpoint_id: row.get(12)?,
+        closure_outcome: row.get(13)?,
+        closure_reason: row.get(14)?,
+        closed_at: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+        project_id: row.get(18)?,
+        component_ids: json_from_column(19, "task_components", &row.get::<_, String>(19)?)?,
     })
 }
 

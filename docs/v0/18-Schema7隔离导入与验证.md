@@ -1,79 +1,87 @@
-# Schema7 隔离导入与验证
+# Schema8 隔离导入与验证
 
-## 接口与输入格式
+## 格式与入口
 
-普通连接只初始化空数据库或打开Schema7，不进行原地转换。`taskctl database --help`提供以下显式离线复制命令；目标均为当前Schema7，命令名中的数字指定源格式，不能改为7或互换使用。
+普通连接仅初始化空数据库或打开Schema8，不原地转换。以下命令数字表示**源格式**，目标均为Schema8；不能仅修改user_version冒充兼容。
 
-| 命令 | 必须匹配的源 | 复制范围与目标空表 |
+| 命令 | 输入格式 | 范围 |
 | --- | --- | --- |
-| `import-schema2` | `user_version=2`及冻结schema2.sql完整布局 | 七个业务表、四类自增高水位；任务project_id为NULL，项目/资料/规则关系为空 |
-| `import-schema4` | `user_version=4`及冻结schema4.sql完整布局 | 13个业务表、九类自增高水位；项目资料和规则表为空 |
-| `import-schema5` | `user_version=5`及冻结schema5.sql完整布局 | 14个业务表、九类自增高水位，包含项目资料；规则表为空 |
-| `import-schema6` | `user_version=6`及冻结schema6.sql完整布局 | 14个业务表、九类自增高水位，包含待上线状态；规则表为空 |
-| `import-v7` | `user_version=0`、schema_migrations记录版本1–7的归档布局 | 仅全部关闭且无当前Session/Worktree引用的Task归档；独立限制见[v7归档导入](13-v7归档迁移.md) |
+| import-schema2 | user_version=2，冻结schema2.sql布局 | Task/Session/Checkpoint/Note/History/Import/Hook；项目、资料、规则为空 |
+| import-schema4 | user_version=4，冻结schema4.sql布局 | 包含项目/组件/源码关系；资料和规则为空 |
+| import-schema5 | user_version=5，冻结schema5.sql布局 | 包含项目资料；规则为空 |
+| import-schema6 | user_version=6，冻结schema6.sql布局 | 包含pending_release；规则为空 |
+| import-schema7 | user_version=7，冻结schema7.sql布局 | 包含规则/规则历史；Git来源需显式路径映射 |
+| import-v7 | user_version=0，schema_migrations版本1–7的独立归档布局 | 仅闭合且无当前Session/Worktree引用的归档；见 [归档合同](13-v7归档迁移.md) |
 
-没有`import-schema3`或`import-schema7`命令。Schema7与`schema_migrations`格式v7不是同一种输入；单改`user_version`不能满足完整布局检查。
+没有import-schema3。archive-v7不等于user_version=7。输入定义位于 [migration目录](../../crates/application/src/migration)，普通建库Schema在 [storage-sqlite](../../crates/storage-sqlite/src/lib.rs)。
 
-实现与输入定义：[`schema2.rs`](../../crates/application/src/migration/schema2.rs)、[`schema2.sql`](../../crates/application/src/migration/schema2.sql)、[`schema4.sql`](../../crates/application/src/migration/schema4.sql)、[`schema5.sql`](../../crates/application/src/migration/schema5.sql)、[`schema6.sql`](../../crates/application/src/migration/schema6.sql)。
+## 显式转换
 
-## 数据与文件安全合同
+| 源任务状态 | 目标状态 |
+| --- | --- |
+| open | todo |
+| in_progress | in_progress |
+| pending_release | in_review |
+| blocked | blocked |
+| closed + completed | done |
+| closed + partial/cancelled/superseded | cancelled |
 
-本节适用于`import-schema2/4/5/6`的共享复制实现；`import-v7`按其独立归档合同执行。
+保留closure_outcome/closure_reason/closed_at及block_reason/block_recovery为历史事实，不再约束当前状态。保留Task ID/version、创建/更新时间、Session身份/continuedFrom/endedAt及当前关联、Checkpoint和历史git_head、Note、History的ID/sequence/changeType/payload原文、Import BLOB与Hook墓碑。迁移不增加业务History、不恢复或结束Session、不按文本推断状态/项目/规则。
 
-- 每次导入必须显式提供`--database`、`--source`和`--yes`，不回退默认数据库。只读源，禁止原地修改、合并或覆盖；命令不安装程序、不切换配置、不启动或停止服务。
-- 源必须是可信本地普通数据库快照，布局、索引、触发器、约束、应用字段和源版本都须匹配对应输入定义；拒绝漂移布局、歧义引用、无效JSON/BLOB/序列、完整性或外键损坏。
-- 使用本地绝对路径和明确文件名；拒绝网络/设备前缀、ADS、父级遍历、末尾分隔符及Windows分量末尾句点/空格。源主文件及存在的sidecar必须是普通文件，不能是链接或目录。
-- 目标主文件及`-wal/-shm/-journal`必须全部不存在，包括悬空链接。目标父目录必须私有且由操作者控制；存在的目录只验证权限，不chmod或重写ACL。缺失时只创建最后一级私有目录，祖先须存在。
-- 操作者必须停止全部源写入者，再使用SQLite Backup API取得包含已提交WAL的一致快照；不得只复制运行中数据库的主文件。固定读事务及`data_version`复查不能代替停写，不能阻止检查后的并发替换。
-- Schema2/4/5/6复制在同目录私有暂存库中初始化Schema7，以单个IMMEDIATE事务和延迟外键按明确列复制；逐字段核验JSON原文、BLOB、ID、版本、状态、时间戳、Session继续关系、History、Hook删除墓碑及自增高水位。不根据任务文字推断项目、规则或任务状态。
-- 核验不读取登记的Worktree、源码根或Import原始文件，不调用Git；复制数据库引用不证明外部路径仍存在，也不授予Session执行权。
-- 完成完整性、外键及应用解码校验后，关闭并刷盘暂存数据库，复核源/父目录身份与目标占用，用不覆盖的hard link发布。文件系统不支持hard link即失败，不降级覆盖。
-- 普通失败只清理本次暂存；进程中断可能残留私有暂存，重试不扫描、采纳或删除它。已有目标及sidecar不自动清理。
+删除当前Task的repository_path/repository_common_dir/repository_branch/worktree_path和repositories表，旧History中这些字段仍原样保留。源码资料目标仅id/project_id/component_id/directory_path/created_at：旧directory来源保留路径；旧Git来源不能从common-dir/相对路径推断工作区，必须显式给出sourceId→绝对路径。
 
-## 输出合同
+```json
+{"12":"E:/recorded/project","27":"/recorded/other-source"}
+```
 
-Schema2/4/5/6复制返回源/目标路径及`sourceSchema/targetSchema`、`counts`、`highWaterMarks`、逐表`tableSha256`和`verified`。
+`import-schema4/5/6/7 --source-paths paths.json`均使用上述映射；无Git来源可省略。拒绝遗漏Git来源、重复/未知ID、为directory来源多给映射、非法路径/JSON及尾随内容，不访问映射路径、不检查Git或目录存在性。
 
-- `targetSchema=7`。
-- `verified=true`仅表示该次复制校验满足实现检查，不表示业务验收或正式切换完成。
-- `sourceOpenedReadOnly=true`；SQLite读取WAL时可能涉及SHM，不承诺sidecar元数据逐字节不变。
-- `sourceQuiescenceVerified=false`、`externalPathsObserved=false`明确未证明停写和外部现场。
-- `digestEncoding=sqlite-typed-rows-v1`：按源列顺序和主键排序，行前缀`R`，NULL为`N`，INTEGER为`I`+i64小端，REAL为`F`+IEEE754位小端，TEXT/BLOB为`T/B`+u64字节长度小端+原字节；不重新序列化JSON。
+schema2无源码表，不需要映射。schema4/5/6/7有Git来源时均可携带显式映射直接导入Schema8，无需先升级到7；缺映射拒绝。Service的旧无映射wrappers默认使用{}，因此不能隐式处理含Git来源的快照。不得修改源版本号后套用其它入口。
 
-摘要仅用于复制核对，不是语义真伪、身份连续性或缓存授权。单个Import最多16 MiB；没有整库内存或总耗时硬上界。
+## 文件与数据安全
 
-## 隔离执行步骤
+- 源/目标都须显式绝对路径、明确文件名，--yes；不回退默认库，不原地修改、合并、覆盖、切换配置或启动/停止服务。
+- 源必须是可信本地普通数据库快照，布局/表列/索引/触发器/约束/版本与冻结输入一致。拒绝漂移布局、歧义taskKey、无效JSON/BLOB/序列、损坏完整性/外键；源与目标父目录由操作者控制。
+- 先停止所有源写入者，使用SQLite Backup API取得包含已提交WAL的一致快照；不能只复制运行中主文件。固定读事务、data_version和身份复查不等于停写屏障，不能排除检查后的替换。
+- 源及已有sidecar须普通文件，不是链接/目录。迁移文件路径拒绝网络/设备前缀、ADS、父级遍历、末尾分隔符和Windows分量尾随句点/空格。
+- 目标及-wal/-shm/-journal须全部不存在，包括悬空链接；检查前后都不删除占用路径。目标父目录私有，已存在目录只验证，不chmod/重写ACL；缺失时仅创建最后一级私有目录，祖先须存在。
+- 只读源，固定快照；同目录私有暂存库初始化Schema8，以单IMMEDIATE事务、延迟外键、明确列复制和转换。只读SQLite访问WAL可能涉及SHM，不承诺sidecar元数据逐字节不变。
+- status及退役字段/源码路径使用显式转换投影核验；其他保留字段逐字段、typed hash、JSON原文/BLOB核验，不因有转换而跳过历史一致性检查。保留保留表的自增高水位，不能让已删除记录ID重新分配。
+- 不读取登记源码、Worktree或Import外部原始文件，不调用Git。文件/路径资料复制不证明外部现场或赋予Session执行权。
+- Schema7规则当前视图及全部规则历史均须通过应用解码；历史before/after快照须满足身份、版本和内容格式校验。非法历史拒绝发布，不改写JSON原文。
+- 完成完整性、外键与应用解码后，关闭并刷盘暂存库，复核源/父目录身份及目标占用，以不覆盖hard link发布；不支持hard link即失败，不降级覆盖。
+- 普通失败仅清理本次暂存，不发布部分目标。进程中断可能留下暂存，重试不扫描/采纳/删除它，不自动清理用户目录。
 
-以下占位符必须替换为获准的本地绝对路径，不能使用默认库或正式运行数据库。SOURCE只能来自已准备的合成/获准停写快照。
+## 输出与核验
+
+schema2/4/5/6/7入口返回sourceSchema/targetSchema、counts、highWaterMarks、tableSha256、verified及转换遗漏字段说明。targetSchema=8；`digestScope=retained-fields-after-explicit-schema8-conversion`，不声称转换前后原始整表hash相等。
+
+`digestEncoding=sqlite-typed-rows-v1`按保留投影和主键排序：行前缀R，NULL为N，INTEGER为I+i64小端，REAL为F+IEEE754小端，TEXT/BLOB为T/B+u64字节长度小端+原字节，不重序列化JSON。
+
+`verified=true`仅说明实现的复制检查满足；`sourceOpenedReadOnly=true`、`sourceQuiescenceVerified=false`、`externalPathsObserved=false`明确未证明停写或外部现场。摘要不证明语义真实或跨进程身份连续性。单Import上限16MiB，没有整库内存/总耗时硬保证。
+
+## 隔离操作
+
+CLI/SOURCE/NEW_DB必须替换为核验的候选程序、合成或获准停写快照、不存在的隔离目标；不得直接对正式库套用。
 
 ```text
-taskctl --json database --help
-taskctl --json database import-schema6 --help
-
-taskctl --database NEW_ABSOLUTE_DB --json --yes database import-schema6 --source QUIESCENT_SCHEMA6_DB
+CLI --json database --help
+CLI --json database import-schema7 --help
+CLI --database NEW_DB --json --yes database import-schema7 --source SOURCE --source-paths paths.json
 ```
 
-1. 核对二进制身份、对应命令帮助、源输入格式、源目录权限及全部写入者停写状态。
-2. 确认目标私有目录与目标/sidecar无占用；保留原快照，不清空现有目标来规避检查。
-3. 按表格选择匹配输入的命令，仅运行一次；失败后保留诊断并调查，不盲目重放。
-4. 检查返回目标Schema7、复制计数、逐表摘要、自增高水位与`verified`，核对源业务内容未变化。
-5. 使用同一候选CLI显式指定新库读取`task list --view recent`、Task/Session/History/Import元数据。`task context`和`doctor`可能观察登记的外部路径，只能在这些路径也获准且隔离时执行。
-6. 对输入超限、错误Schema/布局、源损坏、目标已存在、sidecar占用、非私有父目录以及复制/发布中断运行隔离回归，确认拒绝时不发布部分目标。
+1. 核对源格式、候选程序、映射与目录权限，确认全部源写入者已停。
+2. 确认目标/sidecar不存在，保留源快照；按格式选入口，不改版本号规避检查。
+3. 检查Schema8、计数/保留字段/摘要/高水位/完整性及会话不变，核对新旧关闭含义。
+4. 显式指定新库读取Task/Session/History/Note/Import元数据及context。doctor还会检查Session记录路径存在性，须在这些路径也获准时运行。
+5. 隔离故障测试覆盖错误Schema/布局、损坏、映射缺项、目标占用、sidecar、非私有父目录、写入/发布中断；失败不出现部分目标。
 
-可执行的验证入口：
+验证入口：`cargo test -p steward-application migration --locked`、application的migration集成测试、CLI schema2_contract/migration_contract、server schema2_startup/database_preflight。测试文件存在不等于已运行。
 
-```bash
-cargo test -p steward-application migration --locked
-cargo test -p taskctl --test schema2_contract --test migration_contract --locked
-cargo test -p steward-server --test schema2_startup --test database_preflight --locked
-```
+## 正式切换与未验证边界
 
-这些命令使用测试夹具，不是正式迁移命令。测试脚本存在不代表目标平台或正式数据已验收。
+正式切换独立确定停写窗口，暂停CLI/Hook/taskd/宿主所有写入者，一致备份、逐字段核验、数据库路径和配套程序/UI合同核对后成套切换；导入命令不停止已有连接，也不阻止旧副本继续写入。
 
-## 切换、恢复及未验证边界
+新库尚未写入时可按停写恢复方案恢复备份及配套程序；接受新写入后不得直接覆盖备份或只降级二进制，必须保留两侧数据并明确对账。无自动降级/反向合并保证。
 
-正式切换须独立确定维护窗口，暂停CLI、Hook、taskd及宿主适配器等全部写入者；一致备份、逐字段核对、程序/UI合同与数据库路径核对完成后，才可成套切换。导入命令和版本拒绝不能停止已有连接，也不能阻止另一份库继续接收写入。
-
-Windows启动器只接受Schema7，不执行普通跨Schema更新；安装/停启规则见[Windows指南](../../distribution/windows/README.md)。恢复写入前可在停写状态依照核验方案恢复备份及配套程序；新库接受写入后不得直接用备份覆盖或只降级二进制，必须停写、保留两侧数据并明确对账/恢复方案。没有反向合并或自动降级合同。
-
-生产规模、恶意同用户路径替换、磁盘满、断电耐久性、跨平台专项、实际安装切换及恢复后的业务完整性必须分别验证。复制、自动化测试或页面可访问不构成这些验证的替代。
+正式数据、生产规模、跨平台、磁盘满/断电、恶意同用户路径替换、安装切换/恢复及人工业务验收须分别验证。Schema8源码、文档或隔离复制成功不代表正式部署完成。

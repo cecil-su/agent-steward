@@ -1,13 +1,11 @@
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use steward_application::{Service, TaskListOptions};
 
 fn service(temp: &tempfile::TempDir) -> Service {
-    Service::new(temp.path().join("steward.db")).with_lock_root(temp.path().join("locks"))
+    Service::new(temp.path().join("steward.db"))
 }
 
 fn version(outcome: &steward_application::Outcome) -> i64 {
@@ -39,7 +37,7 @@ fn task_session_checkpoint_import_and_history_flow() {
     assert_eq!(version(&created), 1);
 
     let claimed = service.task_claim("TASK-1", 1, "session-a", false).unwrap();
-    assert_eq!(claimed.data["task"]["status"], "in_progress");
+    assert_eq!(claimed.data["task"]["status"], "todo");
     assert_eq!(version(&claimed), 2);
     let no_op = service.task_claim("TASK-1", 2, "session-a", false).unwrap();
     assert_eq!(version(&no_op), 2);
@@ -62,13 +60,9 @@ fn task_session_checkpoint_import_and_history_flow() {
         .task_note("TASK-1", 3, "decision", "Use SQLite WAL")
         .unwrap();
     assert_eq!(version(&noted), 4);
-    let blocked = service
-        .task_block("TASK-1", 4, "Need fixture", "Create a synthetic fixture")
-        .unwrap();
+    let blocked = service.task_status("TASK-1", 4, "blocked").unwrap();
     assert_eq!(blocked.data["task"]["status"], "blocked");
-    let unblocked = service
-        .task_unblock("TASK-1", 5, "Save checkpoint")
-        .unwrap();
+    let unblocked = service.task_status("TASK-1", 5, "in_progress").unwrap();
     assert_eq!(unblocked.data["task"]["status"], "in_progress");
     let checkpoint = service
         .task_checkpoint(
@@ -163,9 +157,10 @@ fn task_session_checkpoint_import_and_history_flow() {
             .unwrap()
             .is_empty()
     );
-    let closed = service.task_close("TASK-1", 10, "completed", None).unwrap();
-    assert_eq!(closed.data["task"]["status"], "closed");
-    assert!(closed.data["task"]["currentSessionId"].is_null());
+    let done = service.task_status("TASK-1", 10, "done").unwrap();
+    assert_eq!(done.data["task"]["status"], "done");
+    assert_eq!(done.data["task"]["currentSessionId"], "session-b");
+    assert!(service.session_show("session-b").unwrap().data["session"]["endedAt"].is_null());
 
     let history = service.history("TASK-1").unwrap();
     let changes = history.data["history"]
@@ -179,7 +174,7 @@ fn task_session_checkpoint_import_and_history_flow() {
     assert!(changes.contains(&"session.resumed"));
     assert!(changes.contains(&"session.imported"));
     assert!(changes.contains(&"session.import_removed"));
-    assert_eq!(changes.last(), Some(&"task.closed"));
+    assert_eq!(changes.last(), Some(&"task.status_changed"));
 }
 
 #[test]
@@ -255,7 +250,7 @@ fn checkpoint_response_is_its_own_transaction_snapshot() {
 }
 
 #[test]
-fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
+fn minimal_create_merge_patch_and_terminal_maintenance_follow_cas() {
     let temp = tempfile::tempdir().unwrap();
     let service = service(&temp);
     let created = service.task_create_minimal().unwrap();
@@ -263,13 +258,8 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
     assert!(created.data["task"]["taskKey"].is_null());
     assert!(created.data["task"]["title"].is_null());
 
-    service.task_claim("#1", 1, "session-a", false).unwrap();
-    let completed = service.task_close("#1", 2, "completed", None).unwrap_err();
-    assert_eq!(completed.body.code, "CONSTRAINT_VIOLATION");
-    assert_eq!(
-        completed.body.details["constraint"],
-        "task.close.completed_requires_complete_descriptions"
-    );
+    // Even an incomplete task can be marked done without claiming a Session.
+    service.task_status("#1", 1, "done").unwrap();
     assert_eq!(service.task_show("1").unwrap().data["task"]["version"], 2);
 
     let filled = service
@@ -325,9 +315,7 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
         service.task_show("PATCHABLE").unwrap().data["task"]["version"],
         4
     );
-    let closed = service
-        .task_close("PATCHABLE", 4, "completed", None)
-        .unwrap();
+    let closed = service.task_status("PATCHABLE", 4, "cancelled").unwrap();
     assert_eq!(version(&closed), 5);
     let closed_at = closed.data["task"]["closedAt"].clone();
 
@@ -335,17 +323,20 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
         .task_update(
             "PATCHABLE",
             5,
-            r#"{"nextStep":"not allowed when closed"}"#,
+            r#"{"nextStep":"follow-up after cancellation"}"#,
             true,
             "fixture",
         )
-        .unwrap_err();
-    assert_eq!(ordinary_update.body.code, "CONSTRAINT_VIOLATION");
-    let retitled = service
-        .task_retitle("PATCHABLE", 5, "0904｜功能｜Retitled closed task")
         .unwrap();
-    assert_eq!(version(&retitled), 6);
-    assert_eq!(retitled.data["task"]["status"], "closed");
+    assert_eq!(
+        ordinary_update.data["task"]["nextStep"],
+        "follow-up after cancellation"
+    );
+    let retitled = service
+        .task_retitle("PATCHABLE", 6, "0904｜功能｜Retitled closed task")
+        .unwrap();
+    assert_eq!(version(&retitled), 7);
+    assert_eq!(retitled.data["task"]["status"], "cancelled");
     assert_eq!(retitled.data["task"]["closedAt"], closed_at);
     assert_eq!(
         retitled.data["task"]["title"],
@@ -362,7 +353,7 @@ fn minimal_create_merge_patch_and_completed_gate_follow_cas() {
         .iter()
         .filter(|entry| entry["changeType"] == "task.updated")
         .count();
-    assert_eq!(updates, 2);
+    assert_eq!(updates, 3);
     assert_eq!(
         entries
             .iter()
@@ -435,7 +426,7 @@ fn numeric_hash_and_task_key_references_cross_task_relations() {
             r#"{
                 "title":"0904｜功能｜Reference relations",
                 "goal":"Use numeric foreign keys",
-                "scope":"Session, checkpoint, history and worktree status",
+                "scope":"Session, checkpoint and history",
                 "acceptanceCriteria":"Every public task reference resolves"
             }"#,
         )
@@ -466,9 +457,13 @@ fn numeric_hash_and_task_key_references_cross_task_relations() {
         service.history("1").unwrap().data["history"][0]["taskId"],
         1
     );
-    assert_eq!(
-        service.worktree_status("#1").unwrap().data["worktreeStatus"]["registered"],
-        false
+    assert!(
+        service
+            .task_context("#1")
+            .unwrap()
+            .data
+            .get("worktreeStatus")
+            .is_none()
     );
 }
 
@@ -499,7 +494,7 @@ fn task_list_supports_filters_projection_and_stable_cursor_pagination() {
             )
             .unwrap();
     }
-    service.task_claim("LIST-C", 1, "session-c", false).unwrap();
+    service.task_status("LIST-C", 1, "in_progress").unwrap();
 
     let exact = service
         .task_list_with_options(&TaskListOptions {
@@ -570,7 +565,7 @@ fn task_list_supports_filters_projection_and_stable_cursor_pagination() {
         .unwrap();
     let mismatch = service
         .task_list_with_options(&TaskListOptions {
-            status: Some("open".to_owned()),
+            status: Some("todo".to_owned()),
             cursor: Some(first.data["nextCursor"].as_str().unwrap().to_owned()),
             ..TaskListOptions::default()
         })
@@ -688,7 +683,7 @@ fn concurrent_writers_cannot_bypass_task_cas() {
 }
 
 #[test]
-fn active_task_without_current_session_requires_resume() {
+fn task_without_current_session_supports_explicit_claim_or_resume() {
     let temp = tempfile::tempdir().unwrap();
     let service = service(&temp);
     service
@@ -698,7 +693,7 @@ fn active_task_without_current_session_requires_resume() {
                 "title":"0904｜功能｜Resume continuity",
                 "goal":"Preserve the previous session relationship",
                 "scope":"Task claim and resume",
-                "acceptanceCriteria":"Claim cannot bypass resume"
+                "acceptanceCriteria":"Claim and resume are explicit independent choices"
             }"#,
         )
         .unwrap();
@@ -709,17 +704,19 @@ fn active_task_without_current_session_requires_resume() {
 
     let claim = service
         .task_claim("TASK-RESUME", 3, "session-b", false)
-        .unwrap_err();
-    assert_eq!(claim.body.code, "SESSION_CONFLICT");
-    assert_eq!(
-        service.task_show("TASK-RESUME").unwrap().data["task"]["version"],
-        3
-    );
-
-    let resumed = service
-        .task_resume("TASK-RESUME", 3, "session-b", Some("session-a"), false)
         .unwrap();
-    assert_eq!(resumed.data["sessions"][1]["continuedFrom"], "session-a");
+    assert_eq!(claim.data["task"]["status"], "todo");
+    assert_eq!(version(&claim), 4);
+    assert!(service.session_show("session-b").unwrap().data["session"]["continuedFrom"].is_null());
+    service.session_close("session-b", 4).unwrap();
+    let resumed = service
+        .task_resume("TASK-RESUME", 5, "session-c", Some("session-a"), false)
+        .unwrap();
+    assert_eq!(resumed.data["task"]["status"], "todo");
+    assert_eq!(
+        service.session_show("session-c").unwrap().data["session"]["continuedFrom"],
+        "session-a"
+    );
 }
 
 #[test]
@@ -846,721 +843,4 @@ fn session_import_rejects_fifo_without_waiting_for_a_writer() {
         .unwrap_err();
     assert_eq!(error.body.code, "INVALID_INPUT");
     assert_eq!(error.body.details["reason"], "must be a regular file");
-}
-
-#[test]
-fn worktree_create_status_dirty_refusal_and_remove_flow() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    fs::write(repo.join("-name.txt"), "rename fixture\n").unwrap();
-    fs::write(repo.join(".gitignore"), "*.secret\n").unwrap();
-    git(&repo, ["add", "-A"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "feature"]);
-
-    let service = service(&temp);
-    service
-        .task_create(
-            "TASK-WT",
-            r#"{
-                "title":"0904｜功能｜Worktree flow",
-                "goal":"Exercise safe Git operations",
-                "scope":"Synthetic repository",
-                "acceptanceCriteria":"Create and remove worktree"
-            }"#,
-        )
-        .unwrap();
-    let worktree = temp.path().join("feature-worktree");
-    let created = service
-        .worktree_create("TASK-WT", 1, &repo, "feature", &worktree)
-        .unwrap();
-    assert_eq!(version(&created), 2);
-    assert_eq!(created.data["worktreeStatus"]["exists"], true);
-
-    fs::rename(worktree.join("-name.txt"), worktree.join("new-name.txt")).unwrap();
-    git(&worktree, ["add", "-A"]);
-    let renamed = service.worktree_status("TASK-WT").unwrap();
-    assert_eq!(
-        renamed.data["worktreeStatus"]["staged"],
-        json!(["new-name.txt"])
-    );
-    assert_eq!(renamed.data["worktreeStatus"]["unstaged"], json!([]));
-    fs::rename(worktree.join("new-name.txt"), worktree.join("-name.txt")).unwrap();
-    git(&worktree, ["add", "-A"]);
-
-    let duplicate = service
-        .worktree_create("TASK-WT", 2, &repo, "feature", &temp.path().join("other"))
-        .unwrap_err();
-    assert_eq!(duplicate.body.code, "WORKTREE_SAFETY_REFUSED");
-
-    fs::write(worktree.join("untracked.txt"), "do not delete\n").unwrap();
-    let dirty = service.worktree_remove("TASK-WT", 2).unwrap_err();
-    assert_eq!(dirty.body.code, "WORKTREE_SAFETY_REFUSED");
-    fs::remove_file(worktree.join("untracked.txt")).unwrap();
-
-    let ignored_path = worktree.join("only-copy.secret");
-    fs::write(&ignored_path, "only copy\n").unwrap();
-    let ignored_status = service.worktree_status("TASK-WT").unwrap();
-    assert_eq!(
-        ignored_status.data["worktreeStatus"]["ignored"],
-        json!(["only-copy.secret"])
-    );
-    let ignored = service.worktree_remove("TASK-WT", 2).unwrap_err();
-    assert_eq!(ignored.body.code, "WORKTREE_SAFETY_REFUSED");
-    assert!(
-        ignored.body.details["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("ignored"))
-    );
-    assert_eq!(fs::read_to_string(&ignored_path).unwrap(), "only copy\n");
-    fs::remove_file(ignored_path).unwrap();
-
-    let removed = service.worktree_remove("TASK-WT", 2).unwrap();
-    assert_eq!(version(&removed), 3);
-    assert_eq!(removed.data["worktreeStatus"]["registered"], false);
-    assert!(!worktree.exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn worktree_create_rejects_a_non_utf8_target_before_git_mutation() {
-    use std::os::unix::ffi::OsStringExt;
-
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    git(&repo, ["add", "README.md"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "feature"]);
-
-    let service = service(&temp);
-    service
-        .task_create(
-            "TASK-WT-NON-UTF8",
-            r#"{
-                "title":"0904｜修复｜Reject non-UTF-8 Worktree",
-                "goal":"Keep path persistence lossless",
-                "scope":"Synthetic repository",
-                "acceptanceCriteria":"Git is not mutated"
-            }"#,
-        )
-        .unwrap();
-    let worktree = temp
-        .path()
-        .join(std::ffi::OsString::from_vec(b"worktree-\xff".to_vec()));
-    let error = service
-        .worktree_create("TASK-WT-NON-UTF8", 1, &repo, "feature", &worktree)
-        .unwrap_err();
-
-    assert_eq!(error.body.code, "PATH_IDENTITY_UNKNOWN");
-    assert!(!worktree.exists());
-    let task = service.task_show("TASK-WT-NON-UTF8").unwrap();
-    assert_eq!(task.data["task"]["version"], 1);
-    assert!(task.data["task"]["worktreePath"].is_null());
-}
-
-#[test]
-fn worktree_create_does_not_commit_a_missing_post_checkout_directory() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    git(&repo, ["add", "README.md"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "feature"]);
-
-    let hook = repo.join(".git/hooks/post-checkout");
-    fs::write(
-        &hook,
-        "#!/bin/sh\ntarget=$(pwd) || exit 1\ncd .. || exit 1\nrm -rf -- \"$target\"\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    let service = service(&temp);
-    service
-        .task_create(
-            "TASK-WT-MISSING",
-            r#"{
-                "title":"0904｜修复｜Missing worktree directory",
-                "goal":"Do not commit an invalid Worktree reference",
-                "scope":"Synthetic repository",
-                "acceptanceCriteria":"Database stays unchanged"
-            }"#,
-        )
-        .unwrap();
-    let worktree = temp.path().join("missing-after-checkout");
-
-    let error = service
-        .worktree_create("TASK-WT-MISSING", 1, &repo, "feature", &worktree)
-        .unwrap_err();
-
-    assert_eq!(error.body.code, "PARTIAL_EXTERNAL_STATE");
-    assert_eq!(error.body.details["databaseState"], "unchanged");
-    assert_eq!(error.body.details["gitState"]["pathExists"], false);
-    assert_eq!(error.body.details["gitState"]["registeredByGit"], true);
-    assert_eq!(
-        error.body.details["recommendedArgs"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap(),
-        "doctor"
-    );
-    assert!(!worktree.exists());
-
-    let task = service.task_show("TASK-WT-MISSING").unwrap();
-    assert_eq!(task.data["task"]["version"], 1);
-    assert!(task.data["task"]["repositoryPath"].is_null());
-    assert!(task.data["task"]["worktreePath"].is_null());
-    let history = service.history("TASK-WT-MISSING").unwrap();
-    let changes = history.data["history"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["changeType"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(changes, vec!["task.created"]);
-}
-
-#[cfg(unix)]
-#[test]
-fn unicode_worktree_version_conflict_returns_usable_adopt_after_rollback() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::time::{Duration, Instant};
-
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    git(&repo, ["commit", "--allow-empty", "-m", "fixture"]);
-    git(&repo, ["branch", "feature"]);
-    let hook = repo.join(".git/hooks/post-checkout");
-    fs::write(&hook, "#!/bin/sh\ncommon=$(git rev-parse --git-common-dir) || exit 1\ntouch \"$common/review-ready\"\ni=0\nwhile [ ! -f \"$common/review-continue\" ] && [ \"$i\" -lt 100 ]; do\n  sleep 0.05\n  i=$((i+1))\ndone\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    let service = service(&temp);
-    service.task_create_minimal().unwrap();
-    let worktree = temp.path().join("工作树");
-    let worker = {
-        let service = service.clone();
-        let repo = repo.clone();
-        let worktree = worktree.clone();
-        std::thread::spawn(move || service.worktree_create("1", 1, &repo, "feature", &worktree))
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !repo.join(".git/review-ready").exists() {
-        assert!(Instant::now() < deadline, "Git hook did not start");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    service
-        .task_note("1", 1, "progress", "Concurrent task update")
-        .unwrap();
-    fs::write(repo.join(".git/review-continue"), "").unwrap();
-    let error = worker.join().unwrap().unwrap_err();
-    assert_eq!(error.body.code, "PARTIAL_EXTERNAL_STATE");
-    assert_eq!(error.body.details["databaseState"], "unchanged");
-    assert_eq!(error.body.details["recommendedArgs"][4], "adopt");
-    assert_eq!(
-        error.body.details["recommendedArgs"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap(),
-        "2"
-    );
-    let task = service.task_show("1").unwrap();
-    assert!(task.data["task"]["worktreePath"].is_null());
-    let adopted = service.worktree_adopt("1", 2, &repo, &worktree).unwrap();
-    assert_eq!(version(&adopted), 3);
-    let history = service.history("1").unwrap();
-    assert!(
-        !history.data["history"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["changeType"] == "worktree.created")
-    );
-}
-
-#[test]
-fn unicode_worktree_rechecks_live_owner_and_can_be_detached_after_external_removal() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    git(&repo, ["add", "README.md"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "unicode"]);
-    let worktree = temp.path().join("工作树");
-
-    let service = service(&temp);
-    for task_id in ["TASK-WT-UNICODE-OWNER", "TASK-WT-UNICODE-ADOPTER"] {
-        service
-            .task_create(
-                task_id,
-                &format!(
-                    r#"{{
-                        "title":"0904｜功能｜{task_id}",
-                        "goal":"Keep one live Worktree owner",
-                        "scope":"Synthetic repository",
-                        "acceptanceCriteria":"One live worktree has one owner"
-                    }}"#
-                ),
-            )
-            .unwrap();
-    }
-    service
-        .worktree_create("TASK-WT-UNICODE-OWNER", 1, &repo, "unicode", &worktree)
-        .unwrap();
-    let error = service
-        .worktree_adopt("TASK-WT-UNICODE-ADOPTER", 1, &repo, &worktree)
-        .unwrap_err();
-
-    assert_eq!(error.body.code, "WORKTREE_SAFETY_REFUSED");
-    assert!(error.body.details["reason"].as_str().is_some_and(|reason| {
-        reason.contains(&format!("#{}", task_id(&service, "TASK-WT-UNICODE-OWNER")))
-    }));
-    let adopter = service.task_show("TASK-WT-UNICODE-ADOPTER").unwrap();
-    assert_eq!(adopter.data["task"]["version"], 1);
-    assert!(adopter.data["task"]["worktreePath"].is_null());
-
-    let registered_path =
-        service.task_show("TASK-WT-UNICODE-OWNER").unwrap().data["task"]["worktreePath"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-    git(&repo, ["worktree", "remove", worktree.to_str().unwrap()]);
-
-    let doctor = service.doctor().unwrap();
-    let issue = doctor.data["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["code"] == "WORKTREE_REFERENCES")
-        .unwrap()["details"]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["taskId"] == task_id(&service, "TASK-WT-UNICODE-OWNER"))
-        .unwrap();
-    assert_eq!(issue["registeredByGit"], false);
-    assert_eq!(
-        issue["recommendedArgs"].as_array().unwrap().last().unwrap(),
-        "2"
-    );
-    assert!(
-        issue["recommendedArgs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|arg| arg == &registered_path)
-    );
-
-    let detached = service
-        .worktree_detach("TASK-WT-UNICODE-OWNER", 2, Path::new(&registered_path))
-        .unwrap();
-    assert_eq!(version(&detached), 3);
-    assert!(detached.data["task"]["worktreePath"].is_null());
-}
-
-#[test]
-fn worktree_adopt_allows_distinct_worktrees() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    git(&repo, ["add", "README.md"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "owner"]);
-    git(&repo, ["branch", "adopter"]);
-    let owner_worktree = temp.path().join("owner-worktree");
-    let adopter_worktree = temp.path().join("adopter-worktree");
-    git(
-        &repo,
-        ["worktree", "add", owner_worktree.to_str().unwrap(), "owner"],
-    );
-    git(
-        &repo,
-        [
-            "worktree",
-            "add",
-            adopter_worktree.to_str().unwrap(),
-            "adopter",
-        ],
-    );
-
-    let service = service(&temp);
-    for task_id in ["TASK-WT-KEY-OWNER", "TASK-WT-KEY-ADOPTER"] {
-        service
-            .task_create(
-                task_id,
-                &format!(
-                    r#"{{
-                        "title":"0904｜功能｜{task_id}",
-                        "goal":"Use live Worktree ownership",
-                        "scope":"Synthetic repository",
-                        "acceptanceCriteria":"A distinct Worktree can have its own Task"
-                    }}"#
-                ),
-            )
-            .unwrap();
-    }
-    service
-        .worktree_adopt("TASK-WT-KEY-OWNER", 1, &repo, &owner_worktree)
-        .unwrap();
-    let adopted = service
-        .worktree_adopt("TASK-WT-KEY-ADOPTER", 1, &repo, &adopter_worktree)
-        .unwrap();
-
-    assert_eq!(version(&adopted), 2);
-    let nested = adopter_worktree.join("nested");
-    fs::create_dir(&nested).unwrap();
-    let here = service.task_here(&nested).unwrap();
-    assert_eq!(here.data["matchedBy"], "worktree");
-    assert_eq!(here.data["tasks"].as_array().unwrap().len(), 1);
-    assert_eq!(here.data["tasks"][0]["taskKey"], "TASK-WT-KEY-ADOPTER");
-    let related = service.task_here(&repo).unwrap();
-    assert_eq!(related.data["matchedBy"], "repository");
-    assert_eq!(related.data["tasks"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        service.task_here(temp.path()).unwrap().data["matchedBy"],
-        "none"
-    );
-    assert_eq!(
-        service.task_show("TASK-WT-KEY-ADOPTER").unwrap().data["task"],
-        adopted.data["task"]
-    );
-    assert_eq!(
-        adopted.data["task"]["worktreePath"],
-        fs::canonicalize(&adopter_worktree)
-            .unwrap()
-            .to_string_lossy()
-            .as_ref()
-    );
-    // A nested repository must not inherit its enclosing worktree's task.
-    git(&nested, ["init", "-b", "main"]);
-    assert_eq!(
-        service.task_here(&nested).unwrap().data["matchedBy"],
-        "none"
-    );
-    // Broken Git metadata must not prevent exporting the database context.
-    fs::rename(repo.join(".git"), repo.join(".git-unavailable")).unwrap();
-    let context = service.task_context("TASK-WT-KEY-ADOPTER").unwrap();
-    assert_eq!(context.data["task"], adopted.data["task"]);
-    assert!(context.data["worktreeStatus"].is_null());
-    assert_eq!(context.warnings[0].code, "WORKTREE_OBSERVATION_FAILED");
-}
-
-#[test]
-fn worktree_adopt_doctor_and_detach_recover_external_state() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    git(&repo, ["add", "README.md"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "recovery"]);
-
-    let worktree = temp.path().join("recovery worktree;$");
-    git(
-        &repo,
-        ["worktree", "add", worktree.to_str().unwrap(), "recovery"],
-    );
-    let database = temp.path().join("custom data").join("steward db.sqlite");
-    let service =
-        Service::new(&database).with_lock_root(temp.path().join("recovery operation locks"));
-    let task_id = "TASK RECOVER;$";
-    service
-        .task_create(
-            task_id,
-            r#"{
-                "title":"0904｜修复｜Recovery flow",
-                "goal":"Reconcile proven external Git state",
-                "scope":"Synthetic repository",
-                "acceptanceCriteria":"Adopt and detach succeed"
-            }"#,
-        )
-        .unwrap();
-    let numeric_id = service.task_show(task_id).unwrap().data["task"]["id"]
-        .as_i64()
-        .unwrap();
-    let adopted = service
-        .worktree_adopt(task_id, 1, &repo, &worktree)
-        .unwrap();
-    assert_eq!(version(&adopted), 2);
-    assert_eq!(adopted.data["worktreeStatus"]["exists"], true);
-
-    git(&repo, ["worktree", "remove", worktree.to_str().unwrap()]);
-    let registered_path = adopted.data["worktreeStatus"]["path"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let remove_error = service.worktree_remove(task_id, 2).unwrap_err();
-    assert_eq!(remove_error.body.code, "WORKTREE_SAFETY_REFUSED");
-    assert!(
-        remove_error.body.details["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("use detach"))
-    );
-    let stale_status = service.worktree_status(task_id).unwrap();
-    assert_eq!(stale_status.data["worktreeStatus"]["registered"], true);
-    assert_eq!(stale_status.data["worktreeStatus"]["exists"], false);
-    let doctor = service.doctor().unwrap();
-    let worktree_check = doctor.data["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["code"] == "WORKTREE_REFERENCES")
-        .unwrap();
-    assert_eq!(worktree_check["status"], "warning");
-    let issue = &worktree_check["details"]["issues"][0];
-    assert!(
-        issue["recommendedCommand"]
-            .as_str()
-            .is_some_and(|command| command.contains("taskctl"))
-    );
-    assert_eq!(issue["registeredByGit"], false);
-    assert!(issue["recoveryNote"].is_null());
-    assert_eq!(
-        issue["recommendedArgs"],
-        json!([
-            "taskctl",
-            "--database",
-            fs::canonicalize(&database).unwrap().to_string_lossy(),
-            "worktree",
-            "detach",
-            numeric_id.to_string(),
-            "--expected-path",
-            registered_path,
-            "--if-version",
-            "2",
-        ])
-    );
-
-    let expected_path = worktree.with_file_name("RECOVERY WORKTREE;$");
-    let refused = service
-        .worktree_detach(task_id, 2, &expected_path)
-        .unwrap_err();
-    assert_eq!(refused.body.code, "WORKTREE_SAFETY_REFUSED");
-    let detached = service.worktree_detach(task_id, 2, &worktree).unwrap();
-    assert_eq!(version(&detached), 3);
-    assert_eq!(detached.data["worktreeStatus"]["registered"], false);
-    let history = service.history(task_id).unwrap();
-    let changes = history.data["history"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["changeType"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        changes,
-        vec!["task.created", "worktree.adopted", "worktree.detached"]
-    );
-}
-
-#[test]
-fn doctor_does_not_recommend_detach_while_git_still_registers_the_worktree() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, ["init", "-b", "main"]);
-    git(&repo, ["config", "user.email", "tests@example.invalid"]);
-    git(&repo, ["config", "user.name", "Agent Steward Tests"]);
-    fs::write(repo.join("README.md"), "fixture\n").unwrap();
-    git(&repo, ["add", "README.md"]);
-    git(&repo, ["commit", "-m", "fixture"]);
-    git(&repo, ["branch", "recovery"]);
-
-    let worktree = temp.path().join("manually deleted worktree");
-    git(
-        &repo,
-        ["worktree", "add", worktree.to_str().unwrap(), "recovery"],
-    );
-    let service = service(&temp);
-    let task_id = "TASK-GIT-STALE";
-    service
-        .task_create(
-            task_id,
-            r#"{
-                "title":"0904｜修复｜Stale registration recovery",
-                "goal":"Never recommend a detach that Git would refuse",
-                "scope":"Synthetic repository",
-                "acceptanceCriteria":"Doctor keeps reporting until Git registration is gone"
-            }"#,
-        )
-        .unwrap();
-    let adopted = service
-        .worktree_adopt(task_id, 1, &repo, &worktree)
-        .unwrap();
-    assert_eq!(version(&adopted), 2);
-
-    // Delete the directory manually: Git still registers the worktree.
-    fs::remove_dir_all(&worktree).unwrap();
-    let remove_error = service.worktree_remove(task_id, 2).unwrap_err();
-    assert_eq!(remove_error.body.code, "WORKTREE_SAFETY_REFUSED");
-    let reason = remove_error.body.details["reason"].as_str().unwrap();
-    assert!(reason.contains("Git still registers"));
-    assert!(reason.contains("taskctl doctor"));
-    assert!(!reason.contains("use detach"));
-    let doctor = service.doctor().unwrap();
-    let worktree_check = doctor.data["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["code"] == "WORKTREE_REFERENCES")
-        .unwrap();
-    assert_eq!(worktree_check["status"], "warning");
-    let issue = &worktree_check["details"]["issues"][0];
-    assert_eq!(issue["registeredByGit"], true);
-    assert_eq!(
-        issue["reason"],
-        "registered worktree is absent but Git still registers it"
-    );
-    assert!(
-        issue["recoveryNote"]
-            .as_str()
-            .is_some_and(|note| note.contains("prune"))
-    );
-    assert_eq!(
-        issue["recommendedArgs"],
-        json!([
-            "taskctl",
-            "--database",
-            fs::canonicalize(service.database_path())
-                .unwrap()
-                .to_string_lossy(),
-            "doctor",
-        ])
-    );
-
-    let aliased_path = worktree.with_file_name("MANUALLY DELETED WORKTREE");
-    if git_adapter::paths_equivalent(&worktree, &aliased_path).unwrap() {
-        let refused = service
-            .worktree_detach(task_id, 2, &aliased_path)
-            .unwrap_err();
-        assert_eq!(refused.body.code, "WORKTREE_SAFETY_REFUSED");
-        assert!(
-            service.task_show(task_id).unwrap().data["task"]["worktreePath"]
-                .as_str()
-                .is_some()
-        );
-        assert!(
-            git_adapter::find_worktree_registration(&repo, &worktree)
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    // detach itself must still refuse while Git registers the worktree.
-    let refused = service.worktree_detach(task_id, 2, &worktree).unwrap_err();
-    assert_eq!(refused.body.code, "WORKTREE_SAFETY_REFUSED");
-}
-
-#[test]
-fn doctor_does_not_recommend_detach_for_a_different_repository_common_dir() {
-    let temp = tempfile::tempdir().unwrap();
-    let registered_repo = temp.path().join("registered-repo");
-    let current_repo = temp.path().join("current-repo");
-    fs::create_dir(&registered_repo).unwrap();
-    fs::create_dir(&current_repo).unwrap();
-    git(&registered_repo, ["init", "-b", "main"]);
-    git(&current_repo, ["init", "-b", "main"]);
-    let registered_info = git_adapter::repository_info(&registered_repo).unwrap();
-    let current_info = git_adapter::repository_info(&current_repo).unwrap();
-    let missing_worktree = temp.path().join("missing-worktree");
-
-    let service = service(&temp);
-    service
-        .task_create(
-            "TASK-DOCTOR-COMMON-DIR",
-            r#"{
-                "title":"0904｜修复｜Repository identity mismatch",
-                "goal":"Do not recommend an impossible detach",
-                "scope":"Synthetic repository references",
-                "acceptanceCriteria":"Doctor recommends continued diagnosis"
-            }"#,
-        )
-        .unwrap();
-    storage_sqlite::open_database(service.database_path())
-        .unwrap()
-        .execute(
-            "UPDATE tasks SET repository_path=?2,repository_common_dir=?3,
-                repository_branch='main',worktree_path=?4,
-                version=2 WHERE id=?1",
-            rusqlite::params![
-                task_id(&service, "TASK-DOCTOR-COMMON-DIR"),
-                current_info.repository_path.to_string_lossy(),
-                registered_info.common_dir.to_string_lossy(),
-                missing_worktree.to_string_lossy(),
-            ],
-        )
-        .unwrap();
-
-    let doctor = service.doctor().unwrap();
-    let issue = doctor.data["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["code"] == "WORKTREE_REFERENCES")
-        .unwrap()["details"]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["taskId"] == task_id(&service, "TASK-DOCTOR-COMMON-DIR"))
-        .unwrap();
-    assert_eq!(
-        issue["reason"],
-        "repository identity no longer matches the registered common directory"
-    );
-    assert!(issue["registeredByGit"].is_null());
-    assert_eq!(
-        issue["recommendedArgs"].as_array().unwrap().last().unwrap(),
-        "doctor"
-    );
-}
-
-fn git<const N: usize>(repo: &Path, args: [&str; N]) {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[allow(dead_code)]
-fn _assert_json(value: &Value) {
-    assert!(value.is_object());
 }

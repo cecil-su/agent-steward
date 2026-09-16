@@ -16,6 +16,33 @@ fn event(id: &str) -> Value {
 }
 
 #[test]
+fn hook_observations_preserve_every_business_status_and_session_lifecycle() {
+    for status in [
+        "backlog",
+        "todo",
+        "in_progress",
+        "in_review",
+        "blocked",
+        "done",
+        "cancelled",
+    ] {
+        let (_temp, service) = fixture();
+        service.task_status("1", 3, status).unwrap();
+        let before = service.task_show("1").unwrap().data;
+        let history = service.history("1").unwrap().data;
+        let sessions = service.session_list(Some("1")).unwrap().data;
+        for kind in ["started", "resumed", "idle", "closed"] {
+            let mut observation = event(kind);
+            observation["kind"] = json!(kind);
+            service.hook_ingest(&observation.to_string()).unwrap();
+        }
+        assert_eq!(service.task_show("1").unwrap().data, before);
+        assert_eq!(service.history("1").unwrap().data, history);
+        assert_eq!(service.session_list(Some("1")).unwrap().data, sessions);
+    }
+}
+
+#[test]
 fn binding_is_explicit_once_and_preserves_execution_authority() {
     let (_temp, service) = fixture();
     let before = service.task_show("1").unwrap().data;

@@ -11,23 +11,24 @@ function Assert($Condition, [string]$Message) { if (-not $Condition) { throw $Me
 try {
     $a = & $script -Action Build -SourceRoot $source -Output (Join-Path $temp 'a') -Version a
     $b = & $script -Action Build -SourceRoot $source -Output (Join-Path $temp 'b') -Version b
-    $arguments = @('--no-open','--port','0','--database',('"'+(Join-Path $temp 'tasks.db')+'"'),'--runtime-dir',('"'+(Join-Path $temp 'runtime')+'"'),'--ui-root',('"'+$root+'"'),'--shutdown-file',('"'+$marker+'"'))
+    $bind = if ($env:STEWARD_TEST_BIND) { $env:STEWARD_TEST_BIND } else { '127.0.0.1' }
+    $arguments = @('--no-open','--bind',$bind,'--port','0','--database',('"'+(Join-Path $temp 'tasks.db')+'"'),'--runtime-dir',('"'+(Join-Path $temp 'runtime')+'"'),'--ui-root',('"'+$root+'"'),'--shutdown-file',('"'+$marker+'"'))
     $process = Start-Process -FilePath ([IO.Path]::GetFullPath($Taskd)) -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError (Join-Path $temp 'stderr.log')
     $url = $null
     for ($i=0; $i -lt 50; $i++) {
         Start-Sleep -Milliseconds 100
         if ($process.HasExited) { throw 'Isolated taskd exited before ready.' }
         $text = Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue
-        if ($text -match 'Agent Steward: (http://127\.0\.0\.1:\d+)') { $url = $Matches[1]; break }
+        if ($text -match ('Agent Steward: (http://' + [regex]::Escape($bind) + ':\d+)')) { $url = $Matches[1]; break }
     }
     Assert ($null -ne $url) 'Isolated listener did not become ready.'
     $started = $process.StartTime
     $status = & $script -Action Activate -Package (Join-Path $temp 'a') -UiRoot $root -Url $url
     Assert ($status.release -ceq $a.Id) 'A was not adopted.'
-    # Contract 3 packages must be rejected before changing the active pointer.
+    # Contract 4 packages must be rejected before changing the active pointer.
     $old = Join-Path $temp 'old-contract'; Copy-Item -LiteralPath (Join-Path $temp 'a') -Destination $old -Recurse
     $oldManifest = Get-Content -LiteralPath (Join-Path $old 'manifest.json') -Raw | ConvertFrom-Json
-    $oldManifest.requiredApiContract = 3
+    $oldManifest.requiredApiContract = 4
     [IO.File]::WriteAllText((Join-Path $old 'manifest.json'), ($oldManifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     $pointerBefore = [IO.File]::ReadAllText((Join-Path $root 'current.json'))
     $rejected = $false

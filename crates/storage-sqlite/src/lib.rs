@@ -7,7 +7,7 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
 // Schema 7 is initialized only in empty databases; older builds are never upgraded here.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -239,35 +239,22 @@ CREATE TABLE components (
     UNIQUE(project_id,name_key),
     UNIQUE(id,project_id)
 );
-CREATE TABLE repositories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    common_dir TEXT NOT NULL UNIQUE,
-    common_identity_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
 CREATE TABLE source_roots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id),
     component_id INTEGER NULL,
-    repository_id INTEGER NULL REFERENCES repositories(id),
-    relative_path TEXT NULL,
-    directory_path TEXT NULL,
-    directory_identity_json TEXT NULL,
+    directory_path TEXT NOT NULL CHECK(length(trim(directory_path)) > 0),
     created_at TEXT NOT NULL,
-    FOREIGN KEY(component_id,project_id) REFERENCES components(id,project_id),
-    CHECK ((repository_id IS NOT NULL AND relative_path IS NOT NULL AND directory_path IS NULL AND directory_identity_json IS NULL)
-        OR (repository_id IS NULL AND relative_path IS NULL AND directory_path IS NOT NULL AND directory_identity_json IS NOT NULL))
+    FOREIGN KEY(component_id,project_id) REFERENCES components(id,project_id)
 );
-CREATE UNIQUE INDEX idx_source_git ON source_roots(project_id,coalesce(component_id,0),repository_id,relative_path) WHERE repository_id IS NOT NULL;
-CREATE UNIQUE INDEX idx_source_directory ON source_roots(project_id,coalesce(component_id,0),directory_path) WHERE directory_path IS NOT NULL;
-CREATE INDEX idx_sources_repository ON source_roots(repository_id);
+CREATE UNIQUE INDEX idx_source_directory ON source_roots(project_id,coalesce(component_id,0),directory_path);
 
 CREATE TABLE tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NULL REFERENCES projects(id),
     task_key TEXT NULL UNIQUE CHECK(task_key IS NULL OR length(trim(task_key)) > 0),
     title TEXT NULL CHECK(title IS NULL OR length(trim(title)) > 0),
-    status TEXT NOT NULL CHECK(status IN ('open','in_progress','pending_release','blocked','closed')),
+    status TEXT NOT NULL CHECK(status IN ('backlog','todo','in_progress','in_review','blocked','done','cancelled')),
     version INTEGER NOT NULL CHECK(version >= 1),
     goal TEXT NULL CHECK(goal IS NULL OR length(trim(goal)) > 0),
     scope TEXT NULL CHECK(scope IS NULL OR length(trim(scope)) > 0),
@@ -276,10 +263,6 @@ CREATE TABLE tasks (
     block_reason TEXT NULL,
     block_recovery TEXT NULL,
     current_session_id TEXT NULL,
-    repository_path TEXT NULL,
-    repository_common_dir TEXT NULL,
-    repository_branch TEXT NULL,
-    worktree_path TEXT NULL,
     latest_checkpoint_id TEXT NULL,
     closure_outcome TEXT NULL CHECK(closure_outcome IS NULL OR closure_outcome IN ('completed','partial','cancelled','superseded')),
     closure_reason TEXT NULL,
@@ -287,29 +270,6 @@ CREATE TABLE tasks (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(id, current_session_id),
-    CHECK (
-        (status = 'blocked'
-            AND block_reason IS NOT NULL AND length(trim(block_reason)) > 0
-            AND block_recovery IS NOT NULL AND length(trim(block_recovery)) > 0)
-        OR
-        (status != 'blocked' AND block_reason IS NULL AND block_recovery IS NULL)
-    ),
-    CHECK (
-        (status = 'closed'
-            AND closure_outcome IS NOT NULL
-            AND closed_at IS NOT NULL AND length(trim(closed_at)) > 0
-            AND (closure_reason IS NULL OR length(trim(closure_reason)) > 0)
-            AND (closure_outcome = 'completed' OR closure_reason IS NOT NULL)
-            AND (closure_outcome != 'completed' OR (
-                title IS NOT NULL AND goal IS NOT NULL AND scope IS NOT NULL
-                AND acceptance_criteria IS NOT NULL)))
-        OR
-        (status != 'closed'
-            AND closure_outcome IS NULL AND closure_reason IS NULL AND closed_at IS NULL)
-    ),
-    CHECK (status != 'closed' OR (current_session_id IS NULL AND next_step IS NULL AND block_reason IS NULL AND block_recovery IS NULL)),
-    CHECK ((repository_path IS NULL AND repository_common_dir IS NULL AND repository_branch IS NULL AND worktree_path IS NULL)
-        OR (repository_path IS NOT NULL AND repository_common_dir IS NOT NULL AND repository_branch IS NOT NULL AND worktree_path IS NOT NULL)),
     FOREIGN KEY(current_session_id, id) REFERENCES sessions(id, task_id) DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY(latest_checkpoint_id, id) REFERENCES checkpoints(id, task_id) DEFERRABLE INITIALLY DEFERRED
 );
@@ -418,7 +378,6 @@ CREATE TABLE task_components (
 
 CREATE INDEX idx_tasks_project_updated ON tasks(project_id, updated_at, id);
 CREATE INDEX idx_tasks_status_updated ON tasks(status, updated_at);
-CREATE INDEX idx_tasks_repo_updated ON tasks(repository_common_dir, updated_at);
 CREATE INDEX idx_sessions_task_started ON sessions(task_id, started_at);
 CREATE UNIQUE INDEX idx_sessions_identity ON sessions(id, task_id);
 CREATE UNIQUE INDEX idx_sessions_external ON sessions(source, external_session_id) WHERE external_session_id IS NOT NULL;
@@ -488,7 +447,7 @@ mod tests {
             .unwrap();
         assert_eq!(schema_version(&tx).unwrap(), SCHEMA_VERSION);
         tx.execute(
-            "INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('open',1,'now','now')",
+            "INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('todo',1,'now','now')",
             [],
         )
         .unwrap();
@@ -553,7 +512,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state.db");
         let mut writer = open_database(&path).unwrap();
-        writer.execute("INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('open',1,'now','now')", []).unwrap();
+        writer.execute("INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('todo',1,'now','now')", []).unwrap();
         let tx = write_transaction(&mut writer).unwrap();
         tx.execute("UPDATE tasks SET version=2", []).unwrap();
         // A second connection must see the last committed snapshot while tx lives.
@@ -615,10 +574,10 @@ mod tests {
     fn task_ids_are_not_reused_and_keys_are_set_once() {
         let mut connection = Connection::open_in_memory().unwrap();
         initialize(&mut connection).unwrap();
-        connection.execute("INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('open',1,'now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('todo',1,'now','now')", []).unwrap();
         let first = connection.last_insert_rowid();
         connection.execute("DELETE FROM tasks", []).unwrap();
-        connection.execute("INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('open',1,'now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(status,version,created_at,updated_at) VALUES ('todo',1,'now','now')", []).unwrap();
         assert!(connection.last_insert_rowid() > first);
         connection
             .execute("UPDATE tasks SET task_key='KEY'", [])
@@ -631,7 +590,7 @@ mod tests {
         assert!(connection.execute("UPDATE tasks SET id=100", []).is_err());
     }
     #[test]
-    fn task_state_fields_are_complete_and_non_blank() {
+    fn task_states_have_no_process_gates_but_keep_data_integrity() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
             .pragma_update(None, "foreign_keys", "ON")
@@ -640,35 +599,48 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO tasks(task_key,title,status,version,goal,scope,acceptance_criteria,created_at,updated_at)
-                 VALUES ('T','T','open',1,'G','S','A','now','now')",
+                 VALUES ('T','T','todo',1,'G','S','A','now','now')",
                 [],
             )
             .unwrap();
 
+        for status in [
+            "backlog",
+            "todo",
+            "in_progress",
+            "in_review",
+            "blocked",
+            "done",
+            "cancelled",
+        ] {
+            connection
+                .execute("UPDATE tasks SET status=?1", [status])
+                .unwrap();
+        }
+        // Old closure fields are historical facts, not gates on today's state.
+        connection.execute("UPDATE tasks SET status='todo',closure_outcome='partial',closure_reason='residual',closed_at='old'", []).unwrap();
         for statement in [
-            "UPDATE tasks SET block_reason='orphan' WHERE task_key='T'",
-            "UPDATE tasks SET status='blocked',block_reason=' ',block_recovery='recover' WHERE task_key='T'",
-            "UPDATE tasks SET closure_outcome='partial',closure_reason='residual' WHERE task_key='T'",
-            "UPDATE tasks SET status='closed',closure_outcome='bogus',closed_at='now' WHERE task_key='T'",
-            "UPDATE tasks SET status='closed',closure_outcome='partial',closure_reason=NULL,closed_at='now' WHERE task_key='T'",
-            "UPDATE tasks SET status='closed',closure_outcome='completed',closure_reason=' ',closed_at='now' WHERE task_key='T'",
+            "UPDATE tasks SET status='unknown'",
+            "UPDATE tasks SET status='closed'",
+            "UPDATE tasks SET version=0",
+            "UPDATE tasks SET closure_outcome='bogus'",
+            "UPDATE tasks SET current_session_id='missing'",
         ] {
             assert!(connection.execute(statement, []).is_err(), "{statement}");
         }
-
-        connection
-            .execute(
-                "UPDATE tasks SET status='blocked',block_reason='blocked',block_recovery='recover' WHERE task_key='T'",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE tasks SET status='closed',block_reason=NULL,block_recovery=NULL,
-                    closure_outcome='partial',closure_reason='residual',closed_at='now' WHERE task_key='T'",
-                [],
-            )
-            .unwrap();
+        for column in [
+            "repository_path",
+            "repository_common_dir",
+            "repository_branch",
+            "worktree_path",
+        ] {
+            assert!(
+                connection
+                    .prepare(&format!("SELECT {column} FROM tasks"))
+                    .is_err()
+            );
+        }
+        assert!(connection.prepare("SELECT * FROM repositories").is_err());
     }
     #[test]
     fn sessions_require_a_source_for_external_identifiers() {
@@ -680,7 +652,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO tasks(task_key,title,status,version,goal,scope,acceptance_criteria,created_at,updated_at)
-                 VALUES ('T','T','open',1,'G','S','A','now','now')",
+                 VALUES ('T','T','todo',1,'G','S','A','now','now')",
                 [],
             )
             .unwrap();
@@ -711,7 +683,7 @@ mod tests {
         let path = temp.path().join("custom.sqlite");
         let connection = open_database(&path).unwrap();
         connection
-            .execute("INSERT INTO tasks(task_key,title,status,version,goal,scope,acceptance_criteria,created_at,updated_at) VALUES ('T','T','open',1,'G','S','A',?1,?1)", [now()])
+            .execute("INSERT INTO tasks(task_key,title,status,version,goal,scope,acceptance_criteria,created_at,updated_at) VALUES ('T','T','todo',1,'G','S','A',?1,?1)", [now()])
             .unwrap();
 
         assert_eq!(

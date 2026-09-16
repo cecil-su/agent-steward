@@ -20,7 +20,7 @@ pub struct RuleFileEvidence {
     pub path: String,
     /// Both hashes absent means an explicitly observed missing file, not a loaded rule.
     pub sha256: Option<String>,
-    /// SHA-256 of serialized git-adapter ExistingPathIdentity on this machine.
+    /// SHA-256 of the application's serialized ExistingPathIdentity on this machine.
     pub object_sha256: Option<String>,
 }
 

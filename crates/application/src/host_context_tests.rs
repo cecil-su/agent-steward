@@ -23,12 +23,6 @@ fn request<'a>() -> HostContextRequest<'a> {
         task_version: 3,
         session_id: "s1",
         source_id: 1,
-        context: ProjectContextOptions {
-            worktree: None,
-            files: &[],
-            dependencies: &[],
-            budget_bytes: 8000,
-        },
     }
 }
 fn host() -> HostInstance<'static> {
@@ -52,62 +46,6 @@ fn report(s: &Service, request: &HostContextRequest<'_>) -> HostEvidence {
 }
 
 #[test]
-fn reports_do_not_follow_a_request_to_a_different_linked_worktree() {
-    let (temp, s) = fixture();
-    let repo = temp.path().join("repo");
-    let linked = temp.path().join("linked");
-    fs::create_dir(&repo).unwrap();
-    fs::write(repo.join("README.md"), "fixture").unwrap();
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-b", "main"]);
-    git(&["add", "."]);
-    git(&[
-        "-c",
-        "user.name=fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "-m",
-        "fixture",
-    ]);
-    git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
-    s.project_source_add(
-        "##1",
-        2,
-        None,
-        SourceLocation::Git {
-            worktree: &repo,
-            relative_path: ".",
-        },
-    )
-    .unwrap();
-    let mut req = request();
-    req.source_id = 2;
-    req.context.worktree = Some(&repo);
-    let r = report(&s, &req);
-    req.context.worktree = Some(&linked);
-    assert_ne!(
-        r.binding.scope_sha256,
-        s.host_context_binding(&req, &host()).unwrap().scope_sha256
-    );
-    assert!(s.assess_task_host_evidence(&req, &host(), &r).is_err());
-}
-
-#[test]
 fn binding_is_read_from_database_and_request_not_from_report() {
     let (temp, s) = fixture();
     let req = request();
@@ -124,7 +62,6 @@ fn binding_is_read_from_database_and_request_not_from_report() {
         ..host()
     };
     assert!(s.assess_task_host_evidence(&req, &another, &r).is_err());
-    // Same records and source files in a copied database are not the same authority store.
     let copy = temp.path().join("copy.db");
     fs::copy(s.database_path(), &copy).unwrap();
     let other = Service::new(copy);
@@ -139,7 +76,7 @@ fn binding_is_read_from_database_and_request_not_from_report() {
 }
 
 #[test]
-fn task_versions_sessions_projects_and_closed_tasks_cannot_replay_reports() {
+fn task_versions_sessions_and_projects_cannot_replay_reports() {
     let (temp, s) = fixture();
     let mut req = request();
     let r = report(&s, &req);
@@ -179,29 +116,13 @@ fn task_versions_sessions_projects_and_closed_tasks_cannot_replay_reports() {
     s.session_close("s2", 3).unwrap();
     req.task_version = 4;
     assert!(s.host_context_binding(&req, &host()).is_err());
-    s.task_close("#1", 3, "cancelled", Some("fixture")).unwrap();
-    req = request();
-    req.task_version = 4;
-    assert!(s.host_context_binding(&req, &host()).is_err());
 }
 
 #[test]
-fn selected_components_and_rendering_parameters_are_bound() {
+fn selected_components_and_source_registration_are_bound() {
     let (temp, s) = fixture();
     let mut req = request();
     let before = report(&s, &req);
-    req.context.budget_bytes = 4000;
-    assert_ne!(
-        before.binding.scope_sha256,
-        s.host_context_binding(&req, &host()).unwrap().scope_sha256
-    );
-    assert!(s.assess_task_host_evidence(&req, &host(), &before).is_err());
-    let files = ["sample.rs".into()];
-    req.context.files = &files;
-    assert_ne!(
-        before.binding.scope_sha256,
-        s.host_context_binding(&req, &host()).unwrap().scope_sha256
-    );
     s.project_component_add("##1", 2, "frontend").unwrap();
     s.project_component_add("##1", 3, "backend").unwrap();
     s.project_source_add(
@@ -211,22 +132,58 @@ fn selected_components_and_rendering_parameters_are_bound() {
         SourceLocation::Directory(&temp.path().join("source")),
     )
     .unwrap();
+    assert!(s.assess_task_host_evidence(&req, &host(), &before).is_err());
+    let project_source = s.host_context_binding(&req, &host()).unwrap();
+    req.source_id = 2;
+    assert_ne!(
+        project_source.scope_sha256,
+        s.host_context_binding(&req, &host()).unwrap().scope_sha256
+    );
     s.task_set_components("#1", 3, &["frontend".into()], true, "fixture")
         .unwrap();
     req.task_version = 4;
-    req.source_id = 2;
     assert!(s.host_context_binding(&req, &host()).is_err());
-    req.source_id = 1; // Project-wide, component-free sources remain explicit shared inputs.
+    req.source_id = 1;
     assert!(s.host_context_binding(&req, &host()).is_ok());
 }
 
 #[test]
-fn changes_during_assessment_are_rejected_after_file_io() {
+fn business_status_does_not_gate_a_current_session_binding() {
+    let (_temp, s) = fixture();
+    let mut req = request();
+    for status in [
+        "backlog",
+        "todo",
+        "in_progress",
+        "in_review",
+        "blocked",
+        "done",
+        "cancelled",
+    ] {
+        let changed = s.task_status("#1", req.task_version, status).unwrap();
+        req.task_version = changed.data["task"]["version"].as_i64().unwrap();
+        assert!(s.host_context_binding(&req, &host()).is_ok(), "{status}");
+    }
+}
+
+#[test]
+fn binding_does_not_read_source_files_or_require_a_live_source_directory() {
+    let (temp, s) = fixture();
+    let req = request();
+    let r = report(&s, &req);
+    fs::remove_dir_all(temp.path().join("source")).unwrap();
+    assert_eq!(
+        r.binding.scope_sha256,
+        s.host_context_binding(&req, &host()).unwrap().scope_sha256
+    );
+    assert!(s.assess_task_host_evidence(&req, &host(), &r).is_ok());
+}
+
+#[test]
+fn task_and_registration_changes_during_assessment_are_rejected() {
     for task_change in [false, true] {
-        let (temp, s) = fixture();
-        let mut req = request();
-        let files = ["sample.rs".into()];
-        req.context.files = &files;
+        let (_temp, s) = fixture();
+        let req = request();
         let r = report(&s, &req);
         let calls = Cell::new(0);
         let result = s.assess_task_host_evidence_with_clock(&req, &host(), &r, || {
@@ -237,7 +194,7 @@ fn changes_during_assessment_are_rejected_after_file_io() {
                     s.task_note("#1", 3, "progress", "fixture mutation")
                         .unwrap();
                 } else {
-                    fs::write(temp.path().join("source/sample.rs"), "changed source").unwrap();
+                    s.project_component_add("##1", 2, "new component").unwrap();
                 }
             }
             r.observed_at_ms + 1

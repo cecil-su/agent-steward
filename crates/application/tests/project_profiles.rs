@@ -33,6 +33,36 @@ fn snapshot(s: &Service) -> Value {
 }
 
 #[test]
+fn profiles_accept_sources_in_every_business_status_without_mutating_them() {
+    let (_temp, s) = fixture();
+    let mut task_version = 1;
+    let mut project_revision = 1;
+    for status in [
+        "backlog",
+        "todo",
+        "in_progress",
+        "in_review",
+        "blocked",
+        "done",
+        "cancelled",
+    ] {
+        let changed = s.task_status("#1", task_version, status).unwrap();
+        task_version = changed.data["task"]["version"].as_i64().unwrap();
+        let before = snapshot(&s);
+        let mut value = input();
+        value.source_task_version = task_version;
+        let result = s
+            .project_profile_set("##1", project_revision, value)
+            .unwrap();
+        project_revision = result.data["project"]["revision"].as_i64().unwrap();
+        let after = snapshot(&s);
+        for key in ["task", "taskHistory", "sessions"] {
+            assert_eq!(before[key], after[key], "{status}: {key}");
+        }
+    }
+}
+
+#[test]
 fn profiles_create_read_replace_and_preserve_source_task() {
     let (_temp, s) = fixture();
     let initial = snapshot(&s);

@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
-git-adapter = { path = "../git-adapter" }
+thiserror.workspace = true
 hex.workspace = true
 mime_guess.workspace = true
 rusqlite.workspace = true
@@ -17,6 +17,9 @@ steward-core = { path = "../core" }
 storage-sqlite = { path = "../storage-sqlite" }
 uuid.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

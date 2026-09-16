@@ -21,7 +21,7 @@ describe('effective session rules', () => {
     expect(screen.queryByRole('textbox')).toBeNull();
   });
   it('copies complete rules into the same task context handoff', () => {
-    const task: Task = { id: 2, version: 1, title: null, status: 'open', goal: null, scope: null, acceptanceCriteria: null, nextStep: null };
+    const task: Task = { id: 2, version: 1, title: null, status: 'todo', goal: null, scope: null, acceptanceCriteria: null, nextStep: null };
     const text = formatTaskContext({ task, sessionRules: rules });
     expect(text).toContain('完整正文'); expect(text).toContain('两个任务反馈'); expect(text).toContain('"revision": 3');
   });

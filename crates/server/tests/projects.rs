@@ -4,7 +4,6 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
-use std::path::Path;
 use steward_application::Service;
 use steward_server::{ServerState, router};
 use tower::ServiceExt;
@@ -108,32 +107,6 @@ async fn command(app: &Router, name: &str, input: Value) -> Value {
     out["data"].clone()
 }
 
-// HTTP selects the spelling advertised by Git, not an arbitrary filesystem alias.
-// Only this test's owned fixture paths may be canonicalized to find the intended
-// checkout; production must still reject unadvertised paths before request-path IO.
-fn advertised_checkout(repo: &Path, checkout: &Path) -> String {
-    let expected = std::fs::canonicalize(checkout).unwrap();
-    let output = std::process::Command::new("git")
-        .current_dir(std::fs::canonicalize(repo).unwrap())
-        .args(["worktree", "list", "--porcelain", "-z"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let matches: Vec<_> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|field| field.strip_prefix(b"worktree "))
-        .map(|bytes| std::str::from_utf8(bytes).unwrap())
-        .filter(|path| std::fs::canonicalize(path).unwrap() == expected)
-        .collect();
-    assert_eq!(
-        matches.len(),
-        1,
-        "select the intended fixture, not a default"
-    );
-    matches[0].to_owned()
-}
-
 #[tokio::test]
 async fn project_source_task_query_context_journey_is_explicit_and_read_only_queries_do_not_mutate()
 {
@@ -183,18 +156,11 @@ async fn project_source_task_query_context_journey_is_explicit_and_read_only_que
     let (_, context) = request(&app, "/api/tasks/1/context", None, true).await;
     assert_eq!(context["data"]["project"]["name"], "Mailroom");
     assert_eq!(context["data"]["task"]["componentIds"], json!([1]));
-    assert!(context["data"]["session"].is_null() && context["data"]["worktreeStatus"].is_null());
+    assert!(context["data"]["session"].is_null());
+    assert!(context["data"].get("worktreeStatus").is_none());
     let (status, nav) = request(&app, "/api/projects/1/context?sourceId=1", None, true).await;
-    assert_eq!(status, StatusCode::OK, "{nav}");
-    assert!(
-        nav["data"]["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["path"].as_str().unwrap().ends_with("README.md"))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND, "{nav}");
     assert!(!nav.to_string().contains("synthetic source bytes"));
-    assert_eq!(nav["data"]["reuseAllowed"], false);
     assert_eq!(
         request(&app, "/api/projects/2/context?sourceId=1", None, true)
             .await
@@ -203,8 +169,22 @@ async fn project_source_task_query_context_journey_is_explicit_and_read_only_que
     );
     assert_eq!(s.history("1").unwrap().data, before);
     assert_eq!(s.project_history("1", 0, 200).unwrap().data, project_before);
-    let (_, resolved) = request(&app, "/api/projects/1/sources/1", None, true).await;
-    assert!(resolved["data"]["resolvedPath"].is_string());
+    let (status, resolved) = request(&app, "/api/projects/1/sources/1", None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!resolved.to_string().contains("synthetic source bytes"));
+    let (_, sources) = request(&app, "/api/projects/1/sources", None, true).await;
+    assert!(sources["data"].get("repositories").is_none());
+    let source = sources["data"]["sources"][0].as_object().unwrap();
+    assert_eq!(source.len(), 5);
+    for field in [
+        "id",
+        "projectId",
+        "componentId",
+        "directoryPath",
+        "createdAt",
+    ] {
+        assert!(source.contains_key(field));
+    }
     command(
         &app,
         "project-source-remove",
@@ -216,6 +196,80 @@ async fn project_source_task_query_context_journey_is_explicit_and_read_only_que
         "synthetic source bytes"
     );
     assert_eq!(s.task_show("1").unwrap().data["task"]["version"], 3);
+}
+
+#[tokio::test]
+async fn source_directory_metadata_is_portable_verbatim_and_keeps_cas_history_guards() {
+    let (_temp, s, app) = fixture();
+    s.project_create("Portable").unwrap();
+    let paths = [
+        "/srv/nonexistent/项目资料",
+        "E:/not-present/Project docs",
+        r"C:\not-present\项目资料",
+        r"\\unavailable.invalid\share\Project docs",
+    ];
+    for (index, path) in paths.iter().enumerate() {
+        let revision = index as i64 + 1;
+        let before = s.project_history("1", 0, 50).unwrap().data;
+        let added = command(
+            &app,
+            "project-source-add",
+            json!({"projectId":1,"expectedRevision":revision,"location":{"kind":"directory","path":path}}),
+        ).await;
+        assert_eq!(added["source"]["directoryPath"], *path);
+        assert_eq!(added["project"]["revision"], revision + 1);
+        let after = s.project_history("1", 0, 50).unwrap().data;
+        let history = after["history"].as_array().unwrap();
+        assert_eq!(
+            &history[..history.len() - 1],
+            before["history"].as_array().unwrap()
+        );
+        assert_eq!(history.len(), revision as usize + 1);
+        assert_eq!(history.last().unwrap()["changeType"], "source.added");
+        assert_eq!(history.last().unwrap()["payload"]["directoryPath"], *path);
+    }
+    let project = s.project_show("1").unwrap().data;
+    let history = s.project_history("1", 0, 50).unwrap().data;
+    let sources = s.project_sources("1").unwrap().data;
+    let (status, listed) = request(&app, "/api/projects/1/sources", None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    for (source, path) in listed["data"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(paths)
+    {
+        assert_eq!(source["directoryPath"], path);
+    }
+    // Valid metadata with stale CAS must not append a source or ProjectHistory.
+    let (status, error) = request(
+        &app, "/api/commands/project-source-add",
+        Some(json!({"projectId":1,"expectedRevision":1,"location":{"kind":"directory","path":"/stale/new-source"}})), false,
+    ).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["details"]["entityType"], "Project");
+    assert_eq!(s.project_show("1").unwrap().data, project);
+    assert_eq!(s.project_history("1", 0, 50).unwrap().data, history);
+    assert_eq!(s.project_sources("1").unwrap().data, sources);
+    for path in [
+        "relative/project",
+        "C:relative",
+        "",
+        "/srv/line\nbreak",
+        "E:/tab\tname",
+        "/srv/null\0byte",
+        "/srv/delete\u{7f}",
+    ] {
+        let (status, error) = request(
+            &app, "/api/commands/project-source-add",
+            Some(json!({"projectId":1,"expectedRevision":5,"location":{"kind":"directory","path":path}})), false,
+        ).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path:?}: {error}");
+        assert_eq!(error["error"]["code"], "INVALID_INPUT");
+        assert_eq!(s.project_show("1").unwrap().data, project);
+        assert_eq!(s.project_history("1", 0, 50).unwrap().data, history);
+        assert_eq!(s.project_sources("1").unwrap().data, sources);
+    }
 }
 
 #[tokio::test]
@@ -293,17 +347,21 @@ async fn project_revision_and_task_version_are_separate_and_inputs_fail_closed()
             StatusCode::BAD_REQUEST
         );
     }
+    for path in ["/api/projects?limit=201", "/api/projects?unknown=1"] {
+        assert_eq!(
+            request(&app, path, None, false).await.0,
+            StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+    }
     for path in [
-        "/api/projects?limit=201",
-        "/api/projects?unknown=1",
         "/api/projects/1/context",
         "/api/projects/1/context?sourceId=1&files=README.md",
         "/api/projects/1/sources/1?worktree=relative",
     ] {
         assert_eq!(
             request(&app, path, None, false).await.0,
-            StatusCode::BAD_REQUEST,
-            "{path}"
+            StatusCode::NOT_FOUND
         );
     }
     assert_eq!(s.project_show("1").unwrap().data["project"]["revision"], 2);
@@ -314,141 +372,6 @@ async fn project_revision_and_task_version_are_separate_and_inputs_fail_closed()
     )
     .await;
     assert!(s.task_show("1").unwrap().data["task"]["projectId"].is_null());
-}
-
-#[tokio::test]
-async fn git_registration_http_context_requires_an_explicit_matching_worktree() {
-    let (temp, s, app) = fixture();
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    assert!(
-        std::process::Command::new("git")
-            .args(["init", "-b", "main"])
-            .arg(&repo)
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    std::fs::write(repo.join("README.md"), "fixture source").unwrap();
-    command(&app, "project-create", json!({"name":"Git project"})).await;
-    command(&app, "project-source-add", json!({"projectId":1,"expectedRevision":1,"location":{"kind":"git","worktree":repo,"relativePath":"."}})).await;
-    assert_eq!(
-        request(&app, "/api/projects/1/context?sourceId=1", None, true)
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
-    let history = s.project_history("1", 0, 200).unwrap().data;
-    let selected = advertised_checkout(&repo, &repo);
-    let encoded: String = selected.bytes().map(|b| format!("%{b:02X}")).collect();
-    let (status, data) = request(
-        &app,
-        &format!("/api/projects/1/context?sourceId=1&worktree={encoded}"),
-        None,
-        true,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{data}");
-    assert_eq!(data["data"]["gitStateObserved"], true);
-    assert_eq!(data["data"]["source"]["id"], 1);
-    // Rejected selections must fail as candidates, not probe an arbitrary path.
-    let unrelated = temp.path().join("unregistered");
-    std::fs::create_dir(&unrelated).unwrap();
-    std::fs::write(unrelated.join(".git"), "UNTRUSTED_GIT_SENTINEL").unwrap();
-    let mut rejected = vec![
-        unrelated.to_string_lossy().into_owned(),
-        temp.path().join("missing").to_string_lossy().into_owned(),
-        repo.join("..").join("repo").to_string_lossy().into_owned(),
-    ];
-    #[cfg(windows)]
-    {
-        // On a case-insensitive volume this resolves to the same object, but the
-        // altered component spelling is not advertised. On a case-sensitive
-        // volume it is simply an absent path; it must be refused there as well.
-        let alias = Path::new(&selected).with_file_name("REPO");
-        if alias.try_exists().unwrap() {
-            assert_eq!(
-                std::fs::canonicalize(&alias).unwrap(),
-                std::fs::canonicalize(&repo).unwrap()
-            );
-        }
-        rejected.push(alias.to_str().unwrap().to_owned());
-    }
-    rejected.extend([
-        r"\\untrusted.invalid\share\checkout".into(),
-        r"\\?\UNC\untrusted.invalid\share\checkout".into(),
-        r"\\.\PIPE\untrusted".into(),
-    ]);
-    for candidate in rejected {
-        let encoded: String = candidate.bytes().map(|b| format!("%{b:02X}")).collect();
-        for endpoint in [
-            format!("/api/projects/1/context?sourceId=1&worktree={encoded}"),
-            format!("/api/projects/1/sources/1?worktree={encoded}"),
-        ] {
-            let (status, data) = request(&app, &endpoint, None, true).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{data}");
-            assert_eq!(data["error"]["code"], "INVALID_INPUT");
-            assert!(!data.to_string().contains("UNTRUSTED_GIT_SENTINEL"));
-        }
-    }
-    assert_eq!(
-        std::fs::read_to_string(repo.join("README.md")).unwrap(),
-        "fixture source"
-    );
-    assert_eq!(s.project_history("1", 0, 200).unwrap().data, history);
-}
-
-#[tokio::test]
-async fn registered_linked_checkout_is_allowed_without_a_default_worktree() {
-    let (temp, _s, app) = fixture();
-    let repo = temp.path().join("repo");
-    let linked = temp.path().join("linked");
-    std::fs::create_dir(&repo).unwrap();
-    let git = |args: &[&str]| {
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-    };
-    git(&["init", "-b", "main"]);
-    git(&[
-        "-c",
-        "user.name=Synthetic",
-        "-c",
-        "user.email=test@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "fixture",
-    ]);
-    git(&["worktree", "add", "--detach", linked.to_str().unwrap()]);
-    command(&app, "project-create", json!({"name":"linked"})).await;
-    command(&app, "project-source-add", json!({"projectId":1,"expectedRevision":1,"location":{"kind":"git","worktree":repo,"relativePath":"."}})).await;
-    let encoded: String = advertised_checkout(&repo, &linked)
-        .bytes()
-        .map(|b| format!("%{b:02X}"))
-        .collect();
-    let (status, data) = request(
-        &app,
-        &format!("/api/projects/1/context?sourceId=1&worktree={encoded}"),
-        None,
-        true,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{data}");
-    assert!(
-        data["data"]["resolvedPath"]
-            .as_str()
-            .unwrap()
-            .ends_with("linked")
-    );
 }
 
 #[tokio::test]

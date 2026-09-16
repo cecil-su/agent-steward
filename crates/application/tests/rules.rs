@@ -10,6 +10,31 @@ fn snapshot(s: &Service) -> Value {
     json!({"task":s.task_show("1").unwrap().data,"project":s.project_list(0,200).unwrap().data,"history":s.history("1").unwrap().data,"sessions":s.session_list(None).unwrap().data})
 }
 #[test]
+fn rule_context_is_available_in_all_business_statuses_without_execution_side_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let s = Service::new(temp.path().join("rules.db"));
+    s.task_create_minimal().unwrap();
+    s.rule_create(input("global", None, "active"), "fixture")
+        .unwrap();
+    let mut version = 1;
+    for status in [
+        "backlog",
+        "todo",
+        "in_progress",
+        "in_review",
+        "blocked",
+        "done",
+        "cancelled",
+    ] {
+        let changed = s.task_status("1", version, status).unwrap();
+        version = changed.data["task"]["version"].as_i64().unwrap();
+        let before = snapshot(&s);
+        assert_eq!(rules(&s, "1").as_array().unwrap().len(), 1, "{status}");
+        assert_eq!(snapshot(&s), before);
+    }
+}
+
+#[test]
 fn feedback_a_to_context_b_isolated_scopes_revisions_and_no_execution_side_effects() {
     let t = tempfile::tempdir().unwrap();
     let s = Service::new(t.path().join("db"));

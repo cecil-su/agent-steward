@@ -2,7 +2,7 @@
 
 ## 范围
 
-项目资料使用Project身份、revision CAS和project_history。Web只读展示资料与来源；写入由CLI/Application提供，没有项目资料写HTTP入口。当前数据库Schema7、UI合同4、包格式1。
+项目资料使用Project身份、revision CAS和project_history。Web只读展示资料与来源；写入由CLI/Application提供，没有项目资料写HTTP入口。当前源码数据库Schema8、业务envelope3、UI合同5、包格式1，不表示正式实例已升级。
 
 ## 数据合同
 
@@ -62,10 +62,10 @@ $db = 'E:\sandbox\steward-profile\state.db'
 - `task context`及`GET /api/tasks/{id}/context`在同一数据库读事务中带projectProfile。
 - 项目History按revision分页，保留来源和before/after。
 - 工作台项目详情、任务概览及复制上下文展示资料与来源；缺字段与明确null分开处理。
-- 项目资料不是实时源码观察，不混入源码导航指纹。
+- 项目资料不是实时源码观察；Steward不读取源码或Git，也不提供源码导航指纹。
 
 ## 导入与验证
 
-Schema4快照可通过`database import-schema4`复制到Schema7，目标项目资料和规则表为空；Schema5/6输入包含资料并按原字节保留。准确入口及路径、停写、发布与恢复限制见[隔离导入与验证](18-Schema7隔离导入与验证.md)。不能把输入Schema值改为目标版本。
+Schema4快照可通过`database import-schema4`复制到Schema8，目标项目资料和规则表为空；Schema5/6/7输入包含资料，保留原正文、来源及版本引用。schema4/5/6/7的旧Git来源使用--source-paths显式映射，状态按固定表转换，不改旧History。准确入口及路径、停写、发布与恢复限制见[隔离导入与验证](18-Schema7隔离导入与验证.md)。不能把输入Schema值改为目标版本。
 
 验证入口为Application/CLI的`project_profiles.rs`测试、`crates/server/tests/projects.rs`及`web/src/features/workspace.test.tsx`。覆盖资料CAS、来源归属/version、History回滚、输入限额和只读展示；仅使用临时合成数据。真实目标实例、跨平台、人工页面及业务验收须独立验证，不从测试文件或源码推断正式状态。

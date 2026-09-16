@@ -1,73 +1,307 @@
-use serde_json::Value;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use serde_json::{Value, json};
+use std::{fs, path::Path};
 use steward_application::{Service, SourceLocation};
 
-fn git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-fn repo(path: &Path, dirs: &[&str]) {
-    fs::create_dir_all(path).unwrap();
-    git(path, &["init", "-b", "main"]);
-    for dir in dirs {
-        fs::create_dir_all(path.join(dir)).unwrap();
-        fs::write(path.join(dir).join("fixture.txt"), "synthetic source").unwrap();
+#[test]
+fn unavailable_cross_platform_paths_are_metadata_and_reads_do_not_mutate() {
+    let temp = tempfile::tempdir().unwrap();
+    let s = service(&temp);
+    s.project_create("One").unwrap();
+    let absent = temp.path().join("not-created/source");
+    let first = add(&s, "##1", 1, None, &absent);
+    assert!(!absent.exists());
+    assert_eq!(first["source"]["directoryPath"], absent.to_str().unwrap());
+    for (index, path) in [
+        "/not-present/code",
+        r"Z:\not-present\code",
+        r"\\server\share\code",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let data = add(&s, "##1", index as i64 + 2, None, Path::new(path));
+        assert_eq!(data["source"]["directoryPath"], *path);
+        for removed in ["repositoryId", "relativePath", "directoryIdentity"] {
+            assert!(data["source"].get(removed).is_none());
+        }
     }
-    git(path, &["add", "."]);
-    git(
-        path,
-        &[
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "fixture",
-        ],
+    let before = s.project_history("##1", 0, 200).unwrap().data;
+    let conn = storage_sqlite::open_database(s.database_path()).unwrap();
+    let version = || {
+        conn.pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let original = version();
+    for _ in 0..3 {
+        assert_eq!(
+            s.project_source("##1", 1).unwrap().data["source"],
+            first["source"]
+        );
+        assert_eq!(
+            s.project_sources("##1").unwrap().data["sources"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+    assert_eq!(version(), original);
+    assert_eq!(s.project_history("##1", 0, 200).unwrap().data, before);
+    assert!(!absent.exists());
+    assert_eq!(s.task_list(None).unwrap().data["tasks"], json!([]));
+    assert_eq!(s.session_list(None).unwrap().data["sessions"], json!([]));
+}
+
+#[test]
+fn shared_paths_components_and_projects_are_explicit_and_isolated() {
+    let temp = tempfile::tempdir().unwrap();
+    let s = service(&temp);
+    s.project_create("One").unwrap();
+    s.project_create("Two").unwrap();
+    s.project_component_add("##1", 1, "frontend").unwrap();
+    s.project_component_add("##1", 2, "backend").unwrap();
+    s.project_component_add("##2", 1, "other").unwrap();
+    let path = temp.path().join("shared");
+    let root = add(&s, "##1", 3, None, &path);
+    let frontend = add(&s, "##1", 4, Some("FRONTEND"), &path);
+    add(&s, "##1", 5, Some("backend"), &path);
+    let other = add(&s, "##2", 2, Some("other"), &path);
+    assert!(root["source"]["componentId"].is_null());
+    assert_eq!(frontend["source"]["componentId"], 1);
+    assert_eq!(other["source"]["componentId"], 3);
+    assert_eq!(
+        s.project_sources("##1").unwrap().data["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        s.project_sources("##2").unwrap().data["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        s.project_source("##2", 1).unwrap_err().body.code,
+        "NOT_FOUND"
+    );
+    assert_eq!(
+        s.project_source_remove("##2", 3, 1).unwrap_err().body.code,
+        "NOT_FOUND"
+    );
+    assert_eq!(
+        s.project_source_add("##1", 6, Some("other"), SourceLocation::Directory(&path))
+            .unwrap_err()
+            .body
+            .code,
+        "NOT_FOUND"
+    );
+    assert_eq!(
+        s.project_source_add("##1", 6, Some("frontend"), SourceLocation::Directory(&path))
+            .unwrap_err()
+            .body
+            .code,
+        "CONSTRAINT_VIOLATION"
+    );
+    let conn = storage_sqlite::open_database(s.database_path()).unwrap();
+    assert!(conn.execute("INSERT INTO source_roots(project_id,component_id,directory_path,created_at) VALUES (2,1,'/invalid-scope','now')", []).is_err());
+    assert_eq!(
+        s.project_show("##1").unwrap().data["project"]["revision"],
+        6
     );
 }
+
+#[test]
+fn invalid_path_text_never_registers_or_advances_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let s = service(&temp);
+    s.project_create("One").unwrap();
+    let before = s.project_history("##1", 0, 200).unwrap().data;
+    for path in ["", ".", "relative/source", "C:relative", "/bad\npath"] {
+        assert_eq!(
+            s.project_source_add("##1", 1, None, SourceLocation::Directory(Path::new(path)))
+                .unwrap_err()
+                .body
+                .code,
+            "INVALID_INPUT"
+        );
+    }
+    let too_long = format!("/{}", "x".repeat(4096));
+    assert!(
+        s.project_source_add(
+            "##1",
+            1,
+            None,
+            SourceLocation::Directory(Path::new(&too_long))
+        )
+        .is_err()
+    );
+    assert_eq!(s.project_history("##1", 0, 200).unwrap().data, before);
+    assert_eq!(s.project_sources("##1").unwrap().data["sources"], json!([]));
+}
+
+#[test]
+fn source_records_do_not_validate_git_markers_or_delete_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let s = service(&temp);
+    s.project_create("One").unwrap();
+    let directory = temp.path().join("source");
+    fs::create_dir_all(directory.join(".git")).unwrap();
+    fs::write(directory.join("file"), "keep").unwrap();
+    let saved = add(&s, "##1", 1, None, &directory);
+    fs::rename(&directory, temp.path().join("held")).unwrap();
+    assert_eq!(
+        s.project_source("##1", 1).unwrap().data["source"],
+        saved["source"]
+    );
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("replacement"), "keep too").unwrap();
+    s.project_source_remove("##1", 2, 1).unwrap();
+    assert_eq!(
+        fs::read_to_string(directory.join("replacement")).unwrap(),
+        "keep too"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("held/file")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        s.project_source("##1", 1).unwrap_err().body.code,
+        "NOT_FOUND"
+    );
+}
+
+#[test]
+fn metadata_changes_are_cas_guarded_and_roll_back_with_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let s = service(&temp);
+    s.project_create("One").unwrap();
+    s.project_component_add("##1", 1, "backend").unwrap();
+    assert_eq!(
+        s.project_component_add("##1", 1, "other")
+            .unwrap_err()
+            .body
+            .code,
+        "VERSION_CONFLICT"
+    );
+    assert_eq!(
+        s.project_component_add("##1", 2, "BACKEND")
+            .unwrap_err()
+            .body
+            .code,
+        "CONSTRAINT_VIOLATION"
+    );
+    let path = temp.path().join("absent");
+    assert_eq!(
+        s.project_source_add("##1", 1, None, SourceLocation::Directory(&path))
+            .unwrap_err()
+            .body
+            .code,
+        "VERSION_CONFLICT"
+    );
+    let conn = storage_sqlite::open_database(s.database_path()).unwrap();
+    let before = s.project_history("##1", 0, 200).unwrap().data;
+    conn.execute_batch("CREATE TRIGGER fail_history BEFORE INSERT ON project_history BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+    assert!(
+        s.project_source_add("##1", 2, Some("backend"), SourceLocation::Directory(&path))
+            .is_err()
+    );
+    assert!(s.project_component_add("##1", 2, "rolled-back").is_err());
+    assert_eq!(s.project_sources("##1").unwrap().data["sources"], json!([]));
+    assert_eq!(
+        s.project_components("##1").unwrap().data["components"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(s.project_history("##1", 0, 200).unwrap().data, before);
+    conn.execute_batch("DROP TRIGGER fail_history;").unwrap();
+    let source = add(&s, "##1", 2, Some("backend"), &path);
+    let id = source["source"]["id"].as_i64().unwrap();
+    assert_eq!(
+        s.project_source_remove("##1", 2, id).unwrap_err().body.code,
+        "VERSION_CONFLICT"
+    );
+    let before = s.project_history("##1", 0, 200).unwrap().data;
+    conn.execute_batch("CREATE TRIGGER fail_history BEFORE INSERT ON project_history BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+    assert!(s.project_source_remove("##1", 3, id).is_err());
+    assert_eq!(s.project_source("##1", id).unwrap().data, source);
+    assert_eq!(s.project_history("##1", 0, 200).unwrap().data, before);
+    conn.execute_batch("DROP TRIGGER fail_history;").unwrap();
+    s.project_source_remove("##1", 3, id).unwrap();
+    let next = add(&s, "##1", 4, None, &path);
+    assert!(next["source"]["id"].as_i64().unwrap() > id);
+    assert!(!path.exists());
+}
+
+#[test]
+fn concurrent_source_registration_never_loses_a_project_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let s = service(&temp);
+    s.project_create("One").unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let database = s.database_path().to_owned();
+            let source = temp.path().join("absent");
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                Service::new(database).project_source_add(
+                    "##1",
+                    1,
+                    None,
+                    SourceLocation::Directory(&source),
+                )
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .find_map(|r| r.as_ref().err())
+            .unwrap()
+            .body
+            .code,
+        "VERSION_CONFLICT"
+    );
+    assert_eq!(
+        s.project_show("##1").unwrap().data["project"]["revision"],
+        2
+    );
+    assert_eq!(
+        s.project_sources("##1").unwrap().data["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        s.project_history("##1", 0, 200).unwrap().data["history"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
 fn service(temp: &tempfile::TempDir) -> Service {
     Service::new(temp.path().join("state.db"))
 }
-fn add(
-    s: &Service,
-    project: &str,
-    revision: i64,
-    component: Option<&str>,
-    repo: &Path,
-    path: &str,
-) -> Value {
+fn add(s: &Service, project: &str, revision: i64, component: Option<&str>, path: &Path) -> Value {
     s.project_source_add(
         project,
         revision,
         component,
-        SourceLocation::Git {
-            worktree: repo,
-            relative_path: path,
-        },
+        SourceLocation::Directory(path),
     )
     .unwrap()
     .data
-}
-fn resolved_path(data: &Value) -> PathBuf {
-    PathBuf::from(data["resolvedPath"].as_str().unwrap())
 }
 
 #[test]
@@ -209,533 +443,11 @@ fn task_component_scope_stays_within_its_project_and_uses_task_cas() {
         .unwrap();
     s.task_set_components("#1", 6, &[], true, "fixture")
         .unwrap();
-    s.task_close("#1", 7, "cancelled", Some("test complete"))
-        .unwrap();
+    s.task_status("#1", 7, "cancelled").unwrap();
     assert_eq!(
         s.task_set_components("#1", 8, &["android".into()], true, "fixture")
             .unwrap()
             .data["task"]["status"],
-        "closed"
-    );
-}
-
-#[test]
-fn monorepo_multi_repository_and_shared_roots_are_explicit_not_ownership() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    let root = temp.path().join("platform");
-    let backend = temp.path().join("mail-api");
-    repo(&root, &["apps/mail", "apps/order", "packages/common"]);
-    repo(&backend, &["src"]);
-    s.project_create("Mailroom").unwrap();
-    s.project_create("Order").unwrap();
-    s.project_component_add("##1", 1, "frontend").unwrap();
-    s.project_component_add("##1", 2, "backend").unwrap();
-    let mail = add(&s, "##1", 3, Some("FRONTEND"), &root, "apps/mail");
-    let order = add(&s, "##2", 1, None, &root, "apps/order");
-    assert_eq!(
-        mail["source"]["repositoryId"],
-        order["source"]["repositoryId"]
-    );
-    let api = add(&s, "##1", 4, Some("backend"), &backend, "src");
-    assert_ne!(
-        mail["source"]["repositoryId"],
-        api["source"]["repositoryId"]
-    );
-    add(&s, "##1", 5, None, &root, "packages/common");
-    add(&s, "##2", 2, None, &root, "packages/common");
-    let before = s.project_history("##1", 0, 200).unwrap().data;
-    let here = s
-        .project_here(&root.join("packages/common"), None)
-        .unwrap()
-        .data;
-    let direct: Vec<_> = here["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["matchedBy"] == "source")
-        .collect();
-    assert_eq!(direct.len(), 2);
-    assert_ne!(direct[0]["project"]["id"], direct[1]["project"]["id"]);
-    assert!(here["selectedProjectId"].is_null());
-    let inside = s.project_here(&root.join("apps/mail"), None).unwrap().data;
-    assert_eq!(inside["candidates"][0]["project"]["name"], "Mailroom");
-    assert_eq!(inside["candidates"][0]["matchedBy"], "source");
-    let filtered = s.project_here(&root, Some("##2")).unwrap().data;
-    assert!(
-        filtered["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|c| c["project"]["id"] == 2)
-    );
-    assert_eq!(
-        s.project_sources("##1").unwrap().data["sources"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
-    assert_eq!(
-        s.project_components("##1").unwrap().data["components"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(s.project_history("##1", 0, 200).unwrap().data, before);
-    assert!(
-        s.task_list(None).unwrap().data["tasks"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        s.session_list(None).unwrap().data["sessions"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn linked_worktrees_share_repository_identity_but_resolve_their_own_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    let root = temp.path().join("repository");
-    let worktree = temp.path().join("feature");
-    repo(&root, &["app"]);
-    git(
-        &root,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "feature",
-            worktree.to_str().unwrap(),
-        ],
-    );
-    s.project_create("Mailroom").unwrap();
-    let source = add(&s, "##1", 1, None, &root, "app");
-    let id = source["source"]["id"].as_i64().unwrap();
-    fs::write(worktree.join("app/fixture.txt"), "dirty feature contents").unwrap();
-    let resolved = s
-        .project_source_resolve("##1", id, Some(&worktree))
-        .unwrap()
-        .data;
-    assert_eq!(
-        resolved_path(&resolved),
-        fs::canonicalize(worktree.join("app")).unwrap()
-    );
-    assert_eq!(
-        s.project_source_resolve("##1", id, None)
-            .unwrap_err()
-            .body
-            .code,
-        "INVALID_INPUT"
-    );
-    s.project_create("Shared").unwrap();
-    let other = add(&s, "##2", 1, None, &worktree, "app");
-    assert_eq!(
-        source["source"]["repositoryId"],
-        other["source"]["repositoryId"]
-    );
-    let here = s.project_here(&worktree.join("app"), None).unwrap().data;
-    assert_eq!(here["candidates"].as_array().unwrap().len(), 2);
-    for candidate in here["candidates"].as_array().unwrap() {
-        assert_eq!(
-            resolved_path(candidate),
-            fs::canonicalize(worktree.join("app")).unwrap()
-        );
-    }
-    let clone = temp.path().join("clone");
-    git(
-        temp.path(),
-        &["clone", root.to_str().unwrap(), clone.to_str().unwrap()],
-    );
-    assert_eq!(
-        s.project_source_resolve("##1", id, Some(&clone))
-            .unwrap_err()
-            .body
-            .code,
-        "INVALID_INPUT"
-    );
-    assert!(
-        s.project_here(&clone.join("app"), None).unwrap().data["candidates"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn invalid_paths_nested_repositories_and_wrong_components_never_register() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    let root = temp.path().join("repo");
-    repo(&root, &["app"]);
-    s.project_create("Mailroom").unwrap();
-    s.project_create("Other").unwrap();
-    s.project_component_add("##2", 1, "only-other-project")
-        .unwrap();
-    assert_eq!(
-        s.project_source_add(
-            "##1",
-            1,
-            Some("only-other-project"),
-            SourceLocation::Git {
-                worktree: &root,
-                relative_path: "app"
-            }
-        )
-        .unwrap_err()
-        .body
-        .code,
-        "NOT_FOUND"
-    );
-    for path in [
-        "../repo",
-        "/app",
-        "a/../app",
-        ".git",
-        "app/fixture.txt",
-        "missing",
-    ] {
-        assert!(
-            s.project_source_add(
-                "##1",
-                1,
-                None,
-                SourceLocation::Git {
-                    worktree: &root,
-                    relative_path: path
-                }
-            )
-            .is_err(),
-            "{path}"
-        );
-    }
-    repo(&root.join("nested"), &["src"]);
-    assert!(
-        s.project_source_add(
-            "##1",
-            1,
-            None,
-            SourceLocation::Git {
-                worktree: &root,
-                relative_path: "nested/src"
-            }
-        )
-        .is_err()
-    );
-    add(&s, "##1", 1, None, &root, ".");
-    assert!(
-        s.project_here(&root.join("nested/src"), None).unwrap().data["candidates"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        s.project_source_add("##1", 2, None, SourceLocation::Directory(&root))
-            .unwrap_err()
-            .body
-            .code,
-        "INVALID_INPUT"
-    );
-    assert_eq!(
-        s.project_sources("##1").unwrap().data["sources"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[cfg(any(unix, windows))]
-fn directory_link(target: &Path, link: &Path) {
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link).unwrap();
-    #[cfg(windows)]
-    {
-        let out = Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-}
-
-#[test]
-#[cfg(any(unix, windows))]
-fn source_symlink_escape_is_rejected_and_checkout_alias_deduplicates() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    let root = temp.path().join("repo");
-    let outside = temp.path().join("outside");
-    repo(&root, &["app"]);
-    fs::create_dir(&outside).unwrap();
-    directory_link(&outside, &root.join("escape"));
-    s.project_create("Mailroom").unwrap();
-    assert!(
-        s.project_source_add(
-            "##1",
-            1,
-            None,
-            SourceLocation::Git {
-                worktree: &root,
-                relative_path: "escape"
-            }
-        )
-        .is_err()
-    );
-    let alias = temp.path().join("alias");
-    directory_link(&root, &alias);
-    let original = add(&s, "##1", 1, None, &root, "app");
-    s.project_create("Other").unwrap();
-    let linked = add(&s, "##2", 1, None, &alias, "app");
-    assert_eq!(
-        original["source"]["repositoryId"],
-        linked["source"]["repositoryId"]
-    );
-}
-
-#[test]
-fn replaced_git_identity_is_never_treated_as_the_registered_repository() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    let root = temp.path().join("repo");
-    repo(&root, &["app"]);
-    s.project_create("Mailroom").unwrap();
-    let source = add(&s, "##1", 1, None, &root, "app");
-    let id = source["source"]["id"].as_i64().unwrap();
-    fs::rename(root.join(".git"), temp.path().join("held-old-git")).unwrap();
-    git(&root, &["init", "-b", "main"]);
-    assert_eq!(
-        s.project_source_resolve("##1", id, Some(&root))
-            .unwrap_err()
-            .body
-            .code,
-        "PATH_IDENTITY_UNKNOWN"
-    );
-    let here = s.project_here(&root, None).unwrap();
-    assert!(here.data["candidates"].as_array().unwrap().is_empty());
-    assert_eq!(here.warnings[0].code, "SOURCE_UNAVAILABLE");
-    assert!(
-        s.project_source_add(
-            "##1",
-            2,
-            None,
-            SourceLocation::Git {
-                worktree: &root,
-                relative_path: "app"
-            }
-        )
-        .is_err()
-    );
-    assert_eq!(
-        s.project_show("##1").unwrap().data["project"]["revision"],
-        2
-    );
-}
-
-#[test]
-fn directory_sources_are_identity_checked_and_removal_never_deletes_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    let directory = temp.path().join("documents");
-    fs::create_dir(&directory).unwrap();
-    fs::write(directory.join("keep.md"), "keep").unwrap();
-    s.project_create("Mailroom").unwrap();
-    let source = s
-        .project_source_add("##1", 1, None, SourceLocation::Directory(&directory))
-        .unwrap()
-        .data;
-    let id = source["source"]["id"].as_i64().unwrap();
-    assert!(source["source"]["repositoryId"].is_null());
-    assert_eq!(
-        resolved_path(&s.project_source_resolve("##1", id, None).unwrap().data),
-        fs::canonicalize(&directory).unwrap()
-    );
-    assert_eq!(
-        s.project_here(&directory, None).unwrap().data["candidates"][0]["project"]["id"],
-        1
-    );
-    git(&directory, &["init", "-b", "main"]);
-    assert!(s.project_source_resolve("##1", id, None).is_err());
-    fs::rename(directory.join(".git"), temp.path().join("held-new-git")).unwrap();
-    fs::rename(&directory, temp.path().join("held-documents")).unwrap();
-    fs::create_dir(&directory).unwrap();
-    assert_eq!(
-        s.project_source_resolve("##1", id, None)
-            .unwrap_err()
-            .body
-            .code,
-        "PATH_IDENTITY_UNKNOWN"
-    );
-    assert!(
-        s.project_here(&directory, None).unwrap().data["candidates"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    fs::remove_dir(&directory).unwrap();
-    s.project_source_remove("##1", 2, id).unwrap();
-    assert_eq!(
-        fs::read_to_string(temp.path().join("held-documents/keep.md")).unwrap(),
-        "keep"
-    );
-    assert!(
-        s.project_sources("##1").unwrap().data["sources"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn metadata_changes_are_cas_guarded_and_roll_back_with_history() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    let root = temp.path().join("repo");
-    repo(&root, &["app"]);
-    s.project_create("Mailroom").unwrap();
-    s.project_component_add("##1", 1, "backend").unwrap();
-    assert_eq!(
-        s.project_component_add("##1", 1, "other")
-            .unwrap_err()
-            .body
-            .code,
-        "VERSION_CONFLICT"
-    );
-    assert_eq!(
-        s.project_component_add("##1", 2, "BACKEND")
-            .unwrap_err()
-            .body
-            .code,
-        "CONSTRAINT_VIOLATION"
-    );
-    assert_eq!(
-        s.project_source_add(
-            "##1",
-            1,
-            None,
-            SourceLocation::Directory(Path::new("missing"))
-        )
-        .unwrap_err()
-        .body
-        .code,
-        "VERSION_CONFLICT"
-    );
-    let conn = storage_sqlite::open_database(&temp.path().join("state.db")).unwrap();
-    conn.execute_batch("CREATE TRIGGER fail_history BEFORE INSERT ON project_history BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
-    assert!(
-        s.project_source_add(
-            "##1",
-            2,
-            Some("backend"),
-            SourceLocation::Git {
-                worktree: &root,
-                relative_path: "app"
-            }
-        )
-        .is_err()
-    );
-    assert_eq!(
-        conn.query_row("SELECT count(*) FROM repositories", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        conn.query_row("SELECT count(*) FROM source_roots", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        s.project_show("##1").unwrap().data["project"]["revision"],
-        2
-    );
-    conn.execute_batch("DROP TRIGGER fail_history;").unwrap();
-    let source = add(&s, "##1", 2, Some("backend"), &root, "app");
-    assert_eq!(
-        s.project_source_add(
-            "##1",
-            3,
-            Some("backend"),
-            SourceLocation::Git {
-                worktree: &root,
-                relative_path: "app"
-            }
-        )
-        .unwrap_err()
-        .body
-        .code,
-        "CONSTRAINT_VIOLATION"
-    );
-    let id = source["source"]["id"].as_i64().unwrap();
-    s.project_create("Other").unwrap();
-    assert_eq!(
-        s.project_source_remove("##2", 1, id).unwrap_err().body.code,
-        "NOT_FOUND"
-    );
-    assert_eq!(
-        s.project_source_remove("##1", 2, id).unwrap_err().body.code,
-        "VERSION_CONFLICT"
-    );
-    assert_eq!(
-        s.project_show("##1").unwrap().data["project"]["revision"],
-        3
-    );
-    assert!(conn.execute("INSERT INTO source_roots(project_id,component_id,repository_id,relative_path,created_at) VALUES (2,1,1,'.','now')", []).is_err());
-}
-
-#[test]
-fn concurrent_source_registration_never_loses_a_project_revision() {
-    let temp = tempfile::tempdir().unwrap();
-    let s = service(&temp);
-    s.project_create("Mailroom").unwrap();
-    let directory = temp.path().join("docs");
-    fs::create_dir(&directory).unwrap();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let handles: Vec<_> = (0..2)
-        .map(|_| {
-            let path = temp.path().join("state.db");
-            let directory = directory.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                Service::new(path).project_source_add(
-                    "##1",
-                    1,
-                    None,
-                    SourceLocation::Directory(&directory),
-                )
-            })
-        })
-        .collect();
-    let outcomes: Vec<_> = handles
-        .into_iter()
-        .map(|handle| handle.join().unwrap())
-        .collect();
-    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
-    assert_eq!(
-        outcomes
-            .iter()
-            .find_map(|result| result.as_ref().err())
-            .unwrap()
-            .body
-            .code,
-        "VERSION_CONFLICT"
-    );
-    assert_eq!(
-        s.project_show("##1").unwrap().data["project"]["revision"],
-        2
+        "cancelled"
     );
 }

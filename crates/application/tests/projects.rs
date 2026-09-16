@@ -101,15 +101,15 @@ fn task_membership_uses_cas_without_claiming_or_adopting() {
         .clone();
     assert_eq!(task["projectId"], 1);
     assert_eq!(task["version"], 1);
-    assert_eq!(task["status"], "open");
+    assert_eq!(task["status"], "todo");
+    assert!(task["currentSessionId"].is_null());
     for key in [
-        "currentSessionId",
         "worktreePath",
         "repositoryPath",
         "repositoryCommonDir",
         "repositoryBranch",
     ] {
-        assert!(task[key].is_null());
+        assert!(task.get(key).is_none());
     }
     let before = s.history("#1").unwrap().data;
     assert_eq!(
@@ -135,7 +135,7 @@ fn task_membership_uses_cas_without_claiming_or_adopting() {
     assert_eq!(changed["projectId"], 2);
     assert_eq!(changed["version"], 3);
     assert_eq!(changed["currentSessionId"], "s1");
-    assert_eq!(changed["status"], "in_progress");
+    assert_eq!(changed["status"], task["status"]);
     let history = s.history("#1").unwrap().data;
     assert_eq!(history["history"][2]["changeType"], "task.project_changed");
     assert_eq!(
@@ -163,13 +163,12 @@ fn task_membership_uses_cas_without_claiming_or_adopting() {
         .clone();
     assert!(cleared["projectId"].is_null());
     assert_eq!(cleared["version"], 4);
-    s.task_close("#1", 4, "cancelled", Some("fixture finished"))
-        .unwrap();
+    s.task_status("#1", 4, "cancelled").unwrap();
     assert_eq!(
         s.task_set_project("#1", 5, Some("##1"), true, "fixture")
             .unwrap()
             .data["task"]["status"],
-        "closed"
+        "cancelled"
     );
     assert_eq!(s.task_show("##1").unwrap_err().body.code, "INVALID_INPUT");
 }
@@ -337,7 +336,7 @@ fn context_reads_project_and_new_notes_without_task_or_session_mutation() {
     assert_eq!(context["notesSinceCheckpoint"].as_array().unwrap().len(), 1);
     assert_eq!(context["notesSinceCheckpoint"][0]["text"], "newer decision");
     assert_eq!(context["notesTruncated"], false);
-    assert!(context["worktreeStatus"].is_null());
+    assert!(context.get("worktreeStatus").is_none());
     assert_eq!(s.history("#1").unwrap().data, before);
     assert_eq!(s.session_list(None).unwrap().data, sessions);
     for version in 5..56 {

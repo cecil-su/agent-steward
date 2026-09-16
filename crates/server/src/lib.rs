@@ -210,11 +210,6 @@ pub fn router(state: ServerState) -> Router {
         .route("/api/projects/{id}/history", get(projects::history))
         .route("/api/projects/{id}/components", get(projects::components))
         .route("/api/projects/{id}/sources", get(projects::sources))
-        .route(
-            "/api/projects/{id}/sources/{source}",
-            get(projects::resolve),
-        )
-        .route("/api/projects/{id}/context", get(projects::context))
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
         .route("/api/tasks/{id}/{resource}", get(task_resource))
@@ -237,7 +232,7 @@ pub fn router(state: ServerState) -> Router {
 }
 
 fn failure(status: StatusCode, code: &str, message: &str) -> Response {
-    (status, Json(json!({"schemaVersion":2,"ok":false,"data":null,"warnings":[],"error":{"code":code,"message":message,"retryable":false,"details":{}}}))).into_response()
+    (status, Json(json!({"schemaVersion":3,"ok":false,"data":null,"warnings":[],"error":{"code":code,"message":message,"retryable":false,"details":{}}}))).into_response()
 }
 fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
     let mut difference = a.len() ^ b.len();
@@ -406,18 +401,11 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
     response
 }
 
-// Only read handlers install cancellation. Dropping the HTTP future cancels the
-// worker's Git group/job; run() keeps its slot until that worker has cleaned up.
+// Keep read and total concurrency permits in the blocking worker until it exits.
 async fn run_read(
     state: ServerState,
     operation: impl FnOnce(&Service) -> AppResult<Outcome> + Send + 'static,
 ) -> Response {
-    struct CancelOnDrop(steward_application::GitReadControl);
-    impl Drop for CancelOnDrop {
-        fn drop(&mut self) {
-            self.0.cancel();
-        }
-    }
     let Ok(read_permit) = state.read_slots.clone().try_acquire_owned() else {
         return failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -425,18 +413,10 @@ async fn run_read(
             "read capacity is busy; retry later",
         );
     };
-    let control = steward_application::GitReadControl::default();
-    let _cancel = CancelOnDrop(control.clone());
     run(state, move |s| {
-        // Retained by the worker, including cancellation cleanup or a busy SQLite
-        // query. HTTP future cancellation is not SQLite execution cancellation.
+        // HTTP future cancellation is not SQLite execution cancellation.
         let _read_permit = read_permit;
-        control.within(|| {
-            control
-                .check()
-                .map_err(|error| AppError::from_git(error, None))?;
-            operation(s)
-        })
+        operation(s)
     })
     .await
 }
@@ -460,7 +440,7 @@ async fn run(
         let result=operation(&state.service);
         let warnings=database_permission_warning(state.service.database_path(),state.service.database_path().parent()!=steward_core::default_data_dir().as_deref()).into_iter().collect::<Vec<_>>();
         match result {
-            Ok(mut outcome)=> { outcome.warnings.extend(warnings); (StatusCode::OK,json!({"schemaVersion":2,"ok":true,"data":outcome.data,"warnings":outcome.warnings,"error":null})) },
+            Ok(mut outcome)=> { outcome.warnings.extend(warnings); (StatusCode::OK,json!({"schemaVersion":3,"ok":true,"data":outcome.data,"warnings":outcome.warnings,"error":null})) },
             Err(error)=> {
                 let status=match error.body.code.as_str() {
                     "INVALID_INPUT"|"UNSUPPORTED_SCHEMA_VERSION"=>StatusCode::BAD_REQUEST,
@@ -469,7 +449,7 @@ async fn run(
                     "DATABASE_BUSY"|"WORKTREE_OPERATION_BUSY"|"GIT_READ_LIMIT"=>StatusCode::SERVICE_UNAVAILABLE,
                     _=>StatusCode::INTERNAL_SERVER_ERROR,
                 };
-                (status,json!({"schemaVersion":2,"ok":false,"data":null,"warnings":warnings,"error":error.body}))
+                (status,json!({"schemaVersion":3,"ok":false,"data":null,"warnings":warnings,"error":error.body}))
             }
         }
     }).await {
@@ -516,7 +496,7 @@ fn browser_result(state: &ServerState, role: Option<&str>, id: Option<&str>) -> 
     );
     // taskd currently serves HTTP only. A future HTTPS listener must add Secure.
     let mut response =
-        Json(json!({"schemaVersion":2,"ok":true,"data":{"role":role},"warnings":[],"error":null}))
+        Json(json!({"schemaVersion":3,"ok":true,"data":{"role":role},"warnings":[],"error":null}))
             .into_response();
     response.headers_mut().insert(
         "set-cookie",
@@ -594,7 +574,7 @@ fn revoke_browsers_blocking(state: ServerState) -> Response {
 }
 
 async fn access(Extension(access): Extension<Access>) -> Response {
-    Json(json!({"schemaVersion":2,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true,"sessionRules":true},"warnings":[],"error":null})).into_response()
+    Json(json!({"schemaVersion":3,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true,"sessionRules":true},"warnings":[],"error":null})).into_response()
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -674,7 +654,11 @@ async fn tasks(
             None => query.status,
             Some("active") => Some("active".into()),
             Some("in-progress") => Some("in_progress".into()),
-            Some("pending-release") => Some("pending_release".into()),
+            Some("in-review") => Some("in_review".into()),
+            Some("backlog") => Some("backlog".into()),
+            Some("todo") => Some("todo".into()),
+            Some("done") => Some("done".into()),
+            Some("cancelled") => Some("cancelled".into()),
             Some("blocked") => Some("blocked".into()),
             Some("recent") => None,
             Some(_) => return Err(AppError::invalid("view", "unknown view")),
@@ -705,7 +689,6 @@ async fn task_resource(
         "context" => s.task_context(&id),
         "history" => s.history(&id),
         "notes" => s.task_notes(&id),
-        "worktree-status" => s.worktree_status(&id),
         _ => Err(AppError::not_found("Endpoint", "resource")),
     })
     .await
@@ -841,31 +824,10 @@ enum Command {
         note_type: String,
         text: String,
     },
-    TaskBlock {
+    TaskStatus {
         task_id: i64,
         expected_version: i64,
-        reason: String,
-        recovery: String,
-    },
-    TaskPendingRelease {
-        task_id: i64,
-        expected_version: i64,
-    },
-    TaskContinue {
-        task_id: i64,
-        expected_version: i64,
-    },
-    TaskUnblock {
-        task_id: i64,
-        expected_version: i64,
-        next_step: String,
-    },
-    TaskClose {
-        task_id: i64,
-        expected_version: i64,
-        outcome: String,
-        reason: Option<String>,
-        confirmed: bool,
+        status: String,
     },
     TaskClaim {
         task_id: i64,
@@ -922,32 +884,6 @@ enum Command {
     HookClear {
         session_id: String,
         expected_version: i64,
-        confirmed: bool,
-    },
-    WorktreeCreate {
-        task_id: i64,
-        expected_version: i64,
-        repo: String,
-        branch: String,
-        path: String,
-        confirmed: bool,
-    },
-    WorktreeAdopt {
-        task_id: i64,
-        expected_version: i64,
-        repo: String,
-        path: String,
-        confirmed: bool,
-    },
-    WorktreeRemove {
-        task_id: i64,
-        expected_version: i64,
-        confirmed: bool,
-    },
-    WorktreeDetach {
-        task_id: i64,
-        expected_version: i64,
-        expected_path: String,
         confirmed: bool,
     },
 }
@@ -1088,40 +1024,11 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
             note_type,
             text,
         } => s.task_note(&task_id.to_string(), expected_version, &note_type, &text),
-        Command::TaskBlock {
+        Command::TaskStatus {
             task_id,
             expected_version,
-            reason,
-            recovery,
-        } => s.task_block(&task_id.to_string(), expected_version, &reason, &recovery),
-        Command::TaskPendingRelease {
-            task_id,
-            expected_version,
-        } => s.task_pending_release(&task_id.to_string(), expected_version),
-        Command::TaskContinue {
-            task_id,
-            expected_version,
-        } => s.task_continue(&task_id.to_string(), expected_version),
-        Command::TaskUnblock {
-            task_id,
-            expected_version,
-            next_step,
-        } => s.task_unblock(&task_id.to_string(), expected_version, &next_step),
-        Command::TaskClose {
-            task_id,
-            expected_version,
-            outcome,
-            reason,
-            confirmed,
-        } => {
-            confirm(confirmed)?;
-            s.task_close(
-                &task_id.to_string(),
-                expected_version,
-                &outcome,
-                reason.as_deref(),
-            )
-        }
+            status,
+        } => s.task_status(&task_id.to_string(), expected_version, &status),
         Command::TaskClaim {
             task_id,
             expected_version,
@@ -1214,59 +1121,6 @@ fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
         } => {
             confirm(confirmed)?;
             s.hook_clear(&session_id, expected_version)
-        }
-        Command::WorktreeCreate {
-            task_id,
-            expected_version,
-            repo,
-            branch,
-            path,
-            confirmed,
-        } => {
-            confirm(confirmed)?;
-            s.worktree_create(
-                &task_id.to_string(),
-                expected_version,
-                absolute(&repo)?,
-                &branch,
-                absolute(&path)?,
-            )
-        }
-        Command::WorktreeAdopt {
-            task_id,
-            expected_version,
-            repo,
-            path,
-            confirmed,
-        } => {
-            confirm(confirmed)?;
-            s.worktree_adopt(
-                &task_id.to_string(),
-                expected_version,
-                absolute(&repo)?,
-                absolute(&path)?,
-            )
-        }
-        Command::WorktreeRemove {
-            task_id,
-            expected_version,
-            confirmed,
-        } => {
-            confirm(confirmed)?;
-            s.worktree_remove(&task_id.to_string(), expected_version)
-        }
-        Command::WorktreeDetach {
-            task_id,
-            expected_version,
-            expected_path,
-            confirmed,
-        } => {
-            confirm(confirmed)?;
-            s.worktree_detach(
-                &task_id.to_string(),
-                expected_version,
-                absolute(&expected_path)?,
-            )
         }
     }
 }

@@ -26,7 +26,7 @@ async fn reader_context_exposes_rules_and_no_rule_write_route_exists() {
                     .uri(path)
                     .header("host", "127.0.0.1:43123")
                     .header("x-steward-token", "fixture-reader")
-                    .header("x-steward-ui-contract", "4")
+                    .header("x-steward-ui-contract", "5")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -41,7 +41,7 @@ async fn reader_context_exposes_rules_and_no_rule_write_route_exists() {
             "Full body"
         );
     }
-    for contract in ["1", "2", "3"] {
+    for contract in ["1", "2", "3", "4"] {
         let response = app
             .clone()
             .oneshot(

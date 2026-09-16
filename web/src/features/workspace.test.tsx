@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Project, ProjectProfile, Task } from '../lib/contracts';
+import { formatTaskContext } from '../lib/context';
+import type { Project, ProjectProfile, Task, TaskContext, TaskStatus } from '../lib/contracts';
 import { ReadonlyWorkspace, type ReadonlyWorkspaceProps } from './workspace';
 
 const task: Task = {
@@ -30,6 +31,26 @@ const profile: ProjectProfile = {
 afterEach(cleanup);
 
 describe('ReadonlyWorkspace', () => {
+  it.each(['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled'] as TaskStatus[])('keeps historical closure independent of %s and excludes live context', (status) => {
+    const context = { task: { ...task, status, closureOutcome: 'partial', closureReason: '**历史原因**', closedAt: '2025-01-01' }, session: { id: 'unchanged-session', startedAt: '' }, worktreeStatus: { head: 'live-head-must-not-copy' } } as TaskContext;
+    render(<ReadonlyWorkspace {...makeProps({ selectedTaskId: task.id, taskContext: context })} />);
+    expect(screen.getByText('历史关闭原因').nextElementSibling).toHaveTextContent('历史原因');
+    expect(screen.getByText('示例下一步')).toBeTruthy();
+    expect(screen.getByText('unchanged-session')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '代码现场' })).toBeNull();
+    const copied = formatTaskContext(context);
+    expect(copied).toContain(`状态：${status}`);
+    expect(copied).toContain('unchanged-session');
+    expect(copied).not.toMatch(/live-head-must-not-copy|Git|代码现场/);
+  });
+  it('renders all task description fields as Markdown without changing title or metadata', () => {
+    const markdownTask = { ...task, goal: '**目标正文**', scope: '**范围正文**', acceptanceCriteria: '**验收正文**', nextStep: '**下一步正文**' };
+    const { container } = render(<ReadonlyWorkspace {...makeProps({ selectedTaskId: task.id, taskContext: { task: markdownTask } })} />);
+    const strong = Array.from(container.querySelectorAll('dd strong'), node => node.textContent);
+    expect(strong).toEqual(['目标正文', '范围正文', '验收正文', '下一步正文']);
+    expect(screen.getByText('版本').nextElementSibling).toHaveTextContent('3');
+    expect(screen.queryByRole('button', { name: /编辑|保存|记录进展/ })).toBeNull();
+  });
   it.each(['tasks', 'projects'] as const)('displays recorded project profile in %s without write controls', (tab) => {
     const { rerender } = render(<ReadonlyWorkspace {...makeProps({
       tab, selectedTaskId: task.id, taskContext: { task, project, projectProfile: profile },
@@ -127,11 +148,11 @@ describe('ReadonlyWorkspace', () => {
     fireEvent.click(screen.getByRole('button', { name: /展示任务/ }));
     expect(props.onSelectTask).toHaveBeenCalledWith(12);
     const views = within(screen.getByLabelText('任务状态视图'));
-    for (const [label, value] of [['未关闭', 'active'], ['进行中', 'in-progress'], ['有阻塞', 'blocked'], ['已关闭', 'closed'], ['最近全部', 'recent']]) {
+    for (const [label, value] of [['未结束', 'active'], ['执行中', 'in-progress'], ['受阻', 'blocked'], ['已完成', 'done'], ['最近全部', 'recent']]) {
       fireEvent.click(views.getByRole('button', { name: label }));
       expect(props.onViewChange).toHaveBeenLastCalledWith(value);
     }
-    expect(views.getByRole('button', { name: '未关闭' }).getAttribute('aria-pressed')).toBe('true');
+    expect(views.getByRole('button', { name: '未结束' }).getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     fireEvent.click(screen.getByRole('button', { name: '加载更多' }));
     fireEvent.click(screen.getByRole('button', { name: '项目' }));
@@ -154,7 +175,7 @@ describe('ReadonlyWorkspace', () => {
 
   it('renders legacy task detail without project or component fields', () => {
     const legacyTask: Task = {
-      id: 13, title: '旧后端任务', status: 'open', version: 1,
+      id: 13, title: '旧后端任务', status: 'todo', version: 1,
       goal: '旧后端目标', scope: null, acceptanceCriteria: null, nextStep: null,
     };
     render(<ReadonlyWorkspace {...makeProps({
@@ -172,7 +193,7 @@ describe('ReadonlyWorkspace', () => {
       tab: 'projects', selectedProjectId: 7, hasMore: true,
       projectDetail: {
         project, components: [{ id: 4, name: '服务组件' }],
-        sources: [{ id: 9, componentId: 4, repositoryId: 5, relativePath: 'src/example.ts', directoryPath: '/example/source' }],
+        sources: [{ id: 9, componentId: 4, projectId: 7, createdAt: '2026-01-01', directoryPath: '/example/source' }],
       },
     });
     const { rerender } = render(<ReadonlyWorkspace {...props} />);
@@ -185,7 +206,7 @@ describe('ReadonlyWorkspace', () => {
     expect(screen.queryByLabelText('任务状态视图')).toBeNull();
     expect(within(screen.getByRole('region', { name: '项目组件' })).getByText(/服务组件/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /展示项目/ }).textContent).toContain('##7 · 修订 2');
-    expect(screen.getByText('src/example.ts')).toBeTruthy();
+    expect(screen.queryByText('仓库 ID')).toBeNull();
     expect(screen.getByText('/example/source')).toBeTruthy();
     expect(screen.queryByRole('link')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /展示项目/ }));
@@ -238,14 +259,14 @@ describe('ReadonlyWorkspace', () => {
     for (const text of ['检查点摘要', '完成内容', '决策内容', '待办内容', '风险内容', '近期进展']) expect(screen.getByText(text)).toBeTruthy();
     expect(within(screen.getByLabelText('近期备注')).getByRole('status').textContent).toContain('已截断');
     const nav = within(screen.getByLabelText('任务详情导航'));
-    for (const [label, value] of [['概览', 'overview'], ['进展备注', 'notes'], ['Session', 'sessions'], ['代码现场', 'worktree'], ['历史', 'history']]) {
+    for (const [label, value] of [['概览', 'overview'], ['进展备注', 'notes'], ['Session', 'sessions'], ['历史', 'history']]) {
       fireEvent.click(nav.getByRole('button', { name: label }));
       expect(props.onDetailTabChange).toHaveBeenLastCalledWith(value);
     }
     expect(screen.getByText('检查点摘要')).toBeTruthy();
   });
 
-  it('renders notes, sessions, worktree observations and history from props', () => {
+  it('renders notes, independent sessions and history without a worktree tab', () => {
     const props = makeProps({ selectedTaskId: 12, taskContext: { task },
       notes: [{ id: 2, noteType: 'decision', text: '完整备注', createdAt: '2026-01-04' }],
       sessions: [{ id: 'session-2', source: 'pi', externalSessionId: 'external', continuedFrom: 'session-1', recordPath: '/records/example', startedAt: '2026-01-01' }],
@@ -257,11 +278,7 @@ describe('ReadonlyWorkspace', () => {
     rerender(<ReadonlyWorkspace {...props} detailTab="sessions" />);
     expect(screen.getByText('session-2')).toBeTruthy();
     expect(screen.getByText('/records/example')).toBeTruthy();
-    rerender(<ReadonlyWorkspace {...props} detailTab="worktree" />);
-    expect(screen.getByText('代码现场不可观察')).toBeTruthy();
-    expect(screen.getByText(/不能据此认定工作树为 clean/)).toBeTruthy();
-    rerender(<ReadonlyWorkspace {...props} detailTab="worktree" taskContext={{ task, worktreeStatus: { dirty: true, branch: 'example' } }} />);
-    expect(screen.getByText(/"dirty": true/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '代码现场' })).toBeNull();
     rerender(<ReadonlyWorkspace {...props} detailTab="history" />);
     expect(screen.getByText('任务历史内容')).toBeTruthy();
     expect(screen.getByText(/"example": true/)).toBeTruthy();

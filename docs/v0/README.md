@@ -4,12 +4,12 @@
 
 ## 当前合同基线
 
-- 本机SQLite Schema7；普通连接只初始化空库或打开当前格式，不隐式升级。
-- CLI/HTTP业务JSON envelope为2；UI API合同4、包格式1。
+- 本机SQLite Schema8；普通连接只初始化空库或打开当前格式，不隐式升级。
+- CLI/HTTP业务JSON envelope为3；UI API合同5、包格式1。
 - `taskctl`维护业务，`task-hook`只投影显式绑定的元数据，`taskd`提供HTTP及只读Web工作台。
 - Task使用自动生成且不复用的数字ID、可选且只可设置一次的taskKey；Task version、Project revision和Rule revision分别执行CAS。
-- SQLite是业务状态权威；Git和文件系统是代码现场权威，查询不领取任务或授权执行。
-- 关闭结果由用户明确决定；Session结束、Hook事件、测试输出不自动关闭Task。
+- SQLite是业务状态权威；源码路径仅为普通资料，不提供Worktree管理、主动Git查询或源码读取，查询不领取任务或授权执行。
+- 用户主导七状态选择，创建默认todo，task status为唯一业务状态入口，任意转换保留CAS/事务/History；Session完全解耦，不隐式claim/take-over/resume，交付/测试/Hook不自动标done。
 - 开发和测试显式使用隔离数据库，不操作默认库、正式服务或真实业务源码。
 
 ## 文档导航
@@ -32,7 +32,7 @@
 - [项目与上下文](16-项目与上下文复用.md)
 - [项目资料与CLI维护](19-项目资料与CLI维护.md)
 - [任务信息维护](20-任务信息维护.md)
-- [待上线任务状态](21-待上线任务状态.md)
+- [七种任务状态](21-待上线任务状态.md)
 - [个人偏好与项目规则](22-个人偏好与项目规则.md)
 
 ### 使用与验证
@@ -42,12 +42,12 @@
 - [UI独立发布](14-UI独立发布.md)
 - [测试与验收](08-测试与验收.md)
 - [项目管理人工验收](17-项目管理验收.md)
-- [Schema7隔离导入与验证](18-Schema7隔离导入与验证.md)
+- [Schema8隔离导入与验证](18-Schema7隔离导入与验证.md)
 - [v7归档导入](13-v7归档迁移.md)
 - [Windows启动与更新](../../distribution/windows/README.md)
 - [宿主适配指南](../../integrations/README.md)
 
-`database import-schema2/4/5/6`分别接受对应冻结输入格式并复制到Schema7新库；`import-v7`接受schema_migrations格式的闭合归档。没有`import-schema3`。命令不替换源库、不切换默认路径或服务；源格式数字是现行接口参数，不是目标数据库版本。
+`database import-schema2/4/5/6/7`分别接受对应冻结输入格式并显式转换到Schema8新库；schema4/5/6/7的Git来源均支持--source-paths绝对路径映射，缺映射拒绝。`import-v7`接受独立schema_migrations格式的闭合归档，不等于user_version=7。旧状态按固定表映射，旧关闭含义与History保留，不恢复Session。没有`import-schema3`。命令不替换源库、不切换默认路径或服务；源格式数字是现行接口参数，不是目标数据库版本。
 
 ## 执行边界
 

@@ -1,170 +1,67 @@
 # AI Session 记录
 
-服务接口见[Hook与HTTP合同](11-Hook与HTTP合同.md)和[使用指南](12-服务使用与验收.md)。
+## 数据与业务状态的边界
 
+Session 保存显式会话身份与继续关系，不代表完整聊天、任务状态或执行授权。Task 的 currentSessionId 指向同任务尚未结束的 Session；latestCheckpointId 指向同任务检查点。所有七种任务状态均适用以下合同，done/cancelled 不例外。
 
-## 1. 目标
+SessionView：`id/taskId/source/externalSessionId/continuedFrom/recordPath/startedAt/endedAt`。可空字段输出 null；本地 ID 与宿主外部 ID 不混用。没有外部 ID 时使用稳定本地 ID，不从文件名或聊天猜测来源。
 
-Session 记录用于让 AI 在新会话或新窗口中继续同一个 Task。初版记录保存在本机 SQLite 数据库中，重点是可靠恢复，不追求自动保存完整聊天。
+## 显式生命周期
 
-核心关系：
+| 操作 | 行为 |
+| --- | --- |
+| task claim | 创建尚不存在的本地 Session 并设为当前；不改 status |
+| claim 同一当前 Session | 先检查 CAS；Session 尚未结束才 no-op |
+| claim --take-over | 显式创建新 Session，continuedFrom 指向原当前 Session；旧记录保留，不伪造 endedAt |
+| task resume | 显式创建新 Session，continuedFrom 指向指定来源；不改 status |
+| session attach | 新建来源/记录路径元数据，不设为当前 Session；身份字段完全一致时当前版本 no-op，不重新激活历史 Session |
+| session bind | 对已有未结束 Session 一次性绑定 source/externalSessionId；同值当前版本 no-op，不改当前关联 |
+| session close | 设置 endedAt；仅当它是当前 Session 时同事务清空 currentSessionId；不改业务状态 |
 
-```text
-Task row
-├─ current_session_id ─────────► Session B
-└─ latest_checkpoint_id ───────► Checkpoint
+claim 已有其他当前 Session 时必须显式 take-over。resume 来源优先 `--from-session`，否则使用当前 Session；没有来源则拒绝。来源必须属于同一 Task，新 ID 必须尚不存在且不同于来源。存在当前 Session 时 resume 必须显式 take-over。历史来源可以已结束，但新 Session 不能复用旧 ID。
 
-Session rows 通过 task_id 形成历史
-Session B ── continued_from ──► Session A
-```
+无当前 Session 时可显式 claim 开始独立新会话，或 resume 延续明确来源；读取任务、宿主启动、窗口切换及状态修改均不得隐式领取、接管或恢复旧会话。不以超时、心跳或 Hook closed 自动回收会话。
 
-## 2. 初版记录内容
+所有相关写入使用最新 Task version，业务变更与 History 同事务。响应丢失先读取核对，不自动重放。
 
-每个 Session 保存：
+## CLI
 
-```ts
-type Session = {
-  id: string
-  taskId: number
-  source?: string
-  externalSessionId?: string
-  continuedFrom?: string
-  recordPath?: string
-  startedAt: string
-  endedAt?: string
-}
-```
-
-- `id` 是 `taskctl` 的本地稳定 Session ID；
-- `taskId` 是数据库生成的 Task 整数主键；
-- `externalSessionId` 在 AI 客户端能够提供时保存；
-- `recordPath` 指向用户明确提供的数据库外部原始记录；
-- `continuedFrom` 表示新会话从哪个会话继续。
-
-普通 attach 不复制每条消息或工具调用，任务连续性主要依赖数据库中的结构化 Checkpoint。只有用户明确执行 `session import add` 时，输入文件才作为不可推断 Task 状态的导入副本保存在 SQLite `session_imports` 中；用户可以查询元数据并通过 `session import remove` 逻辑删除。
-
-## 3. AI 主动更新流程
-
-### 开始处理
-
-```bash
-taskctl task show TASK-123 --json
-taskctl task claim TASK-123 --session session-a --if-version 1
-```
-
-示例仅用于显式指定的隔离数据库，TASK及版本必须来自该库查询；每次调用添加`--database DB`。后续每次mutation使用上一条成功结果的新version；遇到 `VERSION_CONFLICT` 时必须重新 `show` 并重新判断，不能盲目重试旧输入。
-
-### 执行期间
-
-```bash
-taskctl task update TASK-123 --if-version 2 --input task-patch.json --yes --reason '明确的信息维护依据'
-taskctl task note TASK-123 --if-version 3 --type decision --text "沿用现有 JWT 方案"
-taskctl task block TASK-123 --if-version 4 --reason "缺少测试账号" --recovery "取得账号后继续"
-taskctl worktree status TASK-123 --json
-```
-
-只在状态、关键决策、阻塞和下一步发生变化时更新，不要求每轮对话写入。
-
-### 切换会话前
-
-```bash
-taskctl task checkpoint TASK-123 --session session-a --if-version 5 --input checkpoint.json
-```
-
-Checkpoint 至少包含：
-
-- 当前进展摘要；
-- 已完成事项；
-- 已确认决策；
-- 未完成事项；
-- 唯一下一步；
-- 风险和阻塞；
-- 当前 Git HEAD，由 CLI 观察后补充。
-
-### 新会话继续
-
-```bash
-taskctl task show TASK-123 --json
-taskctl task resume TASK-123 --session session-b --from-session session-a --if-version 6 --take-over --json
-```
-
-`--from-session` 明确继续来源；如果省略则使用当前 Session。resume 目标 ID 必须尚不存在且不同于来源 Session ID。Task 存在活跃当前 Session 时必须显式 `--take-over`。新 Session 的 `continuedFrom` 指向来源 Session，旧记录保留且不会被伪造为已经结束。
-
-`resume` 返回：
+以下 TASK/VERSION/SESSION 来自明确指定的隔离库，每次调用使用 `--database TEST_DB`：
 
 ```text
-Task 当前内容
-+ 最新 Checkpoint
-+ Session 历史和 continuedFrom
-+ 实时 Worktree / Git 状态
-+ 唯一下一步
+taskctl task claim TASK --session SESSION --if-version VERSION [--take-over]
+taskctl task resume TASK --session NEW_SESSION --from-session OLD_SESSION --if-version VERSION [--take-over]
+taskctl task checkpoint TASK --session SESSION --if-version VERSION --input checkpoint.json
+taskctl session list [--task TASK]
+taskctl session show SESSION
+taskctl session attach TASK --session SESSION --if-version VERSION [--source CLIENT] [--external-session EXTERNAL_ID] [--record-path PATH]
+taskctl session bind SESSION --source CLIENT --external-session EXTERNAL_ID --if-version VERSION
+taskctl session close SESSION --if-version VERSION
+taskctl session import add TASK --session SESSION --if-version VERSION --file FILE --confirm-sensitive-content-reviewed
+taskctl session import list SESSION
+taskctl session import remove IMPORT_ID --if-version VERSION --yes
 ```
 
-新 Session 必须重新读取 Git 现场，不能只相信旧 Checkpoint。
+## Checkpoint 与恢复上下文
 
-## 4. 项目级 AI 协议
-
-项目可以在 `AGENTS.md` 中约定：
-
-```text
-1. 处理 taskctl Task 前先 show，取得当前 version。
-2. claim、resume 和其他 mutation 必须携带最近成功结果返回的 version。
-3. 关键状态、决策和阻塞变化时调用 taskctl 更新。
-4. 版本冲突时重新读取并重新判断，不盲目重试。
-5. 不直接修改 SQLite 数据库。
-6. Git 状态通过 taskctl worktree status 获取。
-7. 会话结束或上下文即将耗尽前保存 Checkpoint。
+```json
+{"summary":"当前进展","completed":[],"decisions":[],"pending":[],"nextStep":"下一步","risks":[]}
 ```
 
-这使初版不依赖特定 AI 客户端插件。
+summary/nextStep 及数组元素须非空，未知字段拒绝。Checkpoint 只接受同任务尚未结束的当前 Session，不以业务状态限制。保存时递增 Task version、更新 latestCheckpointId/nextStep 并写 History；检查点不可原地编辑，修正通过新检查点完成。
 
-## 5. AI Client Hook / Runtime Adapter
+`gitHead` 仅保留历史值；新检查点为 null，不采集 Git。resume 返回 task/checkpoint/sessions/sessionRules/nextStep，不返回现场；sessions 按 startedAt ASC、id ASC。task context 是独立只读入口，不执行 resume，不读取源码或 Git。
 
-`task-hook`是通用进程适配器。宿主显式配置后，以 JSON stdin 提供稳定 eventId、kind 和 occurredAt；适配器只投影元数据，经 Application Service 写入独立 `session_events`。特定客户端原生配置需要另外验证，不能把通用协议说成已接入某个客户端。
+## Session 内容与隐私
 
-- 先 `claim/resume`，再用 CAS `session bind` 为已有执行 Session 一次性绑定 source/externalSessionId；事件不自动创建或改绑 Task/Session。
-- started/resumed/idle/closed 及消息/工具事件只作观测，不映射到 `claim/resume/session close`，也不影响 Task version 或 History。
-- 消息正文、工具参数/结果、自由格式错误和附件在适配器投影时丢弃，不存储或写入重试日志。标准接收接口拒绝未知字段。
-- `(sessionId,eventId)` 幂等；同 ID 不同内容拒绝。上限、分页、乱序、迟到和删除后防复活规则见[HTTP合同](11-Hook与HTTP合同.md)。
-- 用户主动清除观测时，CAS 更新 Task version 并记录不含原文的 History；保留去重标记，且不保证物理擦除。
-- Hook 失败通过稳定错误和非零退出报告，显式 CLI 不依赖它；仅 busy 可做两次有界重试，不创建后台队列或通用 Event 框架。
+attach 的 recordPath 只是外部记录引用，存在时保存规范化路径，不存在时保存绝对弱引用并提示；不是源码读取能力。Import 只接受用户明确提供、已审查、不超过16 MiB的普通文件；固定缓冲区有界读取并计算 SHA-256。不得导入凭据或隐藏推理，数据库无内容加密保证。
 
-手工 `session import add` 仍只接受经用户敏感内容审查、不超过 16 MiB 的普通文件，语义与自动元数据事件分开。自动正文、内容分片、大附件和model/usage收集不属于当前实现。
+`sessionId + sha256` 去重，重复且 CAS 正确时返回现有元数据、不改版本/History；元数据查询不返回 BLOB。remove 同事务逻辑删除、递增版本及写不含原文的 History；启用 secure_delete，提交后尝试 WAL truncate，不保证备份/SSD/快照上的物理擦除，也不删除外部原始文件。
 
-## 6. CLI 合同
+## Hook
 
-```bash
-taskctl session list [--task <task-ref>]
-taskctl session show <session-id>
-taskctl session attach <task-ref> --session <session-id> --if-version <version> [--source <client>] [--external-session <external-id>] [--record-path <path>]
-taskctl session import add <task-ref> --session <session-id> --if-version <version> --file <session-file> --confirm-sensitive-content-reviewed
-taskctl session import list <session-id> [--json]
-taskctl session import remove <import-id> --if-version <version> [--yes]
-taskctl session close <session-id> --if-version <version>
-taskctl session bind <session-id> --source <source> --external-session <id> --if-version <version>
-taskctl --json --input <event.json> hook ingest
-taskctl hook list <session-id> --after 0 --limit 100
-taskctl hook clear <session-id> --if-version <version> --yes
-```
+显式配置并绑定后才采集元数据。started/resumed/idle/closed 等事件不映射到 claim/resume/session close/status；迟到事件不激活旧会话。事件按独立键去重，不改变 Task version/History；正文与工具参数结果在投影时丢弃。详见 [Hook与HTTP](11-Hook与HTTP合同.md)、[宿主适配](../../integrations/README.md)。
 
-`<task-ref>` 可以是数字 `12`、人类展示形式 `#12` 或可选 `taskKey`。Session/Checkpoint/History JSON 中的 `taskId` 始终是整数。`task claim` 可以在同一 SQLite 事务中创建缺失的本地 Session；已存在的 ID 仅在它是该 Task 尚未结束的当前 Session 时允许 no-op，不能重新激活历史 Session。`task resume` 和 `task claim --take-over` 使用尚不存在且不同于来源的新 Session ID，在同一事务中创建 Session 并更新 Task。`session attach` 显式保存可选外部 Session ID；`session import add` 要求调用方先携带 `--confirm-sensitive-content-reviewed`，并要求指定的本地 Session 已存在且属于同一 Task，来源读取该 Session 的 `source`，再保存用户明确提供的文件内容和哈希；`session attach --record-path` 对已存在文件保存规范化绝对路径，对不存在文件保存展开后的绝对弱引用。
+## 验证
 
-`session import list` 只返回 Import ID、Session ID、路径、媒体类型、SHA-256、大小和导入时间，不返回内容。`session import remove` 使用 Task expected version 删除 BLOB 并写入不含原文的 History；它保证 V0 查询层面的逻辑删除，不承诺外部备份、文件系统快照或存储介质上的取证级物理擦除。
-
-`session close` 设置 `endedAt`。如果关闭的是 Task 当前 Session，它还会在同一事务中清空 `currentSessionId` 并写入 History，但不会推断或改变 Task 状态。一个本地 Session 只属于一个 Task；`continuedFrom` 也必须指向同一 Task 的 Session。
-
-`session list` 和 `task resume` 返回的 Session 历史统一按 `startedAt ASC, id ASC` 排序。
-
-## 7. 初版验收
-
-- Session A 可以在 SQLite 中领取 Task 并保存 Checkpoint；
-- Session B 可以通过 `resume` 延续 Session A；
-- resume 目标与来源相同、目标 ID 已存在或已结束时会被拒绝，不会生成 self-reference 或重新激活历史 Session；
-- 恢复结果包含最新 Task 和实时 Git 现场；
-- 没有完整聊天记录时仍能继续任务；
-- Session 结束不会自动关闭 Task；
-- 未提供外部 Session ID 时，调用方可以生成稳定本地 ID 并将外部 ID 留空；
-- Hook 未配置、禁用或失败时，手工 CLI 流程完整可用；
-- Task/Session 显式 mutation 使用 expected version，旧快照更新返回结构化冲突；Hook 追加按独立事件键去重，不递增 Task version；
-- Session 导入目标明确且超限或非普通文件会被拒绝；
-- 重复导入不复制 BLOB，导入元数据可查询且内容可显式逻辑删除。
+隔离测试覆盖七状态下 claim/attach/bind/close/resume/checkpoint/import、身份和接管限制、CAS与History失败回滚、Hook不改变生命周期。Session 可用、记录成功和测试通过均不等于业务验收；状态由用户通过 [task status](21-待上线任务状态.md) 单独决定。

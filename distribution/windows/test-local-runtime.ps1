@@ -6,9 +6,10 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) "steward-local-runtime-$([guid]::Ne
 . (Join-Path $PSScriptRoot 'update-local.ps1') -InstallRoot $temp -LibraryOnly
 New-Item -ItemType Directory -Path $temp,(Join-Path $temp 'versions'),(Join-Path $temp 'runs') | Out-Null
 try {
-    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
+    $bind = if ($env:STEWARD_TEST_BIND) { $env:STEWARD_TEST_BIND } else { '127.0.0.1' }
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($bind),0)
     $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop()
-    Write-Json (Join-Path $temp 'settings.json') @{bind='127.0.0.1';port=$port;database=(Join-Path $temp 'tasks.db');runtimeDir=(Join-Path $temp 'runtime');requireLocalAuth=$false}
+    Write-Json (Join-Path $temp 'settings.json') @{bind=$bind;port=$port;database=(Join-Path $temp 'tasks.db');runtimeDir=(Join-Path $temp 'runtime');requireLocalAuth=$false}
     $url = Update-LocalManaged $source
     $first = (Read-Json (Join-Path $temp 'current.json')).version
     $null = Invoke-RestMethod "$url/api/commands/task-create" -Method Post -ContentType 'application/json' -Headers @{Origin=$url;'X-Steward-CSRF'='1'} -Body '{"input":{}}'

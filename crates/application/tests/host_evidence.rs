@@ -10,7 +10,7 @@ fn fixture() -> (tempfile::TempDir, HostEvidence) {
     let root = fs::canonicalize(temp.path()).unwrap();
     let path = root.join("AGENTS.md");
     fs::write(&path, "fixture rule").unwrap();
-    let identity = git_adapter::identify_existing(&path).unwrap();
+    let identity = steward_application::path_safety::identify_existing(&path).unwrap();
     let r = HostEvidence {
         protocol_version: 1,
         binding: HostBinding {

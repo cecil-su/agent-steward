@@ -27,7 +27,7 @@ pub(super) fn fixture(root: &Path) -> std::path::PathBuf {
     // Capture a real identity, then remove the path. Import must not probe its existence.
     let historical = root.join("historical-source");
     fs::create_dir(&historical).unwrap();
-    let identity = git_adapter::identify_existing(&historical).unwrap();
+    let identity = crate::path_safety::identify_existing(&historical).unwrap();
     let text = serde_json::to_string(&identity).unwrap();
     let canonical = identity.canonical_path.to_str().unwrap();
     c.execute(
@@ -41,8 +41,8 @@ pub(super) fn fixture(root: &Path) -> std::path::PathBuf {
     )
     .unwrap();
     c.execute(
-        "INSERT INTO source_roots VALUES (2,1,2,1,'.',NULL,NULL,'now')",
-        [],
+        "INSERT INTO source_roots VALUES (2,1,2,NULL,NULL,?1,?2,'now')",
+        params![canonical, text],
     )
     .unwrap();
     fs::remove_dir(historical).unwrap();

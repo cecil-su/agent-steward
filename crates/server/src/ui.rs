@@ -17,9 +17,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// Contract 4 requires effective personal/project rules in task/project context.
-// Older UIs must not silently omit these rules when handing off task context.
-pub const API_CONTRACT: u32 = 4;
+// Contract 5 uses seven independent task statuses and directory-only source metadata.
+// Older UIs must reload instead of issuing retired state or filesystem commands.
+pub const API_CONTRACT: u32 = 5;
 const FILES: [&str; 3] = ["index.html", "app.js", "style.css"];
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 // Checked-in three-file React snapshot; update via web's explicit sync:embedded step.

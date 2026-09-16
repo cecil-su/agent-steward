@@ -43,30 +43,16 @@ fn schema5_copy_preserves_all_tables_and_never_infers_pending_release() {
     let s = Service::new(&target);
     let result = s.import_schema5(&source, true).unwrap();
     assert_eq!(result.data["sourceSchema"], 5);
-    assert_eq!(result.data["targetSchema"], 7);
-    assert_eq!(result.data["tableSha256"].as_object().unwrap().len(), 14);
+    assert_eq!(result.data["targetSchema"], 8);
+    assert_eq!(result.data["tableSha256"].as_object().unwrap().len(), 13);
     assert_eq!(result.data["counts"]["project_profiles"], 1);
     let old = Connection::open(&source).unwrap();
     let new = Connection::open(&target).unwrap();
     for table in TABLES5 {
-        let sql = format!("SELECT * FROM {table} ORDER BY 1");
-        let read = |c: &Connection| {
-            let mut statement = c.prepare(&sql).unwrap();
-            let width = statement.column_count();
-            statement
-                .query_map([], |row| {
-                    (0..width)
-                        .map(|i| row.get::<_, Value>(i))
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-        };
-        assert_eq!(read(&old), read(&new), "{table}");
+        super::schema7_tests::assert_converted_table(&old, &new, table);
     }
     assert_eq!(
-        s.task_list(Some("pending_release")).unwrap().data["tasks"],
+        s.task_list(Some("in_review")).unwrap().data["tasks"],
         json!([])
     );
     assert_eq!(s.task_show("2").unwrap().data["task"]["version"], 7);

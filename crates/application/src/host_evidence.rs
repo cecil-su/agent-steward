@@ -75,8 +75,8 @@ fn assess_host_evidence_between_passes(
                             Err(_) => return Err(invalid("cannot inspect missing rule ancestor")),
                         }
                     }
-                    let identity = git_adapter::identify_existing(ancestor)
-                        .map_err(|e| AppError::from_git(e, None))?;
+                    let identity = crate::path_safety::identify_existing(ancestor)
+                        .map_err(|e| AppError::from_path(e, None))?;
                     if identity.canonical_path != ancestor {
                         return Err(invalid("missing rule path uses an alias"));
                     }
@@ -95,8 +95,8 @@ fn assess_host_evidence_between_passes(
                     }
                 }
             }
-            let identity =
-                git_adapter::identify_existing(path).map_err(|e| AppError::from_git(e, None))?;
+            let identity = crate::path_safety::identify_existing(path)
+                .map_err(|e| AppError::from_path(e, None))?;
             if identity.canonical_path != path
                 || Some(sha(
                     &serde_json::to_vec(&identity).expect("identity serializes")
@@ -117,8 +117,8 @@ fn assess_host_evidence_between_passes(
             if Some(sha(&bytes)) != rule.sha256 {
                 return Err(invalid("loaded rule bytes differ from current file"));
             }
-            git_adapter::verify_existing_identity(&identity)
-                .map_err(|e| AppError::from_git(e, None))?;
+            crate::path_safety::verify_existing_identity(&identity)
+                .map_err(|e| AppError::from_path(e, None))?;
             if pass == 0 {
                 present += 1;
                 first_pass_pins.push(identity);

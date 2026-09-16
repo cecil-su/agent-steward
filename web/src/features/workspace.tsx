@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import { Markdown } from '../components/markdown';
 import type { Task, Project, TaskContext, ProjectDetail, DetailTab, Note, Session, HistoryEntry } from '../lib/contracts';
 import { HistoryPanel, ProjectProfilePanel, SessionRulesPanel, TaskDetailPanel } from './detail-panels';
 import { Textarea } from '../components/ui/textarea';
@@ -49,24 +50,27 @@ export interface ReadonlyWorkspaceProps {
 }
 
 const views = [
-  ['active', '未关闭'],
-  ['in-progress', '进行中'],
-  ['pending-release', '待上线'],
-  ['blocked', '有阻塞'],
-  ['closed', '已关闭'],
+  ['active', '未结束'],
+  ['backlog', '暂不开始'],
+  ['todo', '等待开始'],
+  ['in-progress', '执行中'],
+  ['in-review', '待审核或验收'],
+  ['blocked', '受阻'],
+  ['done', '已完成'],
+  ['cancelled', '不再推进'],
   ['recent', '最近全部'],
 ] as const;
-const statusLabels = { open: '待处理', in_progress: '进行中', pending_release: '待上线', blocked: '受阻', closed: '已关闭' };
+const statusLabels = { backlog: '暂不开始', todo: '等待开始', in_progress: '执行中', in_review: '待审核或验收', blocked: '受阻', done: '已完成', cancelled: '不再推进' };
 
 function TaskBadge({ task }: { task: Task }) {
-  return <Badge variant={task.status === 'open' ? 'default' : task.status}>{statusLabels[task.status]}</Badge>;
+  return <Badge variant={task.status}>{statusLabels[task.status]}</Badge>;
 }
 
-function Field({ label, value }: { label: string; value: string | number | null | undefined }) {
+function Field({ label, value, markdown = false }: { label: string; value: string | number | null | undefined; markdown?: boolean }) {
   return (
     <div className="space-y-1">
       <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="m-0 whitespace-pre-wrap break-words text-sm">{value ?? '未设置'}</dd>
+      <dd className="m-0 whitespace-pre-wrap break-words text-sm">{markdown && typeof value === 'string' ? <Markdown text={value} /> : value ?? '未设置'}</dd>
     </div>
   );
 }
@@ -159,7 +163,7 @@ export function ReadonlyWorkspace(props: ReadonlyWorkspaceProps) {
                       <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">#{task.id}</Badge><TaskBadge task={task} /></div>
                       <h3 className="break-words text-xl font-semibold">{task.title || '未命名任务'}</h3>
                       <div className="flex flex-wrap gap-2" aria-label="任务详情导航">
-                        {([['overview', '概览'], ['notes', '进展备注'], ['sessions', 'Session'], ['worktree', '代码现场'], ['history', '历史']] as const).map(([value, label]) => (
+                        {([['overview', '概览'], ['notes', '进展备注'], ['sessions', 'Session'], ['history', '历史']] as const).map(([value, label]) => (
                           <Button key={value} variant={detailTab === value ? 'secondary' : 'ghost'} aria-pressed={detailTab === value} disabled={props.busy || !props.onDetailTabChange} onClick={() => props.onDetailTabChange?.(value)}>{label}</Button>
                         ))}
                         {props.onCopyContext && <Button variant="outline" disabled={props.busy} onClick={props.onCopyContext}>复制上下文</Button>}
@@ -167,12 +171,18 @@ export function ReadonlyWorkspace(props: ReadonlyWorkspaceProps) {
                       {props.copyText != null && <div className="space-y-2"><Label htmlFor={copyId}>上下文（可手工复制）</Label><Textarea id={copyId} value={props.copyText} readOnly rows={8} /></div>}
                       {detailTab === 'overview' && <dl className="m-0 space-y-4">
                         <Field label="版本" value={task.version} />
-                        <Field label="目标" value={task.goal} />
-                        <Field label="范围" value={task.scope} />
-                        <Field label="验收标准" value={task.acceptanceCriteria} />
-                        <Field label="下一步" value={task.nextStep} />
+                        <Field label="目标" value={task.goal} markdown />
+                        <Field label="范围" value={task.scope} markdown />
+                        <Field label="验收标准" value={task.acceptanceCriteria} markdown />
+                        <Field label="下一步" value={task.nextStep} markdown />
                         <Field label="项目" value={props.taskContext?.project && props.taskContext.project.id === task.projectId ? props.taskContext.project.name : task.projectId} />
                         <Field label="组件 ID" value={(task.componentIds ?? []).join('、') || '无'} />
+                        {(task.closureOutcome || task.closureReason || task.closedAt) && <div aria-label="历史关闭记录">
+                          <p className="text-xs text-muted-foreground">历史关闭记录，不代表当前状态。</p>
+                          <Field label="历史关闭结果" value={task.closureOutcome} />
+                          <Field label="历史关闭原因" value={task.closureReason} markdown />
+                          <Field label="历史关闭时间" value={task.closedAt} />
+                        </div>}
                       </dl>}
                       {task.projectId != null && props.projectManagement && props.onOpenTaskProject && <Button variant="outline" disabled={props.busy} onClick={() => props.onOpenTaskProject?.(task.projectId!)}>查看所属项目 ##{task.projectId}</Button>}
                       {detailTab === 'overview' && <><ProjectProfilePanel profile={props.taskContext?.projectProfile} /><SessionRulesPanel rules={props.taskContext?.sessionRules} /></>}
@@ -200,14 +210,15 @@ export function ReadonlyWorkspace(props: ReadonlyWorkspaceProps) {
                         {detail.components.length ? <ul className="space-y-2 pl-5">{detail.components.map((item) => <li key={item.id} className="break-words text-sm">#{item.id} · {item.name}</li>)}</ul> : <EmptyState className="px-4 py-8" title="暂无组件" />}
                       </section>
                       <section aria-label="项目源码">
-                        <h3 className="mb-3 font-semibold">源码</h3>
+                        <h3 className="mb-3 font-semibold">源码目录资料</h3>
+                        <p className="text-sm text-muted-foreground">目录仅为资料，不验证存在性、可访问性或读取文件。</p>
                         {detail.sources.length ? <ul className="list-none space-y-3 p-0">{detail.sources.map((source) => (
                           <li key={source.id} className="rounded-lg border border-border p-4">
                             <dl className="m-0 space-y-2">
                               <Field label="源码 ID" value={source.id} />
                               <Field label="组件 ID" value={source.componentId} />
-                              <Field label="仓库 ID" value={source.repositoryId} />
-                              <Field label="相对路径" value={source.relativePath} />
+                              <Field label="项目 ID" value={source.projectId} />
+                              <Field label="创建时间" value={source.createdAt} />
                               <Field label="目录路径" value={source.directoryPath} />
                             </dl>
                           </li>

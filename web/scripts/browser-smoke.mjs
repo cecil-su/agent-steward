@@ -9,7 +9,7 @@ import { checkDist } from './check-dist.mjs';
 
 // Explicit development binaries and synthetic state only. No installed binary/URL fallback.
 const binDir = process.env.STEWARD_TEST_BIN_DIR;
-const bind = process.env.STEWARD_TEST_BIND ?? '127.0.0.1';
+const bind = process.env.STEWARD_TEST_BIND ?? '172.19.10.185';
 const localAuth = process.env.STEWARD_TEST_LOCAL_AUTH === '1';
 assert(binDir && path.isAbsolute(binDir), 'Set STEWARD_TEST_BIN_DIR to an absolute development binary directory');
 assert(Object.values(os.networkInterfaces()).flat().some((entry) => entry?.family === 'IPv4' && entry.address === bind), 'Bind must be a local IPv4 address');
@@ -28,7 +28,7 @@ try {
   const uiRoot = path.join(temp, 'ui');
   const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const resources = Object.fromEntries(['index.html', 'app.js', 'style.css'].map((name) => [name, fs.readFileSync(path.join(dist, name))]));
-  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'react-smoke', requiredApiContract: 4, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
+  const manifest = Buffer.from(JSON.stringify({ packageFormat: 1, uiVersion: 'react-smoke', requiredApiContract: 5, entry: 'index.html', files: Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, sha(bytes)])) }));
   let release = sha(manifest);
   const embedded = process.env.STEWARD_TEST_UI_MODE === 'embedded';
   const releaseDir = path.join(uiRoot, 'releases', release);
@@ -48,7 +48,7 @@ try {
   current = cli('task', 'checkpoint', String(task.id), '--session', 'react-read-session', '--if-version', String(current.version), '--input', checkpointFile).task;
   cli('task', 'note', String(task.id), '--if-version', String(current.version), '--type', 'progress', '--text', '可验证的只读备注');
   current = cli('task', 'show', String(task.id)).task;
-  cli('task', 'pending-release', String(task.id), '--if-version', String(current.version));
+  cli('task', 'status', String(task.id), 'in_review', '--if-version', String(current.version));
   const baseline = cli('task', 'show', String(task.id)).task;
   const baselineHistory = cli('history', String(task.id)).history;
   const profileFile = path.join(temp, 'profile.json');
@@ -85,7 +85,7 @@ try {
   let subscriptions = 0;
   await page.route('**/api/events', async (route) => {
     subscriptions++;
-    assert.equal(route.request().headers()['x-steward-ui-contract'], '4');
+    assert.equal(route.request().headers()['x-steward-ui-contract'], '5');
     if (subscriptions === 1) await route.fulfill({ status: 503, contentType: 'application/json', body: '{"ok":false,"error":{"code":"SERVER_BUSY"}}' });
     else await route.continue();
   });
@@ -109,13 +109,13 @@ try {
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   assert.equal(await page.getByRole('button', { name: '连接', exact: true }).count(), 0, 'Refresh did not restore cookie authorization');
   await page.getByRole('link', { name: 'Agent Steward · 本地任务工作台' }).waitFor();
-  assert.deepEqual(await page.getByLabel('任务状态视图').getByRole('button').allTextContents(), ['未关闭', '进行中', '待上线', '有阻塞', '已关闭', '最近全部']);
+  assert.deepEqual(await page.getByLabel('任务状态视图').getByRole('button').allTextContents(), ['未结束', '暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进', '最近全部']);
   assert.equal(await page.getByText(/项目资料和任务由 AI|Web 仅用于检索和展示/).count(), 0);
   await page.route('**/api/tasks?**', async route => {
     if (['in-progress', 'blocked'].includes(new URL(route.request().url()).searchParams.get('view'))) await delay(800);
     await route.continue();
   });
-  for (const [width, name] of [[1360, '进行中'], [390, '有阻塞']]) {
+  for (const [width, name] of [[1360, '执行中'], [390, '受阻']]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.getByRole('button', { name: '刷新', exact: true }).waitFor();
     const anchors = [page.getByLabel('任务状态视图'), page.getByRole('heading', { name: '任务列表', exact: true }), page.getByRole('heading', { name: '任务详情', exact: true })];
@@ -126,15 +126,15 @@ try {
     await page.getByRole('button', { name: '刷新', exact: true }).waitFor();
     assert.deepEqual(await Promise.all(anchors.map(anchor => anchor.boundingBox())), before, 'Completed filtering moved workspace anchors');
     await page.screenshot({ path: path.join(artifacts, `stable-filter-${width}.png`), fullPage: true });
-    await page.getByRole('button', { name: '未关闭', exact: true }).click();
+    await page.getByRole('button', { name: '未结束', exact: true }).click();
     await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   }
   await page.unroute('**/api/tasks?**');
-  await page.getByRole('button', { name: '待上线', exact: true }).click();
+  await page.getByRole('button', { name: '待审核或验收', exact: true }).click();
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
-  assert.equal(baseline.status, 'pending_release');
-  assert(await page.getByText('待上线', { exact: true }).count() >= 2);
-  await page.getByRole('button', { name: '未关闭', exact: true }).click();
+  assert.equal(baseline.status, 'in_review');
+  assert(await page.getByText('待审核或验收', { exact: true }).count() >= 2);
+  await page.getByRole('button', { name: '未结束', exact: true }).click();
   await page.setViewportSize({ width: 1360, height: 1000 });
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).click();
   await page.getByRole('heading', { name: '未命名任务', exact: true }).waitFor();
@@ -147,8 +147,7 @@ try {
   await page.getByText('react-read-session', { exact: true }).waitFor();
   await page.getByRole('button', { name: '历史', exact: true }).click();
   await page.getByText('task.created', { exact: false }).first().waitFor();
-  await page.getByRole('button', { name: '代码现场', exact: true }).click();
-  await page.getByText('代码现场不可观察', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: '代码现场', exact: true }).count(), 0);
   await page.getByRole('button', { name: '复制上下文', exact: true }).click();
   const copied = await page.getByLabel('上下文（可手工复制）').inputValue();
   assert(copied.includes('隔离Checkpoint摘要'));
@@ -209,7 +208,7 @@ try {
   assert.deepEqual(cli('project', 'history', `##${project.id}`), projectHistoryBaseline);
   assert.equal(await page.evaluate(() => localStorage.length), 0);
   assert.equal(await page.evaluate(() => sessionStorage.length), 0);
-  console.log(JSON.stringify({ result: 'PASS', release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map((name) => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['pending-release badge and filter', 'no business controls/POST', 'desktop/390px layout', 'strict CSP', localAuth ? 'local automatic authorization/logout' : 'reader login/logout', 'refresh restores authorization without login replay', 'Checkpoint/notes/Session/history', 'fresh context copy', 'project lookup/filter', 'SSE 503 reconnect and search protection', 'UI update preserves input/cancel', 'profile/provenance in Project and Task context', 'Task/Project/Profile/History unchanged'] }, null, 2));
+  console.log(JSON.stringify({ result: 'PASS', release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map((name) => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['in-review badge and filter', 'no business controls/POST', 'desktop/390px layout', 'strict CSP', localAuth ? 'local automatic authorization/logout' : 'reader login/logout', 'refresh restores authorization without login replay', 'Checkpoint/notes/Session/history', 'fresh context copy', 'project lookup/filter', 'SSE 503 reconnect and search protection', 'UI update preserves input/cancel', 'profile/provenance in Project and Task context', 'Task/Project/Profile/History unchanged'] }, null, 2));
   succeeded = true;
 } catch (error) {
   const page = browser?.contexts()[0]?.pages()[0];

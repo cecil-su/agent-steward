@@ -34,6 +34,45 @@ fn json_output(output: &Output) -> Value {
 }
 
 #[test]
+fn closed_task_notes_use_existing_cli_and_cas() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("notes.db");
+    let db = database.to_str().unwrap();
+    let service = steward_application::Service::new(&database);
+    service.task_create_minimal().unwrap();
+    service.task_status("1", 1, "cancelled").unwrap();
+    let text = "## Closed note\n\n- **retained**";
+    let args = [
+        "--database",
+        db,
+        "--json",
+        "task",
+        "note",
+        "1",
+        "--if-version",
+        "2",
+        "--type",
+        "decision",
+        "--text",
+        text,
+    ];
+    let output = run(&args);
+    assert!(output.status.success());
+    let value = json_output(&output);
+    assert_eq!(value["data"]["task"]["status"], "cancelled");
+    assert!(value["data"]["task"]["currentSessionId"].is_null());
+    assert_eq!(value["data"]["note"]["text"], text);
+    let stale = run(&args);
+    assert!(!stale.status.success());
+    assert_eq!(json_output(&stale)["error"]["code"], "VERSION_CONFLICT");
+    let read = run(&["--database", db, "--json", "task", "notes", "1"]);
+    assert!(read.status.success());
+    let notes = json_output(&read);
+    assert_eq!(notes["data"]["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(notes["data"]["notes"][0]["text"], text);
+}
+
+#[test]
 fn help_and_version_use_json_envelopes_without_opening_database() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("must-not-exist.db");
@@ -44,7 +83,7 @@ fn help_and_version_use_json_envelopes_without_opening_database() {
         (vec!["task", "--json", "--help"], "help"),
         (vec!["task", "show", "--help", "--json"], "help"),
         (
-            vec!["project", "source", "resolve", "--json", "--help"],
+            vec!["project", "source", "list", "--json", "--help"],
             "help",
         ),
     ] {
@@ -55,7 +94,7 @@ fn help_and_version_use_json_envelopes_without_opening_database() {
         assert!(output.stderr.is_empty());
         assert!(output.stdout.ends_with(b"\n"));
         let value = json_output(&output);
-        assert_eq!(value["schemaVersion"], 2);
+        assert_eq!(value["schemaVersion"], 3);
         assert_eq!(value["ok"], true);
         assert!(!value["data"][field].as_str().unwrap().is_empty());
         assert_eq!(value["warnings"], json!([]));
@@ -99,7 +138,7 @@ fn json_cli_supports_create_claim_checkpoint_resume_and_conflict() {
     ]);
     assert!(created.status.success());
     let created = json_output(&created);
-    assert_eq!(created["schemaVersion"], 2);
+    assert_eq!(created["schemaVersion"], 3);
     assert_eq!(created["ok"], true);
     assert_eq!(created["data"]["task"]["version"], 1);
     assert!(created["error"].is_null());
@@ -230,7 +269,7 @@ fn json_cli_supports_minimal_create_stdin_and_all_task_references() {
     );
     assert!(created.status.success());
     let created = json_output(&created);
-    assert_eq!(created["schemaVersion"], 2);
+    assert_eq!(created["schemaVersion"], 3);
     assert_eq!(created["data"]["task"]["id"], 2);
     assert_eq!(created["data"]["task"]["taskKey"], "STDIN-KEY");
 
@@ -327,12 +366,11 @@ fn cli_retitle_updates_a_closed_task_without_reopening_it() {
             database_arg,
             "--json",
             "task",
-            "close",
+            "status",
             "#1",
+            "done",
             "--if-version",
             "2",
-            "--outcome",
-            "completed",
         ])
         .status
         .success()
@@ -356,7 +394,7 @@ fn cli_retitle_updates_a_closed_task_without_reopening_it() {
         retitled["data"]["task"]["title"],
         "0904｜文档｜After retitle"
     );
-    assert_eq!(retitled["data"]["task"]["status"], "closed");
+    assert_eq!(retitled["data"]["task"]["status"], "done");
     assert_eq!(retitled["data"]["task"]["version"], 4);
 
     let history = run(&["--database", database_arg, "--json", "history", "#1"]);
@@ -399,7 +437,7 @@ fn stdin_input_errors_are_stable_and_do_not_panic() {
         let output = run_with_stdin(&arguments, &input);
         assert_eq!(output.status.code(), Some(2));
         let output = json_output(&output);
-        assert_eq!(output["schemaVersion"], 2);
+        assert_eq!(output["schemaVersion"], 3);
         assert_eq!(output["error"]["code"], "INVALID_INPUT");
         assert_eq!(output["error"]["details"]["field"], "input");
         assert!(
@@ -586,13 +624,11 @@ fn task_views_and_context_support_daily_handoff_without_mutations() {
         .unwrap();
     service.task_claim("1", 1, "session-a", false).unwrap();
     service.task_create_minimal().unwrap();
-    service
-        .task_close("2", 1, "cancelled", Some("No longer needed"))
-        .unwrap();
+    service.task_status("2", 1, "cancelled").unwrap();
     let before = service.task_show("1").unwrap().data;
     for (view, count) in [
         ("active", 1),
-        ("in-progress", 1),
+        ("in-progress", 0),
         ("blocked", 0),
         ("recent", 2),
     ] {
@@ -639,8 +675,8 @@ fn task_views_and_context_support_daily_handoff_without_mutations() {
         .args(["--database", db, "--json", "task", "here"])
         .output()
         .unwrap();
-    assert!(here.status.success());
-    assert_eq!(json_output(&here)["data"]["matchedBy"], "none");
+    assert!(!here.status.success());
+    assert_eq!(json_output(&here)["error"]["code"], "INVALID_INPUT");
     assert_eq!(service.task_show("1").unwrap().data, before);
     let table = run(&["--database", db, "task", "list", "--view", "active"]);
     assert!(
@@ -779,7 +815,7 @@ fn json_parse_errors_and_doctor_keep_the_envelope_contract() {
     let invalid = run(&["--json", "not-a-command"]);
     assert_eq!(invalid.status.code(), Some(2));
     let invalid = json_output(&invalid);
-    assert_eq!(invalid["schemaVersion"], 2);
+    assert_eq!(invalid["schemaVersion"], 3);
     assert_eq!(invalid["ok"], false);
     assert!(invalid["data"].is_null());
     assert!(invalid["warnings"].as_array().unwrap().is_empty());
@@ -802,7 +838,7 @@ fn json_parse_errors_and_doctor_keep_the_envelope_contract() {
     assert!(codes.contains(&"SQLITE_QUICK_CHECK"));
     assert!(codes.contains(&"FOREIGN_KEY_CHECK"));
     assert!(codes.contains(&"RECORD_PATH_REFERENCES"));
-    assert!(codes.contains(&"WORKTREE_REFERENCES"));
+    assert!(!codes.contains(&"WORKTREE_REFERENCES"));
 }
 
 #[cfg(unix)]

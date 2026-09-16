@@ -1,8 +1,8 @@
-"""Synthetic-only Schema 2 -> 5 copy rehearsal, NOT a database migration command.
+"""Synthetic-only Schema 2 -> 8 copy rehearsal, NOT a database migration command.
 
 Usage: python crates/cli/tests/schema2_rehearsal.py OLD_TASKCTL NEW_TASKCTL
 Both binaries must be trusted builds. No source/destination DB argument is accepted.
-All database, Git and import paths are created inside one disposable sandbox.
+All database and import paths are created inside one disposable sandbox.
 Only aggregate checks and executable hashes leave the sandbox; no service is started.
 """
 
@@ -19,8 +19,14 @@ from contextlib import closing
 
 TABLES = ("tasks", "sessions", "checkpoints", "task_notes", "history",
           "session_imports", "session_events")
-NEW_TABLES = ("projects", "project_history", "components", "repositories",
-              "source_roots", "task_components", "project_profiles")
+NEW_TABLES = ("projects", "project_history", "components", "source_roots",
+              "task_components", "project_profiles", "rules", "rule_history")
+STATUS_MAP = {"open": "todo", "in_progress": "in_progress", "blocked": "blocked",
+              "pending_release": "in_review"}
+
+
+def status8(status, outcome):
+    return ("cancelled" if outcome == "cancelled" else "done") if status == "closed" else STATUS_MAP[status]
 SEQUENCES = {"tasks": "id", "task_notes": "id", "history": "id",
              "session_events": "sequence"}
 
@@ -62,11 +68,6 @@ def integrity(connection):
 def main(old, new, root):
     checks = []
     env = os.environ.copy()
-    # Isolate synthetic Git operations from user hooks, signing and configuration.
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
-    template = root / "empty-git-template"
-    template.mkdir()
-    env["GIT_TEMPLATE_DIR"] = str(template)
 
     def owned(path):
         assert path.resolve().is_relative_to(root)
@@ -137,14 +138,6 @@ def main(old, new, root):
     cli(old, source, "hook", "ingest", body=event)
     mutate(old, source, "active", "hook", "clear", "session-b")
     cli(old, source, "hook", "ingest", body={**event, "eventId": "visible-event"})
-    repo = root / "synthetic-repo"
-    subprocess.run(["git", "init", "-q", "-b", "rehearsal", str(repo)], env=env, check=True)
-    (repo / "README.md").write_text("Synthetic repository only\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "README.md"], env=env, check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Rehearsal", "-c",
-                    "user.email=rehearsal@example.invalid", "commit", "-qm", "synthetic"],
-                   env=env, check=True)
-    mutate(old, source, "active", "worktree", "adopt", "active", "--repo", repo, "--path", repo)
     # Fixture-only metadata: reserve IDs above the present maximum to model historical deletions.
     with closing(sqlite3.connect(source)) as c:
         for table in SEQUENCES:
@@ -172,10 +165,19 @@ def main(old, new, root):
         assert result.returncode == 0 and value["data"]["verified"]
         assert value["data"]["externalPathsObserved"] is False
         with closing(readonly(snapshot)) as src, closing(readonly(destination)) as dst:
-            assert dst.execute("PRAGMA user_version").fetchone() == (7,)
+            assert dst.execute("PRAGMA user_version").fetchone() == (8,)
             assert {r[1] for r in schema(dst) if r[0] == "table"} == set(TABLES + NEW_TABLES)
             for table in TABLES:
-                assert rows(src, table) == rows(dst, table, columns(src, table))
+                fields = [f for f in columns(src, table) if f in columns(dst, table)]
+                expected = rows(src, table, fields)
+                if table == "tasks":
+                    mapped = []
+                    for row in expected:
+                        values = dict(zip(fields, row))
+                        values["status"] = status8(values["status"], values["closure_outcome"])
+                        mapped.append(tuple(values[f] for f in fields))
+                    expected = mapped
+                assert expected == rows(dst, table, fields)
             assert rows(src, "sqlite_sequence") == rows(dst, "sqlite_sequence")
             for table in NEW_TABLES:
                 assert rows(dst, table) == []
@@ -203,30 +205,32 @@ def main(old, new, root):
         shutil.copyfile(source, main_only)
         with closing(readonly(main_only)) as partial, closing(readonly(snapshot)) as complete:
             assert rows(partial, "task_notes") != rows(complete, "task_notes")
-        target = root / "migrated-private" / "schema7.db"
+        target = root / "migrated-private" / "schema8.db"
         copy_rows(snapshot, target)
         assert digest(source) == main_hash and digest(wal) == wal_hash
         checks += ["WAL-inclusive snapshot; main-only copy demonstrably incomplete",
                    "source main/WAL bytes unchanged during snapshot and copy",
-                   "seven tables, BLOB/JSON, IDs, versions, timestamps and four high-water marks preserved",
-                   "six new tables empty; project_id NULL; integrity and foreign keys valid"]
+                   "retained fields, BLOB/JSON, IDs, versions, timestamps and four high-water marks preserved; statuses mapped",
+                   "eight new tables empty; project_id NULL; integrity and foreign keys valid"]
 
     baseline_hash = digest(snapshot)
     for key in ("minimal", "active", "blocked", "closed"):
         before = task(old, snapshot, key)
         after = task(new, target, key)
-        assert before == {k: v for k, v in after.items() if k in before}
+        expected = {k: v for k, v in before.items() if k in after}
+        expected["status"] = status8(before["status"], before["closureOutcome"])
+        assert expected == {k: v for k, v in after.items() if k in before}
         assert after["projectId"] is None and after["componentIds"] == []
         assert cli(old, snapshot, "history", key) == cli(new, target, "history", key)
         cli(new, target, "task", "context", key)
         cli(new, target, "task", "notes", key)
     context = cli(new, target, "task", "context", "active")
     assert context["notesSinceCheckpoint"][-1]["text"] == "Synthetic WAL-only note after checkpoint"
-    assert context["worktreeStatus"] is not None
+    assert "worktreeStatus" not in context
     assert cli(old, snapshot, "session", "list") == cli(new, target, "session", "list")
     assert cli(old, snapshot, "session", "import", "list", "session-b") == cli(new, target, "session", "import", "list", "session-b")
     cli(new, target, "doctor")
-    checks.append("public Task/History/Session/Import/context readers and live Worktree observation")
+    checks.append("public Task/History/Session/Import/context readers; no filesystem observation")
 
     duplicate = cli(new, target, "hook", "ingest", body=event)
     assert duplicate["duplicate"] and duplicate["deleted"]
@@ -238,11 +242,11 @@ def main(old, new, root):
     active = task(new, target, "active")
     project = cli(new, target, "project", "create", "--name", "Synthetic project")["project"]
     cli(new, target, "task", "project", "active", "--project", "##" + str(project["id"]),
-        "--if-version", active["version"])
+        "--if-version", active["version"], "--reason", "synthetic rehearsal")
     changed = task(new, target, "active")
-    for field in ("status", "currentSessionId", "worktreePath", "latestCheckpointId"):
+    for field in ("status", "currentSessionId", "latestCheckpointId"):
         assert active[field] == changed[field]
-    cli(new, target, "task", "project", "active", "--clear", "--if-version", active["version"],
+    cli(new, target, "task", "project", "active", "--clear", "--if-version", active["version"], "--reason", "synthetic stale CAS",
         error="VERSION_CONFLICT")
     with closing(readonly(snapshot)) as c:
         highwater = dict(rows(c, "sqlite_sequence"))
@@ -260,7 +264,7 @@ def main(old, new, root):
     assert digest(target) == rejected_hash
     cli(new, snapshot, "task", "create", body={}, error="UNSUPPORTED_SCHEMA_VERSION")
     assert digest(snapshot) == baseline_hash
-    checks.append("old CLI rejects Schema7 and new CLI rejects Schema2 without implicit upgrade")
+    checks.append("old CLI rejects Schema8 and new CLI rejects Schema2 without implicit upgrade")
 
     for version_number in (0, 1, 3, 4):
         wrong = root / f"wrong-{version_number}.db"

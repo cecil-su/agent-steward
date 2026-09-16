@@ -1,4 +1,4 @@
-export type TaskStatus = 'open' | 'in_progress' | 'pending_release' | 'blocked' | 'closed';
+export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done' | 'cancelled';
 export interface Task {
   id: number;
   title: string | null;
@@ -10,6 +10,9 @@ export interface Task {
   nextStep: string | null;
   projectId?: number | null;
   componentIds?: number[];
+  closureOutcome?: string | null;
+  closureReason?: string | null;
+  closedAt?: string | null;
 }
 export interface Project {
   id: number;
@@ -31,13 +34,13 @@ export interface Note { id: number; noteType: string; text: string; createdAt: s
 export interface Session { id: string; source?: string | null; externalSessionId?: string | null; continuedFrom?: string | null; recordPath?: string | null; startedAt: string; endedAt?: string | null }
 export interface HistoryEntry { sequence?: number; revision?: number; changeType: string; occurredAt: string; summary?: string; payload?: unknown }
 export interface ProjectHistoryPage { history: HistoryEntry[]; hasMore: boolean; nextAfter: number | null }
-export type DetailTab = 'overview' | 'notes' | 'sessions' | 'worktree' | 'history';
+export type DetailTab = 'overview' | 'notes' | 'sessions' | 'history';
 export interface SessionRule {
   id: number; scope: 'global' | 'project'; projectId: number | null; revision: number; contentVersion: 1;
   content: { name: string; body: string; sources: { kind: 'explicit' | 'inferred'; evidence: string; taskId: number | null; taskVersion: number | null }[] };
 }
 export interface SessionRules { formatVersion: 1; rules: SessionRule[] }
-export interface TaskContext { sessionRules?: SessionRules; task: Task; project?: Project | null; projectProfile?: ProjectProfile | null; checkpoint?: Checkpoint | null; notesSinceCheckpoint?: Note[]; notesTruncated?: boolean; session?: Session | null; worktreeStatus?: unknown }
+export interface TaskContext { sessionRules?: SessionRules; task: Task; project?: Project | null; projectProfile?: ProjectProfile | null; checkpoint?: Checkpoint | null; notesSinceCheckpoint?: Note[]; notesTruncated?: boolean; session?: Session | null }
 export interface Component { id: number; name: string }
-export interface Source { id: number; componentId: number | null; repositoryId: number | null; relativePath: string | null; directoryPath: string | null }
+export interface Source { id: number; projectId: number; componentId: number | null; directoryPath: string; createdAt: string }
 export interface ProjectDetail { sessionRules?: SessionRules; project: Project; profile?: ProjectProfile | null; components: Component[]; sources: Source[] }

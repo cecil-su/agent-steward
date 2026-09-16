@@ -88,18 +88,28 @@ impl Service {
             ));
         }
         let destination = self.database_path();
-        if !source.is_absolute() || !destination.is_absolute() {
-            return Err(AppError::invalid(
-                "database",
-                "source and destination must be absolute paths",
-            ));
-        }
+        schema2::local_file_path(source)?;
+        schema2::local_file_path(destination)?;
         require_unused_destination(destination)?;
-        if !source.is_file() {
+        if !fs::symlink_metadata(source)
+            .map_err(io_error)?
+            .file_type()
+            .is_file()
+        {
             return Err(refused("expected an existing regular database file"));
         }
-        let mut old = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let source_identity = crate::path_safety::identify_existing(source)
+            .map_err(|e| AppError::from_path(e, None))?;
+        schema2::local_file_path(&source_identity.canonical_path)?;
+        schema2::require_regular_source_sidecars(&source_identity)?;
+        let mut old = Connection::open_with_flags(
+            &source_identity.canonical_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(AppError::from_sqlite)?;
+        old.pragma_update(None, "trusted_schema", false)
             .map_err(AppError::from_sqlite)?;
+        let before = schema2::data_version(&old)?;
         old.busy_timeout(Duration::from_secs(5))
             .map_err(AppError::from_sqlite)?;
         old.pragma_update(None, "query_only", true)
@@ -136,7 +146,17 @@ impl Service {
                 "expected the complete legacy v1 through v7 migration chain",
             ));
         }
-        integrity(&snapshot)?;
+        schema2::integrity(&snapshot)?;
+        if snapshot
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_imports WHERE length(content)>16777216)",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(AppError::from_sqlite)?
+        {
+            return Err(refused("session import exceeds the supported size"));
+        }
         let unsupported: bool = snapshot.query_row(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE status!='closed' OR current_session_id IS NOT NULL
              OR repository_path IS NOT NULL OR repository_common_dir IS NOT NULL OR repository_branch IS NOT NULL
@@ -172,12 +192,22 @@ impl Service {
         })?;
         // The operator supplies a dedicated parent. Never chmod an existing shared directory.
         if !parent.try_exists().map_err(io_error)? {
-            fs::create_dir_all(parent).map_err(io_error)?;
+            fs::create_dir(parent).map_err(io_error)?;
             steward_core::set_private_dir(parent).map_err(io_error)?;
         }
+        schema2::private_parent(parent)?;
+        let parent_identity = crate::path_safety::identify_existing(parent)
+            .map_err(|e| AppError::from_path(e, None))?;
+        let destination = parent_identity.canonical_path.join(
+            destination
+                .file_name()
+                .ok_or_else(|| refused("missing destination filename"))?,
+        );
+        schema2::local_file_path(&destination)?;
+        require_unused_destination(&destination)?;
         let staging = tempfile::Builder::new()
             .prefix(".import-v7-")
-            .tempdir_in(parent)
+            .tempdir_in(&parent_identity.canonical_path)
             .map_err(io_error)?;
         steward_core::set_private_dir(staging.path()).map_err(io_error)?;
         let staged_path = staging.path().join("steward.db");
@@ -194,14 +224,26 @@ impl Service {
                 // Legacy archives have no project membership. Keep the new FK NULL;
                 // never infer it from old task descriptions or repository paths.
                 fields.retain(|c| c != "project_id");
-                old_fields.retain(|c| c != "worktree_path_key");
+                old_fields.retain(|c| c != "worktree_path_key" && !schema2::retired_task_field(c));
             }
             if old_fields != fields {
                 return Err(refused(
                     "legacy table columns do not match the supported v7 layout",
                 ));
             }
-            let select = format!("SELECT {} FROM {table} ORDER BY id", fields.join(","));
+            let projection = fields
+                .iter()
+                .map(|f| {
+                    if table == "tasks" && f == "status" {
+                        schema2::STATUS_PROJECTION
+                    } else {
+                        f.as_str()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let select = format!("SELECT {projection} FROM {table} ORDER BY id");
+            let target_select = format!("SELECT {} FROM {table} ORDER BY id", fields.join(","));
             let insert = format!(
                 "INSERT INTO {table} ({}) VALUES ({})",
                 fields.join(","),
@@ -223,7 +265,7 @@ impl Service {
             }
             drop(rows);
             // Compare every field and BLOB, not merely row counts, within the same snapshots.
-            let mut check = tx.prepare(&select).map_err(AppError::from_sqlite)?;
+            let mut check = tx.prepare(&target_select).map_err(AppError::from_sqlite)?;
             let mut copied = check.query([]).map_err(AppError::from_sqlite)?;
             let mut original = read.query([]).map_err(AppError::from_sqlite)?;
             loop {
@@ -275,10 +317,10 @@ impl Service {
                 .map_err(AppError::from_sqlite)?;
             }
         }
+        schema2::validate_records(&tx, false)?;
         integrity(&tx)?;
         tx.commit().map_err(AppError::from_sqlite)?;
         // Exercise public readers before publishing; corrupt persisted JSON must not be hidden.
-        let staged_service = Service::new(&staged_path);
         let ids = current
             .prepare("SELECT id FROM tasks ORDER BY id")
             .map_err(AppError::from_sqlite)?
@@ -286,10 +328,6 @@ impl Service {
             .map_err(AppError::from_sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::from_sqlite)?;
-        for id in &ids {
-            staged_service.task_context(&id.to_string())?;
-            staged_service.history(&id.to_string())?;
-        }
         // Publish one self-contained database, without WAL dependencies. hard_link is atomic
         // and fails if destination appeared concurrently. Never overwrite or truncate it.
         let mode: String = current
@@ -307,12 +345,23 @@ impl Service {
             .map_err(io_error)?;
         // A sidecar may have appeared during the copy. Never publish over it:
         // SQLite could replay unrelated WAL/journal pages into the imported archive.
-        require_unused_destination(destination)?;
-        fs::hard_link(&staged_path, destination).map_err(io_error)?;
+        snapshot.commit().map_err(AppError::from_sqlite)?;
+        if schema2::data_version(&old)? != before {
+            return Err(refused(
+                "source changed during copy; stop writers and take a new snapshot",
+            ));
+        }
+        crate::path_safety::verify_existing_identity(&source_identity)
+            .map_err(|e| AppError::from_path(e, None))?;
+        crate::path_safety::verify_existing_identity(&parent_identity)
+            .map_err(|e| AppError::from_path(e, None))?;
+        schema2::private_parent(&parent_identity.canonical_path)?;
+        require_unused_destination(&destination)?;
+        fs::hard_link(&staged_path, &destination).map_err(io_error)?;
         Ok(Outcome::new(json!({
             "source":source,"destination":destination,"sourceSchema":7,"targetSchema":storage_sqlite::SCHEMA_VERSION,
             "counts":counts,"taskIds":ids,"verified":true,"sourceUnchanged":true,
-            "omittedLegacyFields":["schema_migrations", "tasks.worktree_path_key"],
+            "omittedLegacyFields":["schema_migrations", "tasks.worktree_path_key", "tasks.repository_path", "tasks.repository_common_dir", "tasks.repository_branch", "tasks.worktree_path"],
             "note":"No Task versions or History events were changed; no session_events existed in this archive."
         })))
     }

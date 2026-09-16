@@ -51,6 +51,42 @@ async fn request(
 }
 
 #[tokio::test]
+async fn closed_task_notes_use_existing_command_and_cas() {
+    let (_temp, s, app) = fixture();
+    s.task_status("1", 1, "cancelled").unwrap();
+    let before = s.task_show("1").unwrap().data["task"].clone();
+    let text = "## Closed note\n\n- **retained**";
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/commands/task-note",
+        Some(json!({"taskId":1,"expectedVersion":2,"noteType":"progress","text":text})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["task"]["status"], "cancelled");
+    assert_eq!(
+        body["data"]["task"]["closureOutcome"],
+        before["closureOutcome"]
+    );
+    assert_eq!(body["data"]["task"]["closedAt"], before["closedAt"]);
+    assert!(body["data"]["note"]["sessionId"].is_null());
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/commands/task-note",
+        Some(json!({"taskId":1,"expectedVersion":2,"noteType":"progress","text":"stale"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "VERSION_CONFLICT");
+    let (status, body) = request(&app, "GET", "/api/tasks/1/notes", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(body["data"]["notes"][0]["text"], text);
+}
+
+#[tokio::test]
 async fn project_task_filter_and_context_keep_project_isolation() {
     let (_temp, service, app) = fixture();
     service.project_create("Mailroom").unwrap();
@@ -75,7 +111,7 @@ async fn project_task_filter_and_context_keep_project_isolation() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["project"]["name"], "Mailroom");
     assert!(body["data"]["session"].is_null());
-    assert!(body["data"]["worktreeStatus"].is_null());
+    assert!(body["data"].get("worktreeStatus").is_none());
     assert_eq!(service.history("1").unwrap().data, before);
 }
 
@@ -136,12 +172,10 @@ async fn task_search_accepts_encoded_number_and_preserves_the_selected_view() {
         assert_eq!(body["data"]["tasks"][0]["id"], 1);
     }
     assert_eq!(service.history("1").unwrap().data, before);
-    service
-        .task_close("1", 1, "cancelled", Some("synthetic search fixture"))
-        .unwrap();
+    service.task_status("1", 1, "cancelled").unwrap();
     let (_, active) = request(&app, "GET", "/api/tasks?query=%231&view=active", None).await;
     assert!(active["data"]["tasks"].as_array().unwrap().is_empty());
-    let (_, closed) = request(&app, "GET", "/api/tasks?query=%231&status=closed", None).await;
+    let (_, closed) = request(&app, "GET", "/api/tasks?query=%231&status=cancelled", None).await;
     assert_eq!(closed["data"]["tasks"][0]["id"], 1);
 }
 
@@ -546,7 +580,7 @@ async fn authentication_origin_and_csrf_fail_before_storage_changes() {
         );
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
-        assert_eq!(body["schemaVersion"], 2);
+        assert_eq!(body["schemaVersion"], 3);
         assert_eq!(body["ok"], false);
     }
     assert_eq!(
@@ -596,12 +630,12 @@ async fn strict_dto_body_limits_and_confirmation_are_enforced() {
             json!({"input":{},"unexpected":"secret-do-not-echo"}),
         ),
         (
-            "/api/commands/task-close",
-            json!({"taskId":1,"expectedVersion":1,"outcome":"cancelled","reason":"test","confirmed":false}),
+            "/api/commands/session-close",
+            json!({"sessionId":"none","expectedVersion":1,"confirmed":false}),
         ),
         (
-            "/api/commands/worktree-create",
-            json!({"taskId":1,"expectedVersion":1,"repo":"relative","path":"relative","branch":"main","confirmed":true}),
+            "/api/commands/project-source-add",
+            json!({"projectId":1,"expectedRevision":1,"location":{"kind":"directory","path":"relative"}}),
         ),
         (
             "/api/commands/session-import-add",

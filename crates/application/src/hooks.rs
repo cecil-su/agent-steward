@@ -4,7 +4,6 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use steward_core::TaskStatus;
 use storage_sqlite::now;
 
 use crate::db::{bump_task, check_version, insert_history, load_session, load_task};
@@ -59,7 +58,7 @@ impl Service {
         let session = load_session(&tx, session_id)?;
         let task = load_task(&tx, session.task_id)?;
         check_version(&task, expected)?;
-        if task.status == TaskStatus::Closed || session.ended_at.is_some() {
+        if session.ended_at.is_some() {
             return Err(AppError::constraint("session.bind.closed"));
         }
         if session.source.as_deref() == Some(source)
