@@ -28,6 +28,14 @@ function fixture(admin = false, pathname = '/') {
   const api = new Function('document', 'fetch', code)(document, transport);
   return { ...api, transport, writes: () => transport.mock.calls.filter(([, o]) => o.method === 'POST'), outcome: (value: string) => { outcome = value; } };
 }
+it('omits decorative task and board headings without leaving empty heading containers', () => {
+  fixture();
+  const page = document.querySelector('#task-page')!;
+  for (const text of ['WORKSPACE / 任务', '把进展留在这里。', '找到任务，了解当前进展，继续下一步。', '任务看板', '拖拽卡片，更新任务状态']) {
+    expect(page).not.toHaveTextContent(text);
+  }
+  expect(page.querySelector('.page-heading, .board-heading')).toBeNull();
+});
 it('initializes the full-page dashboard from its route and uses real route links', async () => {
   const f = fixture(false, '/dashboard'); await f.loadList();
   expect(document.body).toHaveClass('dashboard-page');
@@ -73,7 +81,23 @@ it('sends only the captured version and target status with CSRF/contract headers
   expect(options.headers).toMatchObject({ 'X-Steward-CSRF': '1', 'X-Steward-UI-Contract': '5' });
   expect(document.querySelector('[data-status="done"]')).toHaveTextContent('合成看板卡片');
   expect(document.querySelector('[data-status="todo"] .task-card')).toBeNull();
+  expect(document.querySelector('#notice')).not.toHaveTextContent('已修改状态；Session 保持不变。');
+  expect(document.querySelector('#notice')).toHaveAttribute('hidden');
   await expect(f.api('/api/commands/task-create', {})).rejects.toThrow('当前界面只读');
+});
+it('still warns when a saved status cannot be refreshed', async () => {
+  const f = fixture(true); await f.changeLayout('board');
+  const base = f.transport.getMockImplementation(); let saved = false;
+  f.transport.mockImplementation(async (path: string, options: RequestInit) => {
+    if (saved && options.method === 'GET') throw new Error('synthetic refresh failure');
+    const response = await base(path, options);
+    if (options.method === 'POST') saved = true;
+    return response;
+  });
+  await f.moveStatus(f.getTask(), 'done');
+  expect(f.writes()).toHaveLength(1);
+  expect(document.querySelector('#notice')).toHaveTextContent('状态已修改，但刷新失败');
+  expect(document.querySelector('#notice')).not.toHaveAttribute('hidden');
 });
 it.each(['conflict', 'uncertain'])('holds the original card after %s until an explicit read, with no retry', async outcome => {
   const f = fixture(true); await f.changeLayout('board'); const original = f.getTask();

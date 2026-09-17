@@ -51,10 +51,10 @@ async fn request(
 }
 
 #[tokio::test]
-async fn dashboard_route_serves_the_same_ui_shell_and_security_headers() {
+async fn workspace_routes_serve_the_same_ui_shell_and_security_headers() {
     let (_temp, _service, app) = fixture();
     let mut pages = Vec::new();
-    for path in ["/", "/dashboard"] {
+    for path in ["/", "/dashboard", "/credentials"] {
         let response = app
             .clone()
             .oneshot(

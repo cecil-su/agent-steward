@@ -1,4 +1,5 @@
 //! Same-origin HTTP transport. Authentication is checked before extracting bodies.
+mod access_requests;
 mod browser_auth;
 mod events;
 mod projects;
@@ -195,6 +196,7 @@ pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/", get(ui::index))
         .route("/dashboard", get(ui::index))
+        .route("/credentials", get(ui::index))
         .route("/ui/status", get(ui::status))
         .route("/ui/releases/{id}/{name}", get(ui::asset))
         .route("/app.js", get(script))
@@ -202,6 +204,19 @@ pub fn router(state: ServerState) -> Router {
         .route("/favicon.ico", get(favicon))
         .route("/api/connect", post(connect))
         .route("/api/access", get(access))
+        .route(
+            "/api/access-request",
+            get(access_requests::status).post(access_requests::request),
+        )
+        .route("/api/access-requests", get(access_requests::list))
+        .route(
+            "/api/access-requests/{id}/approve",
+            post(access_requests::approve),
+        )
+        .route(
+            "/api/access-requests/{id}/revoke",
+            post(access_requests::revoke),
+        )
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/browser-sessions/revoke", post(revoke_browsers))
@@ -264,6 +279,10 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
         .get("sec-fetch-site")
         .is_none_or(|v| v == "same-origin" || v == "none");
     let api = request.uri().path().starts_with("/api/");
+    let access_request = request.uri().path() == "/api/access-request"
+        && matches!(*request.method(), Method::GET | Method::HEAD | Method::POST);
+    let access_management = request.uri().path() == "/api/access-requests"
+        || request.uri().path().starts_with("/api/access-requests/");
     // Use one authorization snapshot; concurrent revocation must not turn a reader
     // into an unclassified request between authentication and the write gate.
     let role = if api && host_ok && origin_ok && fetch_ok {
@@ -285,7 +304,7 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
             "request host or origin is not permitted",
         )
     } else if api
-        && (local || headers.contains_key("cookie"))
+        && (local || headers.contains_key("cookie") || access_request || access_management)
         && !matches!(*request.method(), Method::GET | Method::HEAD)
         && (headers.get_all("x-steward-csrf").iter().count() != 1
             || headers.get("x-steward-csrf").is_none_or(|v| v != "1")
@@ -299,6 +318,7 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
     } else if api
         // The exchange endpoint authenticates with a short-lived one-use credential
         // in its handler. It never grants access based on the caller's IP.
+        && !access_request
         && !(matches!(request.uri().path(), "/api/connect" | "/api/logout") && request.method() == Method::POST)
         && role.is_none()
     {
@@ -306,6 +326,12 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "connect using this Daemon's credential",
+        )
+    } else if access_management && role != Some("admin") {
+        failure(
+            StatusCode::FORBIDDEN,
+            "ADMIN_REQUIRED",
+            "only administrators can manage browser access",
         )
     } else if api
         && headers.contains_key("x-steward-ui-contract")
@@ -321,6 +347,7 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
         )
     } else if api
         && role == Some("reader")
+        && !access_request
         && !matches!(*request.method(), Method::GET | Method::HEAD)
         && !matches!(
             request.uri().path(),
@@ -345,12 +372,19 @@ async fn boundary(State(state): State<ServerState>, mut request: Request, next: 
             "application/json is required",
         )
     } else {
-        let limit = if request.uri().path() == "/api/hook" {
+        let limit = if access_request || access_management {
+            4096
+        } else if request.uri().path() == "/api/hook" {
             16 * 1024
         } else {
             1024 * 1024
         };
         // Bound both body size and slow body uploads before handlers touch storage.
+        let peer = request
+            .extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| info.0.ip());
+        request.extensions_mut().insert(access_requests::Peer(peer));
         request.extensions_mut().insert(Access { role, local });
         let (parts, body) = request.into_parts();
         match tokio::time::timeout(std::time::Duration::from_secs(10), to_bytes(body, limit)).await
@@ -574,8 +608,11 @@ fn revoke_browsers_blocking(state: ServerState) -> Response {
     browser_result(&state, None, None)
 }
 
-async fn access(Extension(access): Extension<Access>) -> Response {
-    Json(json!({"schemaVersion":3,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true,"sessionRules":true},"warnings":[],"error":null})).into_response()
+async fn access(
+    State(state): State<ServerState>,
+    Extension(access): Extension<Access>,
+) -> Response {
+    Json(json!({"schemaVersion":3,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true,"sessionRules":true,"accessApproval":state.readonly_token.is_some()},"warnings":[],"error":null})).into_response()
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {

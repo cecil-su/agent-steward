@@ -1,4 +1,4 @@
-// Native readonly candidate only. Never uses an installed URL or the default database.
+// Native candidate with synthetic data only. Never uses an installed URL or the default database.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -91,18 +91,26 @@ try {
   browser = await chromium.launch({ headless: true, channel: process.env.STEWARD_BROWSER_CHANNEL === 'chromium' ? undefined : process.env.STEWARD_BROWSER_CHANNEL ?? 'chrome' });
   const context = await browser.newContext({ viewport: { width: 1360, height: 1000 } });
   const page = await context.newPage(), errors = [], posts = [];
-  let allowBoardWrites = false;
+  let allowBoardWrites = false, allowAccessWrites = false;
   page.on('pageerror', e => errors.push(e.message));
   page.on('request', request => { if (request.method() !== 'GET') posts.push(new URL(request.url()).pathname); });
   await page.addInitScript(() => { window.__csp = []; document.addEventListener('securitypolicyviolation', e => window.__csp.push(e.violatedDirective)); });
   await page.route('**/api/**', async route => {
     const request = route.request(), pathname = new URL(request.url()).pathname;
-    if (request.method() !== 'GET') { if (!['/api/login', '/api/logout'].includes(pathname) && !(allowBoardWrites && pathname === '/api/commands/task-status')) { await route.abort(); return; } }
+    if (request.method() !== 'GET') { if (!['/api/login', '/api/logout'].includes(pathname) && !(allowBoardWrites && pathname === '/api/commands/task-status') && !(allowAccessWrites && /^\/api\/access-requests\/[a-f0-9]{64}\/(approve|revoke)$/.test(pathname))) { await route.abort(); return; } }
     await route.continue();
   });
   const token = fs.readFileSync(path.join(path.dirname(credentialPath), 'readonly-credential'), 'utf8').trim();
   await page.goto(url);
-  try { await page.getByLabel('本次服务的连接凭据').fill(token); await page.getByRole('button', { name: '连接工作台' }).click(); await page.locator('#workspace').waitFor({ state: 'visible' }); }
+  // Seed legacy credentials only through the API; the native visitor UI has no credential input.
+  const loginCredential = async value => {
+    await page.evaluate(async token => {
+      const response = await fetch('/api/login', {method:'POST',headers:{'Content-Type':'application/json','X-Steward-Token':token,'X-Steward-CSRF':'1'},body:'{}'});
+      if(!response.ok)throw new Error('Synthetic login failed (credential omitted)');
+    }, value);
+    await page.reload(); await page.locator('#workspace').waitFor({state:'visible'});
+  };
+  try { await loginCredential(token); }
   catch { await page.screenshot({ path: path.join(artifacts, 'login-failure.png') }); console.error('Login diagnostic:', await page.locator('#login-error').textContent({ timeout: 1000 }).catch(() => 'Application login page unavailable'), errors); throw Error('Synthetic reader login failed (credential omitted)'); }
   assert.deepEqual(await page.locator('[data-view]').allTextContents(), ['暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进']);
   assert.equal(await page.locator('[data-view="in-progress"]').getAttribute('aria-pressed'), 'true');
@@ -251,7 +259,7 @@ try {
   await page.locator('#logout').click(); await page.locator('#login').waitFor({ state: 'visible' });
   // Existing list/project controls stay readonly even for admins.
   const admin = fs.readFileSync(credentialPath, 'utf8').trim();
-  try { await page.getByLabel('本次服务的连接凭据').fill(admin); await page.getByRole('button', { name: '连接工作台' }).click(); await page.locator('#workspace').waitFor({ state: 'visible' }); }
+  try { await loginCredential(admin); }
   catch { throw Error('Synthetic admin login failed (credential omitted)'); }
   assert.equal(await page.locator('#create').isVisible(), false); await project(p.name);
   assert.equal(await page.getByRole('button', { name: '修改项目名称', exact: true }).isVisible().catch(() => false), false);
@@ -260,7 +268,7 @@ try {
   assert.equal(snapshot(), baseline, 'Readonly browsing changed synthetic database tables');
   // Reader board has seven columns and no draggable cards or write capability.
   await page.locator('#login').waitFor({ state: 'visible' }); await page.reload();
-  await page.getByLabel('本次服务的连接凭据').fill(token); await page.getByRole('button', { name: '连接工作台' }).click();
+  await loginCredential(token);
   await page.locator('#workspace').waitFor({ state: 'visible' }); await page.locator('#board-mode').click();
   assert.equal(new URL(page.url()).pathname, '/dashboard');
   await page.reload();
@@ -273,7 +281,7 @@ try {
   assert.equal(snapshot(), baseline, 'Reader board changed database');
   await page.locator('#logout').click();
   await page.locator('#login').waitFor({ state: 'visible' }); await page.reload();
-  await page.getByLabel('本次服务的连接凭据').fill(admin); await page.getByRole('button', { name: '连接工作台' }).click();
+  await loginCredential(admin);
   await page.locator('#workspace').waitFor({ state: 'visible' });
   await page.locator('#board-mode').click();
   const beforeMove = cli('task', 'show', String(noProject.id)).task;
@@ -336,8 +344,41 @@ try {
   await page.locator('#list-mode').click();assert.equal(new URL(page.url()).pathname, '/');
   await page.goBack();await page.locator('.kanban-column').first().waitFor();
   assert.equal(new URL(page.url()).pathname, '/dashboard');
+  // Real approval flow: separate browser cookie jar, admin confirmation, live revocation.
+  allowAccessWrites = true;
+  const approvalBaseline = snapshot();
+  await page.goto(url + '/credentials'); await page.locator('#access-page').waitFor({state:'visible'});
+  const visitorContext = await browser.newContext(); const visitor = await visitorContext.newPage();
+  visitor.on('pageerror', e => errors.push(e.message));
+  await visitor.goto(url); await visitor.locator('#request-access:not([disabled])').waitFor();
+  assert.equal(await visitor.locator('#login input').count(), 0);
+  await visitor.locator('#request-access').click();
+  await visitor.locator('#access-verification').waitFor({state:'visible'});
+  const verification = await visitor.locator('#access-verification-code').textContent();
+  await visitor.reload(); await visitor.locator('#access-verification').waitFor({state:'visible'});
+  assert.equal(await visitor.locator('#access-verification-code').textContent(),verification,'Reload must restore the same pending request');
+  await page.locator('#access-review-dialog').waitFor({state:'visible'});
+  assert((await page.locator('#access-review-details').textContent()).includes(verification));
+  await page.locator('#access-approve').click();
+  await visitor.locator('#workspace').waitFor({state:'visible'});
+  assert.equal(await visitor.locator('#credentials-mode').isVisible(), false);
+  assert.equal(await visitor.locator('#access-role').textContent(), '只读');
+  await visitor.reload(); await visitor.locator('#workspace').waitFor({state:'visible'});
+  const grant = page.locator('#access-grants .info-box').filter({hasText: '来源 IP：' + bind});
+  await grant.getByRole('button', {name:'撤销授权'}).waitFor();
+  for(const width of [1360,390]){await page.setViewportSize({width,height:900});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:path.join(artifacts,`access-${width}.png`),fullPage:true});}
+  page.once('dialog', dialog => dialog.accept()); await grant.getByRole('button', {name:'撤销授权'}).click();
+  await visitor.locator('#login').waitFor({state:'visible'});
+  await visitor.getByText('申请被拒绝或授权已撤销，请重新申请。', {exact:true}).waitFor();
+  assert.equal((await visitorContext.request.get(url+'/api/tasks')).status(),401);
+  await visitor.locator('#request-access').click();
+  await page.locator('#access-review-dialog').waitFor({state:'visible'});
+  await page.locator('#access-reject').click();
+  await visitor.getByText('申请被拒绝或授权已撤销，请重新申请。', {exact:true}).waitFor();
+  assert.equal(snapshot(),approvalBaseline,'Access approvals changed business tables');
+  await visitorContext.close();
   assert.deepEqual(errors, []);
-  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['numeric and hash-prefixed task search', 'contract5 and in-review status', 'full rules/source copy and missing-rule copy rejection', 'full profile/provenance', 'compact task project', 'component scope', 'source directory documentation without filesystem queries', 'cancelled task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'readonly browsing preserves all SQLite tables', 'reader board non-draggable', 'seven-column pagination', 'admin drag with CAS and unchanged Session', 'version conflict holds card without retry', 'board responsive layout'] };
+  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['numeric and hash-prefixed task search', 'contract5 and in-review status', 'full rules/source copy and missing-rule copy rejection', 'full profile/provenance', 'compact task project', 'component scope', 'source directory documentation without filesystem queries', 'cancelled task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'readonly browsing preserves all SQLite tables', 'reader board non-draggable', 'seven-column pagination', 'admin drag with CAS and unchanged Session', 'version conflict holds card without retry', 'board responsive layout', 'browser-specific approval without credential inputs', 'admin approval popup, readonly grant and live revocation', 'rejected browser cannot access task APIs'] };
   fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2)); success = true;
 } catch (error) {
   const failedPage = browser?.contexts()[0]?.pages()[0];

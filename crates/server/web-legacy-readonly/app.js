@@ -76,7 +76,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   let projectsSupported=false,projectPageVisible=false,projectFilter='',projectFilterRevision=0,projectRows=[],projectListLoaded=false,projectCursor=null,projectListRevision=0,projectDetailRevision=0,projectContext=null,selectedProject=null;
   let pendingWrites=0, uncertainWrite=false, modalEpoch=0;
   let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
-  let layout=location.pathname==='/dashboard'?'board':'list',canChangeStatus=false,board={},boardScope='',boardLoading=false,statusPending=false,statusNeedsRefresh=false,dragged=null;
+  let canManageAccess=false,accessData={pending:[],grants:[]},accessRevision=0,accessBusy=false,accessNeedsRefresh=false,accessRequestBusy=false,accessPollRunning=false,reviewRequest=null;
+  const seenAccessRequests=new Set();
+  let layout=location.pathname==='/credentials'?'credentials':location.pathname==='/dashboard'?'board':'list',canChangeStatus=false,board={},boardScope='',boardLoading=false,statusPending=false,statusNeedsRefresh=false,dragged=null;
   const columnLoading=new Set();
   let localAccess=false, connected=false, view='in-progress', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
   function el(tag,text,cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
@@ -89,7 +91,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   // Remove the previous JS-readable credential; browser grants now use HttpOnly cookies.
   try{sessionStorage.removeItem('steward.connection-token');}catch{}
   function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-  function resetConnection(){stopLive();document.body.classList.remove('dashboard-detail-open');canChangeStatus=false;board={};dragged=null;statusNeedsRefresh=false;projectsSupported=false;projectFilter='';projectFilterRevision++;projectListRevision++;projectDetailRevision++;projectRows=[];projectListLoaded=false;projectCursor=null;selectedProject=null;projectContext=null;projectPageVisible=false;$('project-filter').value='';$('projects').hidden=true;$('project-filter-form').hidden=true;$('project-page').hidden=true;$('task-page').hidden=false;clear($('project-list'));clear($('project-detail'));canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
+  function resetConnection(){stopLive();canManageAccess=false;accessNeedsRefresh=false;accessRevision++;seenAccessRequests.clear();accessData={pending:[],grants:[]};$('credentials-mode').hidden=true;clear($('access-pending'));clear($('access-grants'));$('access-review-dialog').close();reviewRequest=null;document.body.classList.remove('dashboard-detail-open');canChangeStatus=false;board={};dragged=null;statusNeedsRefresh=false;projectsSupported=false;projectFilter='';projectFilterRevision++;projectListRevision++;projectDetailRevision++;projectRows=[];projectListLoaded=false;projectCursor=null;selectedProject=null;projectContext=null;projectPageVisible=false;$('project-filter').value='';$('projects').hidden=true;$('project-filter-form').hidden=true;$('project-page').hidden=true;$('task-page').hidden=false;clear($('project-list'));clear($('project-detail'));canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;renderAccessRequest({state:'none'});clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
   async function api(path,body,extraHeaders={}) {
     if(body!==undefined)pendingWrites++;
     try{return await apiRequest(path,body,extraHeaders);}
@@ -97,7 +99,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     finally{if(body!==undefined)pendingWrites--;}
   }
   async function apiRequest(path,body,extraHeaders={}) {
-    if(body!==undefined&&!['/api/login','/api/logout','/api/connect'].includes(path)&&!(path==='/api/commands/task-status'&&canChangeStatus))throw new Error('当前界面只读，请通过 CLI 维护。');
+    if(body!==undefined&&!['/api/login','/api/logout','/api/connect'].includes(path)&&path!=='/api/access-request'&&!(canManageAccess&&/^\/api\/access-requests\/[a-f0-9]{64}\/(approve|revoke)$/.test(path))&&!(path==='/api/commands/task-status'&&canChangeStatus))throw new Error('当前界面只读，请通过 CLI 维护。');
     let response;
     try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'X-Steward-UI-Contract':'5',...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
     catch {const error=new Error(body===undefined?'无法读取本地服务，请检查服务是否仍在运行。':'结果未确认：请求中断或超时。请核对当前授权，不要直接重复提交。');error.uncertain=body!==undefined;throw error;}
@@ -109,6 +111,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   function safely(action){return async()=>{try{await action();}catch(e){notify(e.message);}};}
   async function loadList(append=false,preserveRange=false){
     if(statusPending||dragged){liveDirty=true;return false;}
+    if(layout==='credentials')return loadAccess(false,true);
     if(layout==='board')return loadBoard(preserveRange);
     const target=preserveRange?Math.max(30,rows.length):30;
     const generation=++listRevision;const search=new URLSearchParams(['active','recent','in-progress','in-review','blocked'].includes(view)?{view,pageSize:'30'}:{status:view,pageSize:'30'});if(query)search.set('query',query);if(projectFilter)search.set('project',projectFilter);if(append&&cursor)search.set('cursor',cursor);
@@ -124,7 +127,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     renderList();$('more').hidden=!data.hasMore;
     return true;
   }
-  function renderList(){if(layout==='board'){renderBoard();return;}const list=$('task-list'),panel=list.parentElement,page=document.scrollingElement;
+  function renderList(){if(layout==='credentials')return;if(layout==='board'){renderBoard();return;}const list=$('task-list'),panel=list.parentElement,page=document.scrollingElement;
     const panelTop=panel.scrollTop,pageTop=page.scrollTop,items=[];$('task-count').textContent=rows.length+' 项';
     if(!rows.length){const empty=el('div',undefined,'empty');empty.append(el('h2','这里还没有任务'),el('p','请切换视图或搜索条件；此工作台仅供只读查看。'));items.push(empty);}
     for(const task of rows){const b=button('',safely(()=>selectTask(task.id)),'task-card'+(selected===task.id?' selected':''));b.setAttribute('aria-current',String(selected===task.id));const meta=el('div',undefined,'card-meta');meta.append(el('span','#'+task.id),badge(task.status));b.append(meta,el('h3',task.title||'未命名任务'),el('p',task.nextStep||task.goal||'等待补充目标和下一步'));items.push(b);}
@@ -201,22 +204,23 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     }catch(error){if(connected&&connection===liveAbort)notify(error.code==='VERSION_CONFLICT'?'任务已被其他操作修改，未覆盖。请刷新看板后重新决定。':error.uncertain?'状态结果未确认，请刷新核对，不要重复拖拽。':'状态修改失败：'+error.message+' 请刷新看板核对。');}
     finally{statusPending=false;if(connected&&connection===liveAbort){
       renderBoard();
-      if(saved)try{await loadList(false,true);if(selected===task.id)await selectTask(task.id);notify('已修改状态；Session 保持不变。',true);}catch{notify('状态已修改，但刷新失败。请手动刷新，不要重复提交。');}
+      if(saved)try{await loadList(false,true);if(selected===task.id)await selectTask(task.id);}catch{notify('状态已修改，但刷新失败。请手动刷新，不要重复提交。');}
     }}
   }
   function applyLayout(next){
     layout=next;document.body.classList.toggle('dashboard-page',next==='board');document.body.classList.remove('dashboard-detail-open');
+    $('access-page').hidden=next!=='credentials';$('task-page').hidden=next==='credentials';
     $('task-page').classList.toggle('board-mode',next==='board');$('status-views').hidden=next==='board';$('board-help').hidden=next!=='board';
-    for(const [id,mode] of [['list-mode','list'],['board-mode','board']]){const link=$(id);if(next===mode)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
+    for(const [id,mode] of [['list-mode','list'],['board-mode','board'],['credentials-mode','credentials']]){const link=$(id);if(next===mode)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
   }
   async function changeLayout(next,navigate=true){
-    if(statusPending||dragged)return;
-    const path=next==='board'?'/dashboard':'/';if(navigate&&location.pathname!==path)history.pushState(null,'',path);
+    if(statusPending||dragged||accessBusy||next==='credentials'&&!canManageAccess)return;
+    const path=next==='credentials'?'/credentials':next==='board'?'/dashboard':'/';if(navigate&&location.pathname!==path)history.pushState(null,'',path);
     applyLayout(next);showTaskPage();listRevision++;revision++;selected=null;context=null;rows=[];cursor=null;clear($('detail'));clear($('task-list'));$('task-count').textContent='';$('more').hidden=true;
     await loadList();
   }
-  for(const [id,mode] of [['list-mode','list'],['board-mode','board']])$(id).onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();void safely(()=>changeLayout(mode))();};
-  window.onpopstate=()=>{if(statusPending||dragged){history.pushState(null,'',layout==='board'?'/dashboard':'/');notify('当前操作尚未结束，请稍后切换页面。');return;}void safely(()=>changeLayout(location.pathname==='/dashboard'?'board':'list',false))();};
+  for(const [id,mode] of [['list-mode','list'],['board-mode','board'],['credentials-mode','credentials']])$(id).onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();void safely(()=>changeLayout(mode))();};
+  window.onpopstate=()=>{if(statusPending||dragged||accessBusy){history.pushState(null,'',layout==='credentials'?'/credentials':layout==='board'?'/dashboard':'/');notify('当前操作尚未结束，请稍后切换页面。');return;}let next=location.pathname==='/credentials'?'credentials':location.pathname==='/dashboard'?'board':'list';if(next==='credentials'&&!canManageAccess){next='list';history.replaceState(null,'','/');}void safely(()=>changeLayout(next,false))();};
   $('close-dashboard-detail').onclick=()=>{document.body.classList.remove('dashboard-detail-open');selected=null;context=null;revision++;renderList();};
   applyLayout(layout);
   function expandedDetails(root){return new Set(Array.from(root.querySelectorAll('details[open][data-detail-key]'),node=>node.dataset.detailKey));}
@@ -235,11 +239,11 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   }
   async function openProject(id){
     if(!projectsSupported)return;
-    document.body.classList.remove('dashboard-detail-open');projectPageVisible=true;revision++;$('task-page').hidden=true;$('project-page').hidden=false;
+    document.body.classList.remove('dashboard-detail-open');projectPageVisible=true;revision++;$('access-page').hidden=true;$('task-page').hidden=true;$('project-page').hidden=false;
     await Promise.all([loadProjects(false,true),selectProject(id)]);
   }
   async function openRelatedTask(id){
-    showTaskPage();activeTab='overview';await selectTask(id);
+    if(layout==='credentials')await changeLayout('list');showTaskPage();activeTab='overview';await selectTask(id);
     if(selected===id&&context)$('detail').scrollIntoView({block:'start'});
   }
   function taskLink(id,label){return button(label||'#'+id,safely(()=>openRelatedTask(id)),'text-link');}
@@ -397,7 +401,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   async function loadImports(id,root){const data=await api(`/api/sessions/${encodeURIComponent(id)}/imports`);clear(root);if(!data.imports.length)root.append(el('p','暂无导入记录。','muted'));for(const item of data.imports){const node=el('div',undefined,'timeline-item');node.append(el('p',item.sourcePath),el('small',`${item.sizeBytes} 字节 · ${date(item.importedAt)} · SHA-256 ${item.sha256}`),action('删除导入副本','session-import-remove',[check('confirmed','确认删除导入副本 '+item.id)],'只删除数据库副本，不删除源文件。不保证备份或存储介质上的物理擦除。',{importId:item.id}));root.append(node);}}
   function contextText(){const t=context.task,cp=context.checkpoint;checkedRules(context.sessionRules,t.projectId??null);return [`# ${t.title||'未命名任务'} (#${t.id})`,`状态：${statuses[t.status]||t.status} · version ${t.version}`,'','## 目标',t.goal||'尚未填写','','## 范围',t.scope||'尚未填写','','## 验收',t.acceptanceCriteria||'尚未填写','','## 下一步',t.nextStep||'尚未填写',...(t.blockReason||t.blockRecovery?['','## 历史阻塞记录（不代表当前状态）',...(t.blockReason?['历史阻塞原因：',t.blockReason]:[]),...(t.blockRecovery?['历史恢复条件：',t.blockRecovery]:[])]:[]),'','## 项目归属',context.project?`${context.project.name} (##${context.project.id})`:'未关联或后端未提供','组件范围：'+(t.componentIds===undefined?'后端未提供':t.componentIds.length?t.componentIds.join(', '):'未限定组件'),'','## 项目资料与来源',context.projectProfile===undefined?'后端未提供项目资料。':context.projectProfile===null?'项目资料尚未填写。':JSON.stringify(context.projectProfile,null,2),'','## 有效个人与项目规则（不构成执行授权）',JSON.stringify(context.sessionRules,null,2),'来源任务版本为历史引用；仍需独立读取适用仓库 AGENTS。规则不授权领取、部署或关闭任务。','','## Checkpoint 后的备注（至多50条）',JSON.stringify(context.notesSinceCheckpoint||[],null,2),...(context.notesTruncated?['备注已截断；请使用完整备注查询。']:[]),'','## Checkpoint',cp?JSON.stringify(cp,null,2):'暂无','','## 执行会话',context.session?JSON.stringify(context.session,null,2):'暂无','','继续前重新读取最新 Task version；本文不授权自动关闭任务。'].join('\n');}
   async function copyContext(){const id=selected;await selectTask(id);if(!context||selected!==id)return;const output=contextText();try{await navigator.clipboard.writeText(output);notify('已复制最新交接上下文。',true);}catch{openAction('copy-context','交接上下文',[area('context','复制下方内容',output)],'选择并复制文本。');$('submit-action').hidden=true;}}
-  function showTaskPage(){projectPageVisible=false;projectDetailRevision++;$('project-page').hidden=true;$('task-page').hidden=false;}
+  function showTaskPage(){projectPageVisible=false;projectDetailRevision++;$('project-page').hidden=true;$('task-page').hidden=layout==='credentials';$('access-page').hidden=layout!=='credentials';}
   async function applyProjectFilter(){
     const generation=++projectFilterRevision,input=$('project-filter').value.trim();
     const result=input?await api('/api/projects/'+encodeURIComponent(input)):null;
@@ -506,8 +510,8 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       }catch(error){if(atomic)throw error;if(current())readFailure(status,label,error,load);}finally{busy=false;}
     };return load().finally(()=>{atomic=false;});
   }
-  $('projects').onclick=safely(async()=>{if(!projectsSupported)return;document.body.classList.remove('dashboard-detail-open');projectPageVisible=true;$('task-page').hidden=true;$('project-page').hidden=false;await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);});
-  $('back-tasks').onclick=safely(async()=>{showTaskPage();if(!await loadList(false,true)||projectPageVisible||!connected||modal)return;if(selected)await selectTask(selected);});
+  $('projects').onclick=safely(async()=>{if(!projectsSupported)return;document.body.classList.remove('dashboard-detail-open');projectPageVisible=true;$('access-page').hidden=true;$('task-page').hidden=true;$('project-page').hidden=false;await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);});
+  $('back-tasks').onclick=safely(async()=>{if(layout==='credentials'){await changeLayout('list');return;}showTaskPage();if(!await loadList(false,true)||projectPageVisible||!connected||modal)return;if(selected)await selectTask(selected);});
   $('create-project').onclick=()=>openAction('project-create','新建项目',[text('name','项目名称')],'只创建项目记录；登记源码、关联任务均为后续显式操作。');
   $('project-more').onclick=safely(()=>loadProjects(true));
   $('project-filter-form').onsubmit=event=>{event.preventDefault();safely(applyProjectFilter)();};
@@ -549,11 +553,11 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     const controls=Array.from($('connect-form').querySelectorAll('input,button'));
     controls.forEach(control=>control.disabled=true);
     try{
-    $('login-error').textContent='';$('credential').value='';stopLive();
+    $('login-error').textContent='';stopLive();
     try{
       if(value)await api('/api/login',{}, {'X-Steward-Token':value});
-      const access=await api('/api/access');localAccess=access.local===true;canWrite=false;canChangeStatus=access.role==='admin';projectsSupported=access.projectManagement===true;$('projects').hidden=!projectsSupported;$('project-filter-form').hidden=!projectsSupported;$('create-project').hidden=!canWrite;await loadList();
-    }catch(e){$('login-error').textContent=!value&&e.code==='UNAUTHORIZED'?'':e.message;return;}
+      const access=await api('/api/access');localAccess=access.local===true;canWrite=false;canChangeStatus=access.role==='admin';canManageAccess=access.role==='admin'&&access.accessApproval===true;$('credentials-mode').hidden=!canManageAccess;if(layout==='credentials'&&!canManageAccess){applyLayout('list');history.replaceState(null,'','/');}projectsSupported=access.projectManagement===true;$('projects').hidden=!projectsSupported;$('project-filter-form').hidden=!projectsSupported;$('create-project').hidden=!canWrite;applyLayout(layout);showTaskPage();await loadList();
+    }catch(e){$('login-error').textContent=!value&&e.code==='UNAUTHORIZED'?'':e.message;renderAccessRequest({state:'none'});return;}
     connected=true;if(layout==='board')renderBoard();$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('logout').hidden=localAccess;$('access-role').textContent=canChangeStatus?(localAccess?'本机 · 可拖拽状态':'管理员 · 可拖拽状态'):'只读';
     $('login').hidden=true;$('workspace').hidden=false;
     if(layout==='list'&&rows.length)try{await selectTask(rows[0].id);}catch(e){notify(e.message);}
@@ -561,7 +565,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     }finally{controls.forEach(control=>control.disabled=false);}
   }
   async function logout(){await api('/api/logout',{});resetConnection();}
-  $('connect-form').onsubmit=async event=>{event.preventDefault();const b=event.submitter;if(b)b.disabled=true;try{await connect($('credential').value.trim());}finally{if(b)b.disabled=false;}};
+  $('connect-form').onsubmit=event=>{event.preventDefault();void requestAccess();};
   $('logout').onclick=safely(logout);
   $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有已保存的浏览器授权？不影响本机免登录和凭据文件。')){await api('/api/browser-sessions/revoke',{});if(localAccess)notify('已撤销保存的浏览器授权。');else resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');if(projectPageVisible){await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);}else{await loadList();if(selected)await selectTask(selected);}});
   $('create').onclick=()=>openAction('task-create','新建任务',[...taskFields(null),...(projectsSupported?[text('project','项目（##编号或唯一名称，可留空）',projectFilter,false)]:[])],'可以先创建最小任务，随后补充目标、范围和验收条件。');
@@ -625,12 +629,74 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     }catch{$('login-error').textContent='自动连接未完成或连接链接已失效。请使用终端提示的凭据文件手动连接，或重新启动工作台。';}
     finally{controls.forEach(control=>control.disabled=false);}
   }
+  function renderAccessRequest(data){
+    const pending=data.state==='pending';
+    $('access-request-state').textContent=pending?'等待管理员批准…':data.state==='revoked'?'申请被拒绝或授权已撤销，请重新申请。':data.state==='expired'?'申请已过期，请重新申请。':'尚未获得访问授权。';
+    $('access-verification').hidden=!pending;$('access-verification-code').textContent=pending?data.verificationCode:'';
+    $('request-access').disabled=pending||accessRequestBusy;$('request-access').textContent=pending?'等待审批':'申请访问';
+  }
+  async function requestAccess(){
+    if(connected||accessRequestBusy)return;accessRevision++;accessRequestBusy=true;$('request-access').disabled=true;$('login-error').textContent='';
+    try{
+      const data=await api('/api/access-request',{label:String(navigator.userAgentData?.platform||navigator.platform||'浏览器').slice(0,80)});
+      accessRequestBusy=false;if(data.state==='authorized')await connect();else renderAccessRequest(data);
+    }catch(error){$('login-error').textContent=error.uncertain?'申请结果未确认，请等待状态核对，不要重复申请。':error.message;}
+    finally{accessRequestBusy=false;}
+  }
+  function accessTime(value){return value?new Date(value*1000).toLocaleString():'—';}
+  function accessDescription(row){
+    const box=el('div',undefined,'access-description');box.append(el('h3',row.label),el('p','来源 IP：'+(row.peer||'未记录')),el('p','浏览器：'+(row.agent||'未记录')),el('p',(row.verificationCode?'申请时间：':'授权时间：')+accessTime(row.verificationCode?row.createdAt:row.authorizedAt)),el('p','有效期至：'+accessTime(row.expiresAt)));
+    if(row.verificationCode)box.append(el('p','请与申请者核对：'),el('strong',row.verificationCode,'verification-code'));
+    return box;
+  }
+  function reviewAccess(row){
+    if(!canManageAccess||accessBusy||accessNeedsRefresh)return;reviewRequest=row;seenAccessRequests.add(row.id);$('access-review-details').replaceChildren(accessDescription(row));$('access-review-error').textContent='';
+    $('access-review-dialog').showModal();
+  }
+  function renderAccess(){
+    for(const id of ['access-approve','access-reject'])$(id).disabled=accessBusy||accessNeedsRefresh;
+    for(const [id,items,pending] of [['access-pending',accessData.pending,true],['access-grants',accessData.grants,false]]){
+      const nodes=items.map(row=>{const box=el('article',undefined,'info-box');box.append(accessDescription(row));
+        if(!pending){box.append(el('p',row.role==='admin'?'管理员':'只读'));if(row.createdAt===null)box.append(el('p','旧凭据授权：撤销浏览器不会作废长期凭据。'));}
+        const action=button(pending?'核对申请':row.isCurrent?'当前浏览器':'撤销授权',pending?()=>reviewAccess(row):safely(async()=>{if(confirm('撤销此浏览器授权？后续访问需要重新申请。'))await decideAccess(row,'revoke');}));
+        action.disabled=accessBusy||accessNeedsRefresh||row.isCurrent===true;box.append(action);return box;});
+      $(id).replaceChildren(...(nodes.length?nodes:[el('p',pending?'暂无待审批申请。':'暂无浏览器授权。','muted')]));
+    }
+  }
+  async function loadAccess(notifyRequests=false,manual=false){
+    if(!canManageAccess)return false;const generation=++accessRevision;
+    try{const data=await api('/api/access-requests');if(generation!==accessRevision||!canManageAccess)return false;
+      if(!Array.isArray(data.pending)||!Array.isArray(data.grants))throw new Error('访问授权数据不完整，请刷新核对。');
+      accessData=data;if(manual&&!accessBusy)accessNeedsRefresh=false;for(const id of seenAccessRequests)if(!data.pending.some(row=>row.id===id))seenAccessRequests.delete(id);renderAccess();if(!accessNeedsRefresh)$('access-error').textContent='';
+      if(reviewRequest&&!data.pending.some(row=>row.id===reviewRequest.id)){$('access-review-dialog').close();reviewRequest=null;}
+      if(notifyRequests&&connected&&!accessBusy&&!accessNeedsRefresh&&!modal&&!statusPending&&!dragged&&!$('access-review-dialog').open){const row=data.pending.find(item=>!seenAccessRequests.has(item.id));if(row)reviewAccess(row);}
+      return true;
+    }catch(error){if(generation===accessRevision&&canManageAccess)$('access-error').textContent=error.message;throw error;}
+  }
+  async function decideAccess(row,action){
+    if(!connected||!canManageAccess||accessBusy||accessNeedsRefresh)return;accessBusy=true;accessNeedsRefresh=true;renderAccess();
+    for(const id of ['access-approve','access-reject'])$(id).disabled=true;
+    try{await api('/api/access-requests/'+row.id+'/'+action,action==='approve'?{verificationCode:row.verificationCode}:{});accessNeedsRefresh=false;$('access-review-dialog').close();reviewRequest=null;}
+    catch(error){if(canManageAccess){const message=error.uncertain?'操作结果未确认，请刷新核对，不要重复提交。':error.message;$('access-review-error').textContent=message;$('access-error').textContent=message;}}
+    finally{accessBusy=false;if(canManageAccess)try{await loadAccess();}catch{/* The read error is displayed; a write is never retried. */}}
+  }
+  $('access-review-refresh').onclick=safely(()=>loadAccess(false,true));
+  $('access-later').onclick=()=>{$('access-review-dialog').close();reviewRequest=null;};
+  $('access-approve').onclick=()=>{if(reviewRequest)void decideAccess(reviewRequest,'approve');};
+  $('access-reject').onclick=()=>{if(reviewRequest)void decideAccess(reviewRequest,'revoke');};
+  async function pollAccess(){
+    if(accessPollRunning||accessBusy||accessRequestBusy||statusPending||dragged||document.hidden)return;accessPollRunning=true;const generation=accessRevision;
+    try{if(connected){if(canManageAccess)await loadAccess(true);else await api('/api/access');}else{const data=await api('/api/access-request');if(generation!==accessRevision||connected)return;if(data.state==='authorized')await connect();else renderAccessRequest(data);}}
+    catch(error){if(!connected)$('login-error').textContent=error.message;}
+    finally{accessPollRunning=false;}
+  }
+  function startAccessUpdates(){const tick=async()=>{await pollAccess();setTimeout(tick,3000);};setTimeout(tick,3000);}
   // UI activation is separate from data invalidations. Never replay a write.
   function startUiUpdates(){
     const loaded=document.querySelector?.('meta[name="steward-ui-release"]')?.content;
     if(!loaded)return;
     let held=false, banner=null, checking=false;
-    const editing=()=>!!modal||!!$('credential').value||$('search').value.trim()!==query||$('project-filter').value.trim()!==projectFilter;
+    const editing=()=>!!modal||$('access-review-dialog').open||accessBusy||accessRequestBusy||$('search').value.trim()!==query||$('project-filter').value.trim()!==projectFilter;
     async function checkUpdate(){
       if(checking)return;checking=true;
       try{
@@ -654,6 +720,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     setTimeout(checkUpdate,10000);
   }
   startUiUpdates();
+  startAccessUpdates();
   const code=new URLSearchParams(location.hash.slice(1)).get('connect');
   if(code!==null){
     // Remove the one-use secret before any exchange; never send it in a query string.

@@ -38,7 +38,7 @@ function fixture(notes: unknown[] = [], noteFailure = false, accessFailure = fal
   return { ...api, transport, writeText, response: (value: unknown) => { responseContext = value as ReturnType<typeof snapshot>; } };
 }
 
-it('disables credential entry until the initial authorization check settles', async () => {
+it('disables access requests until the initial authorization check settles', async () => {
   const f = fixture([], false, true);
   const pending = f.connect();
   for (const control of document.querySelectorAll('#connect-form input, #connect-form button')) expect(control).toBeDisabled();

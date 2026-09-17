@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         credentials.directory.join("readonly-credential").display()
     );
     println!(
-        "Local browser connects as administrator. Share only the read-only credential with other devices. Credentials persist across restarts."
+        "Remote browsers can request administrator approval for read-only access. Keep credential files private; credentials persist across restarts."
     );
     let mut state = ServerState::with_address(service, address, credentials.admin)
         .with_readonly_token(credentials.reader)
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::spawn(move || {
             if open_browser(&url).is_err() {
                 eprintln!(
-                    "Could not open the browser. Open the displayed address and use the credential file; use --no-open on headless systems."
+                    "Could not open the browser. Use an existing administrator browser or the administrator API with the credential file; --no-open keeps browser launch disabled."
                 );
             }
         });
