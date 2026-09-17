@@ -51,6 +51,40 @@ async fn request(
 }
 
 #[tokio::test]
+async fn dashboard_route_serves_the_same_ui_shell_and_security_headers() {
+    let (_temp, _service, app) = fixture();
+    let mut pages = Vec::new();
+    for path in ["/", "/dashboard"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("host", "127.0.0.1:43123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .contains("text/html")
+        );
+        assert!(response.headers().contains_key("content-security-policy"));
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        pages.push(
+            to_bytes(response.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(pages[0], pages[1]);
+}
+
+#[tokio::test]
 async fn closed_task_notes_use_existing_command_and_cas() {
     let (_temp, s, app) = fixture();
     s.task_status("1", 1, "cancelled").unwrap();

@@ -76,7 +76,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   let projectsSupported=false,projectPageVisible=false,projectFilter='',projectFilterRevision=0,projectRows=[],projectListLoaded=false,projectCursor=null,projectListRevision=0,projectDetailRevision=0,projectContext=null,selectedProject=null;
   let pendingWrites=0, uncertainWrite=false, modalEpoch=0;
   let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
-  let localAccess=false, connected=false, view='active', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
+  let layout=location.pathname==='/dashboard'?'board':'list',canChangeStatus=false,board={},boardScope='',boardLoading=false,statusPending=false,statusNeedsRefresh=false,dragged=null;
+  const columnLoading=new Set();
+  let localAccess=false, connected=false, view='in-progress', query='', cursor=null, rows=[], selected=null, context=null, activeTab='overview', revision=0, modal=null;
   function el(tag,text,cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
   function button(text,action,cls='') { const b=el('button',text,cls);b.type='button';b.onclick=action;return b; }
   function clear(node){node.replaceChildren();}
@@ -87,7 +89,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   // Remove the previous JS-readable credential; browser grants now use HttpOnly cookies.
   try{sessionStorage.removeItem('steward.connection-token');}catch{}
   function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-  function resetConnection(){stopLive();projectsSupported=false;projectFilter='';projectFilterRevision++;projectListRevision++;projectDetailRevision++;projectRows=[];projectListLoaded=false;projectCursor=null;selectedProject=null;projectContext=null;projectPageVisible=false;$('project-filter').value='';$('projects').hidden=true;$('project-filter-form').hidden=true;$('project-page').hidden=true;$('task-page').hidden=false;clear($('project-list'));clear($('project-detail'));canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
+  function resetConnection(){stopLive();document.body.classList.remove('dashboard-detail-open');canChangeStatus=false;board={};dragged=null;statusNeedsRefresh=false;projectsSupported=false;projectFilter='';projectFilterRevision++;projectListRevision++;projectDetailRevision++;projectRows=[];projectListLoaded=false;projectCursor=null;selectedProject=null;projectContext=null;projectPageVisible=false;$('project-filter').value='';$('projects').hidden=true;$('project-filter-form').hidden=true;$('project-page').hidden=true;$('task-page').hidden=false;clear($('project-list'));clear($('project-detail'));canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;$('credential').value='';clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
   async function api(path,body,extraHeaders={}) {
     if(body!==undefined)pendingWrites++;
     try{return await apiRequest(path,body,extraHeaders);}
@@ -95,7 +97,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     finally{if(body!==undefined)pendingWrites--;}
   }
   async function apiRequest(path,body,extraHeaders={}) {
-    if(body!==undefined&&!['/api/login','/api/logout','/api/connect'].includes(path))throw new Error('当前界面只读，请通过 CLI 维护。');
+    if(body!==undefined&&!['/api/login','/api/logout','/api/connect'].includes(path)&&!(path==='/api/commands/task-status'&&canChangeStatus))throw new Error('当前界面只读，请通过 CLI 维护。');
     let response;
     try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'X-Steward-UI-Contract':'5',...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
     catch {const error=new Error(body===undefined?'无法读取本地服务，请检查服务是否仍在运行。':'结果未确认：请求中断或超时。请核对当前授权，不要直接重复提交。');error.uncertain=body!==undefined;throw error;}
@@ -106,6 +108,8 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   }
   function safely(action){return async()=>{try{await action();}catch(e){notify(e.message);}};}
   async function loadList(append=false,preserveRange=false){
+    if(statusPending||dragged){liveDirty=true;return false;}
+    if(layout==='board')return loadBoard(preserveRange);
     const target=preserveRange?Math.max(30,rows.length):30;
     const generation=++listRevision;const search=new URLSearchParams(['active','recent','in-progress','in-review','blocked'].includes(view)?{view,pageSize:'30'}:{status:view,pageSize:'30'});if(query)search.set('query',query);if(projectFilter)search.set('project',projectFilter);if(append&&cursor)search.set('cursor',cursor);
     const refreshed=[];let data;
@@ -120,14 +124,104 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     renderList();$('more').hidden=!data.hasMore;
     return true;
   }
-  function renderList(){const list=$('task-list'),panel=list.parentElement,page=document.scrollingElement;
+  function renderList(){if(layout==='board'){renderBoard();return;}const list=$('task-list'),panel=list.parentElement,page=document.scrollingElement;
     const panelTop=panel.scrollTop,pageTop=page.scrollTop,items=[];$('task-count').textContent=rows.length+' 项';
     if(!rows.length){const empty=el('div',undefined,'empty');empty.append(el('h2','这里还没有任务'),el('p','请切换视图或搜索条件；此工作台仅供只读查看。'));items.push(empty);}
     for(const task of rows){const b=button('',safely(()=>selectTask(task.id)),'task-card'+(selected===task.id?' selected':''));b.setAttribute('aria-current',String(selected===task.id));const meta=el('div',undefined,'card-meta');meta.append(el('span','#'+task.id),badge(task.status));b.append(meta,el('h3',task.title||'未命名任务'),el('p',task.nextStep||task.goal||'等待补充目标和下一步'));items.push(b);}
     list.replaceChildren(...items);panel.scrollTop=panelTop;page.scrollTop=pageTop;
   }
+  async function boardPage(status,nextCursor){
+    const search=new URLSearchParams({status,pageSize:'30'});
+    if(query)search.set('query',query);if(projectFilter)search.set('project',projectFilter);if(nextCursor)search.set('cursor',nextCursor);
+    const data=await api('/api/tasks?'+search);
+    if(!Array.isArray(data.tasks)||data.tasks.some(t=>t.status!==status)||data.hasMore&&!data.nextCursor)throw new Error('看板数据不完整，请刷新核对。');
+    return data;
+  }
+  async function loadBoard(preserveRange=false){
+    const generation=++listRevision,scope=JSON.stringify([query,projectFilter]);
+    if(scope!==boardScope){board={};rows=[];boardScope=scope;}
+    boardLoading=true;renderBoard();
+    try{
+      // Keep board reads below the server's bounded auth/read capacities.
+      const columns=[];for(const status of Object.keys(statuses)){
+        const tasks=[],seen=new Set();let data,next=null;
+        const target=preserveRange?Math.max(30,board[status]?.tasks.length||0):30;
+        do{data=await boardPage(status,next);if(generation!==listRevision)return false;tasks.push(...data.tasks);next=data.nextCursor;
+          if(data.hasMore){if(seen.has(next))throw new Error('看板分页游标重复');seen.add(next);}
+        }while(data.hasMore&&tasks.length<target);
+        columns.push([status,{...data,tasks}]);
+      }
+      if(generation!==listRevision)return false;
+      board=Object.fromEntries(columns);rows=Object.values(board).flatMap(c=>c.tasks);statusNeedsRefresh=false;return true;
+    }catch(error){if(generation===listRevision)statusNeedsRefresh=true;throw error;}
+    finally{if(generation===listRevision){boardLoading=false;renderBoard();}}
+  }
+  async function moreBoard(status){
+    if(boardLoading||statusPending||dragged||columnLoading.has(status)||!board[status]?.hasMore)return;
+    const generation=listRevision,column=board[status];columnLoading.add(status);renderBoard();
+    try{const data=await boardPage(status,column.nextCursor);if(generation!==listRevision||layout!=='board')return;
+      const ids=new Set(column.tasks.map(t=>t.id));
+      board[status]={...data,tasks:[...column.tasks,...data.tasks.filter(t=>!ids.has(t.id))]};rows=Object.values(board).flatMap(c=>c.tasks);
+    }finally{columnLoading.delete(status);if(layout==='board'&&!dragged)renderBoard();}
+  }
+  function renderBoard(){
+    const list=$('task-list'),scroll=list.querySelector('.kanban')?.scrollLeft||0,grid=el('div',undefined,'kanban');
+    const positions=Object.fromEntries(Array.from(list.querySelectorAll('.kanban-column'),c=>[c.dataset.status,c.scrollTop]));
+    grid.setAttribute('aria-label','任务看板');$('more').hidden=true;$('task-count').textContent=boardLoading?'正在读取看板…':rows.length+' 项已加载';
+    const writable=canChangeStatus&&connected&&!statusPending&&!statusNeedsRefresh&&!boardLoading&&!columnLoading.size;
+    for(const [status,label] of Object.entries(statuses)){
+      const column=el('section',undefined,'kanban-column');column.dataset.status=status;column.setAttribute('aria-label',label);
+      const data=board[status];column.append(el('h2',label+' · '+(data?.tasks.length||0)));
+      column.ondragover=event=>{if(writable&&dragged&&dragged.status!==status){event.preventDefault();event.dataTransfer.dropEffect='move';}};
+      column.ondrop=event=>{event.preventDefault();const task=dragged;dragged=null;if(writable&&task)void moveStatus(task,status);};
+      for(const task of data?.tasks||[]){
+        const card=button('',safely(()=>selectTask(task.id)),'task-card'+(selected===task.id?' selected':''));card.dataset.taskId=String(task.id);
+        card.append(el('small','#'+task.id+' · v'+task.version),el('h3',task.title||'未命名任务'),el('p',task.nextStep||task.goal||''));
+        card.draggable=writable;card.setAttribute('aria-describedby','board-help');
+        card.ondragstart=event=>{if(!writable){event.preventDefault();return;}dragged={id:task.id,version:task.version,status:task.status};event.dataTransfer.setData('text/plain',String(task.id));event.dataTransfer.effectAllowed='move';};
+        card.ondragend=()=>{dragged=null;if(liveDirty)scheduleLiveRefresh();};column.append(card);
+      }
+      if(!data?.tasks.length)column.append(el('p',boardLoading?'正在读取…':data?'暂无任务':'未读取，请刷新重试','muted'));
+      if(data?.hasMore){const more=button('加载更多'+label,safely(()=>moreBoard(status)));more.disabled=boardLoading||statusPending||columnLoading.has(status);column.append(more);}
+      grid.append(column);
+    }
+    list.replaceChildren(grid);grid.scrollLeft=scroll;
+    for(const column of grid.children)column.scrollTop=positions[column.dataset.status]||0;
+  }
+  async function moveStatus(task,status){
+    if(layout!=='board'||projectPageVisible||!connected||!canChangeStatus||statusPending||statusNeedsRefresh||boardLoading||columnLoading.size||!Object.hasOwn(statuses,status)||task.status===status)return;
+    const shown=board[task.status]?.tasks.find(t=>t.id===task.id);
+    if(!shown||shown.version!==task.version){notify('卡片已变化，请刷新后操作。');return;}
+    statusPending=true;statusNeedsRefresh=true;listRevision++;const connection=liveAbort;renderBoard();
+    let saved=false;
+    try{
+      const result=await api('/api/commands/task-status',{taskId:task.id,expectedVersion:task.version,status});
+      if(!result?.task||result.task.id!==task.id||result.task.status!==status||result.task.version!==task.version+1)throw new Error('状态写入结果无法确认，请刷新核对，不要重复拖拽。');
+      saved=true;
+    }catch(error){if(connected&&connection===liveAbort)notify(error.code==='VERSION_CONFLICT'?'任务已被其他操作修改，未覆盖。请刷新看板后重新决定。':error.uncertain?'状态结果未确认，请刷新核对，不要重复拖拽。':'状态修改失败：'+error.message+' 请刷新看板核对。');}
+    finally{statusPending=false;if(connected&&connection===liveAbort){
+      renderBoard();
+      if(saved)try{await loadList(false,true);if(selected===task.id)await selectTask(task.id);notify('已修改状态；Session 保持不变。',true);}catch{notify('状态已修改，但刷新失败。请手动刷新，不要重复提交。');}
+    }}
+  }
+  function applyLayout(next){
+    layout=next;document.body.classList.toggle('dashboard-page',next==='board');document.body.classList.remove('dashboard-detail-open');
+    $('task-page').classList.toggle('board-mode',next==='board');$('status-views').hidden=next==='board';$('board-help').hidden=next!=='board';
+    for(const [id,mode] of [['list-mode','list'],['board-mode','board']]){const link=$(id);if(next===mode)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
+  }
+  async function changeLayout(next,navigate=true){
+    if(statusPending||dragged)return;
+    const path=next==='board'?'/dashboard':'/';if(navigate&&location.pathname!==path)history.pushState(null,'',path);
+    applyLayout(next);showTaskPage();listRevision++;revision++;selected=null;context=null;rows=[];cursor=null;clear($('detail'));clear($('task-list'));$('task-count').textContent='';$('more').hidden=true;
+    await loadList();
+  }
+  for(const [id,mode] of [['list-mode','list'],['board-mode','board']])$(id).onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();void safely(()=>changeLayout(mode))();};
+  window.onpopstate=()=>{if(statusPending||dragged){history.pushState(null,'',layout==='board'?'/dashboard':'/');notify('当前操作尚未结束，请稍后切换页面。');return;}void safely(()=>changeLayout(location.pathname==='/dashboard'?'board':'list',false))();};
+  $('close-dashboard-detail').onclick=()=>{document.body.classList.remove('dashboard-detail-open');selected=null;context=null;revision++;renderList();};
+  applyLayout(layout);
   function expandedDetails(root){return new Set(Array.from(root.querySelectorAll('details[open][data-detail-key]'),node=>node.dataset.detailKey));}
   async function selectTask(id){
+    if(layout==='board')document.body.classList.add('dashboard-detail-open');
     const expanded=selected===id?expandedDetails($('detail')):new Set();
     selected=id;context=null;const generation=++revision;renderList();
     const root=$('detail');root.replaceChildren(el('p','正在读取任务…','muted'));
@@ -141,7 +235,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   }
   async function openProject(id){
     if(!projectsSupported)return;
-    projectPageVisible=true;revision++;$('task-page').hidden=true;$('project-page').hidden=false;
+    document.body.classList.remove('dashboard-detail-open');projectPageVisible=true;revision++;$('task-page').hidden=true;$('project-page').hidden=false;
     await Promise.all([loadProjects(false,true),selectProject(id)]);
   }
   async function openRelatedTask(id){
@@ -412,7 +506,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       }catch(error){if(atomic)throw error;if(current())readFailure(status,label,error,load);}finally{busy=false;}
     };return load().finally(()=>{atomic=false;});
   }
-  $('projects').onclick=safely(async()=>{if(!projectsSupported)return;projectPageVisible=true;$('task-page').hidden=true;$('project-page').hidden=false;await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);});
+  $('projects').onclick=safely(async()=>{if(!projectsSupported)return;document.body.classList.remove('dashboard-detail-open');projectPageVisible=true;$('task-page').hidden=true;$('project-page').hidden=false;await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);});
   $('back-tasks').onclick=safely(async()=>{showTaskPage();if(!await loadList(false,true)||projectPageVisible||!connected||modal)return;if(selected)await selectTask(selected);});
   $('create-project').onclick=()=>openAction('project-create','新建项目',[text('name','项目名称')],'只创建项目记录；登记源码、关联任务均为后续显式操作。');
   $('project-more').onclick=safely(()=>loadProjects(true));
@@ -458,11 +552,11 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     $('login-error').textContent='';$('credential').value='';stopLive();
     try{
       if(value)await api('/api/login',{}, {'X-Steward-Token':value});
-      const access=await api('/api/access');localAccess=access.local===true;canWrite=false;projectsSupported=access.projectManagement===true;$('projects').hidden=!projectsSupported;$('project-filter-form').hidden=!projectsSupported;$('create-project').hidden=!canWrite;await loadList();
+      const access=await api('/api/access');localAccess=access.local===true;canWrite=false;canChangeStatus=access.role==='admin';projectsSupported=access.projectManagement===true;$('projects').hidden=!projectsSupported;$('project-filter-form').hidden=!projectsSupported;$('create-project').hidden=!canWrite;await loadList();
     }catch(e){$('login-error').textContent=!value&&e.code==='UNAUTHORIZED'?'':e.message;return;}
-    connected=true;$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('logout').hidden=localAccess;$('access-role').textContent=localAccess?'本机 · 只读':'只读';
+    connected=true;if(layout==='board')renderBoard();$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('logout').hidden=localAccess;$('access-role').textContent=canChangeStatus?(localAccess?'本机 · 可拖拽状态':'管理员 · 可拖拽状态'):'只读';
     $('login').hidden=true;$('workspace').hidden=false;
-    if(rows.length)try{await selectTask(rows[0].id);}catch(e){notify(e.message);}
+    if(layout==='list'&&rows.length)try{await selectTask(rows[0].id);}catch(e){notify(e.message);}
     if(connected)startLive();
     }finally{controls.forEach(control=>control.disabled=false);}
   }
@@ -481,9 +575,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   }
   function scheduleLiveRefresh(){
     liveDirty=true;if(!connected||liveTimer||liveRefreshing)return;
-    if(modal){$('live-state').textContent='有更新，关闭表单后刷新';return;}
+    if(modal||statusPending||dragged||(statusNeedsRefresh&&layout==='board'&&!projectPageVisible)){$('live-state').textContent=statusNeedsRefresh?'有更新，请刷新看板核对':statusPending||dragged?'有更新，等待当前操作结束':'有更新，关闭表单后刷新';return;}
     liveTimer=setTimeout(async()=>{
-      liveTimer=null;if(!connected||modal)return;
+      liveTimer=null;if(!connected||modal||statusPending||dragged||(statusNeedsRefresh&&layout==='board'&&!projectPageVisible))return;
       liveDirty=false;liveRefreshing=true;const connection=liveAbort;
       try{if(projectPageVisible){if(await loadProjects(false,true,true)&&connection===liveAbort&&selectedProject&&!modal)await selectProject(selectedProject,true);return;}if(!await loadList(false,true)||connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
       catch(e){if(connection===liveAbort)notify(e.message);}
@@ -545,7 +639,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         const status=await response.json();
         if(status.packageFormat!==1||!Number.isInteger(status.apiContract)||typeof status.release!=='string')return;
         if(status.release===loaded){banner?.remove();banner=null;held=false;return;}
-        if(!held&&!editing()&&!pendingWrites&&!uncertainWrite){location.reload();return;}
+        if(!held&&!editing()&&!pendingWrites&&!uncertainWrite&&!dragged&&!statusNeedsRefresh){location.reload();return;}
         held=true;
         if(!banner){
           banner=el('aside',undefined,'notice');banner.setAttribute('role','status');

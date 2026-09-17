@@ -146,10 +146,12 @@ it('restores the original brand and task views without instructional banners', a
   const transport = mount(); await connect();
   expect(screen.getByRole('link', { name: 'Agent Steward · 本地任务工作台' })).toHaveTextContent('S');
   const views = screen.getByLabelText('任务状态视图');
-  expect([...views.querySelectorAll('button')].map(button => button.textContent)).toEqual(['未结束', '暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进', '最近全部']);
+  expect([...views.querySelectorAll('button')].map(button => button.textContent)).toEqual(['暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进']);
+  expect(screen.getByRole('button', { name: '执行中' })).toHaveAttribute('aria-pressed', 'true');
+  expect(transport.mock.calls.find(([path]) => String(path).startsWith('/api/tasks?'))?.[0]).toContain('view=in-progress');
   expect(screen.queryByText(/项目资料和任务由 AI/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Web 仅用于检索和展示/)).not.toBeInTheDocument();
-  for (const [name, parameter] of [['暂不开始', 'status=backlog'], ['等待开始', 'status=todo'], ['不再推进', 'status=cancelled'], ['执行中', 'view=in-progress'], ['待审核或验收', 'view=in-review'], ['受阻', 'view=blocked'], ['已完成', 'status=done'], ['最近全部', 'view=recent'], ['未结束', 'view=active']]) {
+  for (const [name, parameter] of [['暂不开始', 'status=backlog'], ['等待开始', 'status=todo'], ['不再推进', 'status=cancelled'], ['执行中', 'view=in-progress'], ['待审核或验收', 'view=in-review'], ['受阻', 'view=blocked'], ['已完成', 'status=done']]) {
     fireEvent.click(screen.getByRole('button', { name }));
     await waitFor(() => expect(screen.getByRole('button', { name: '刷新' })).not.toBeDisabled());
     expect(transport.mock.calls.some(([path]) => String(path).includes(parameter))).toBe(true);
@@ -178,7 +180,7 @@ it('keeps loaded closed-task pages on refresh failure and never mixes them into 
   await screen.findByRole('alert');
   expect(screen.getByRole('button', { name: /#40/ })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /#41/ })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: '未结束' }));
+  fireEvent.click(screen.getByRole('button', { name: '执行中' }));
   await waitFor(() => expect(screen.queryByRole('button', { name: /#41/ })).not.toBeInTheDocument());
   expect(transport.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
 });

@@ -39,7 +39,10 @@ try {
   const p = cli('project', 'create', '--name', '原生隔离项目').project;
   const empty = cli('project', 'create', '--name', '空资料项目').project;
   const noTasks = cli('project', 'create', '--name', '无任务项目').project;
-  const createTask = (name, project = p.id) => cli('task', 'create', '--input', input('task', { title: `0909｜功能｜${name}`, goal: '任务主体目标', scope: '任务主体范围', acceptanceCriteria: '任务主体验收', ...(project ? { project: String(project) } : {}) })).task;
+  const createTask = (name, project = p.id) => {
+    const task = cli('task', 'create', '--input', input('task', { title: `0909｜功能｜${name}`, goal: '任务主体目标', scope: '任务主体范围', acceptanceCriteria: '任务主体验收', ...(project ? { project: String(project) } : {}) })).task;
+    return cli('task', 'status', String(task.id), 'in_review', '--if-version', String(task.version)).task;
+  };
   const origin = createTask('不再推进来源任务');
   const profile = { summary: '简介长文本\n' + '原生展示LongText'.repeat(170), architecture: '架构入口独占项目页\n<script>不可执行</script>', development: '开发验证独占项目页\ncargo test', evidence: '合成核实依据，不是正式事实', sourceTaskId: origin.id, sourceTaskVersion: origin.version };
   let revision = p.revision;
@@ -88,17 +91,22 @@ try {
   browser = await chromium.launch({ headless: true, channel: process.env.STEWARD_BROWSER_CHANNEL === 'chromium' ? undefined : process.env.STEWARD_BROWSER_CHANNEL ?? 'chrome' });
   const context = await browser.newContext({ viewport: { width: 1360, height: 1000 } });
   const page = await context.newPage(), errors = [], posts = [];
+  let allowBoardWrites = false;
   page.on('pageerror', e => errors.push(e.message));
+  page.on('request', request => { if (request.method() !== 'GET') posts.push(new URL(request.url()).pathname); });
   await page.addInitScript(() => { window.__csp = []; document.addEventListener('securitypolicyviolation', e => window.__csp.push(e.violatedDirective)); });
   await page.route('**/api/**', async route => {
     const request = route.request(), pathname = new URL(request.url()).pathname;
-    if (request.method() !== 'GET') { posts.push(pathname); if (!['/api/login', '/api/logout'].includes(pathname)) { await route.abort(); return; } }
+    if (request.method() !== 'GET') { if (!['/api/login', '/api/logout'].includes(pathname) && !(allowBoardWrites && pathname === '/api/commands/task-status')) { await route.abort(); return; } }
     await route.continue();
   });
   const token = fs.readFileSync(path.join(path.dirname(credentialPath), 'readonly-credential'), 'utf8').trim();
   await page.goto(url);
   try { await page.getByLabel('本次服务的连接凭据').fill(token); await page.getByRole('button', { name: '连接工作台' }).click(); await page.locator('#workspace').waitFor({ state: 'visible' }); }
   catch { await page.screenshot({ path: path.join(artifacts, 'login-failure.png') }); console.error('Login diagnostic:', await page.locator('#login-error').textContent({ timeout: 1000 }).catch(() => 'Application login page unavailable'), errors); throw Error('Synthetic reader login failed (credential omitted)'); }
+  assert.deepEqual(await page.locator('[data-view]').allTextContents(), ['暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进']);
+  assert.equal(await page.locator('[data-view="in-progress"]').getAttribute('aria-pressed'), 'true');
+  await page.locator('[data-view="in-review"]').click();
   for (const number of [String(noProject.id), '#' + noProject.id]) {
     await page.locator('#search').fill(number); await page.locator('#search-form button').click();
     await page.waitForFunction(id => { const cards = document.querySelectorAll('#task-list .task-card'); return cards.length === 1 && cards[0].querySelector('.card-meta span')?.textContent === '#' + id; }, noProject.id);
@@ -121,7 +129,7 @@ try {
   await page.getByRole('button', { name: '复制交接上下文', exact: true }).click();
   await page.waitForFunction(() => window.__copied?.includes('规则完整正文'));
   const copied = await page.evaluate(() => window.__copied);
-  for (const text of ['历史版本依据', 'sourceTaskVersion', '"taskVersion": 1', '不构成执行授权']) assert(copied.includes(text));
+  for (const text of ['历史版本依据', 'sourceTaskVersion', `"taskVersion": ${origin.version}`, '不构成执行授权']) assert(copied.includes(text));
   assert.equal(await page.locator('#detail').getByText('架构入口独占项目页', { exact: false }).count(), 0);
   assert.equal(await page.locator('#detail').getByText(profile.summary, { exact: true }).isVisible(), false);
   await page.locator('#detail summary').filter({ hasText: '展开项目简介' }).click();
@@ -241,7 +249,7 @@ try {
   assert.equal(await page.locator('button:visible').filter({ hasText: /新建任务|新建项目|修改项目名称|记录进展|关闭任务|登记普通目录|添加组件|确认提交/ }).count(), 0);
   assert.deepEqual(await page.evaluate(() => window.__csp), []); assert.deepEqual(errors, []);
   await page.locator('#logout').click(); await page.locator('#login').waitFor({ state: 'visible' });
-  // Even an admin connection remains a readonly UI.
+  // Existing list/project controls stay readonly even for admins.
   const admin = fs.readFileSync(credentialPath, 'utf8').trim();
   try { await page.getByLabel('本次服务的连接凭据').fill(admin); await page.getByRole('button', { name: '连接工作台' }).click(); await page.locator('#workspace').waitFor({ state: 'visible' }); }
   catch { throw Error('Synthetic admin login failed (credential omitted)'); }
@@ -249,9 +257,96 @@ try {
   assert.equal(await page.getByRole('button', { name: '修改项目名称', exact: true }).isVisible().catch(() => false), false);
   await page.locator('#logout').click();
   assert.deepEqual(posts, ['/api/login', '/api/logout', '/api/login', '/api/logout']);
-  assert.equal(snapshot(), baseline, 'Browser changed synthetic database tables');
-  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['numeric and hash-prefixed task search', 'contract5 and in-review status', 'full rules/source copy and missing-rule copy rejection', 'full profile/provenance', 'compact task project', 'component scope', 'source directory documentation without filesystem queries', 'cancelled task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'reader/admin readonly boundary', 'all SQLite tables unchanged'] };
+  assert.equal(snapshot(), baseline, 'Readonly browsing changed synthetic database tables');
+  // Reader board has seven columns and no draggable cards or write capability.
+  await page.locator('#login').waitFor({ state: 'visible' }); await page.reload();
+  await page.getByLabel('本次服务的连接凭据').fill(token); await page.getByRole('button', { name: '连接工作台' }).click();
+  await page.locator('#workspace').waitFor({ state: 'visible' }); await page.locator('#board-mode').click();
+  assert.equal(new URL(page.url()).pathname, '/dashboard');
+  await page.reload();
+  assert.equal(new URL(page.url()).pathname, '/dashboard');
+  await page.locator('.kanban-column[data-status="in_review"] .task-card').first().waitFor();
+  assert.equal(await page.locator('.kanban-column').count(), 7);
+  assert.equal(await page.locator('.kanban [draggable="true"]').count(), 0);
+  await page.getByRole('button', { name: '加载更多待审核或验收', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-status="in_review"] .task-card').length > 30);
+  assert.equal(snapshot(), baseline, 'Reader board changed database');
+  await page.locator('#logout').click();
+  await page.locator('#login').waitFor({ state: 'visible' }); await page.reload();
+  await page.getByLabel('本次服务的连接凭据').fill(admin); await page.getByRole('button', { name: '连接工作台' }).click();
+  await page.locator('#workspace').waitFor({ state: 'visible' });
+  await page.locator('#board-mode').click();
+  const beforeMove = cli('task', 'show', String(noProject.id)).task;
+  const beforeHistory = cli('history', String(noProject.id)).history;
+  allowBoardWrites = true;
+  await page.evaluate(() => {
+    window.__dragEvents = [];
+    for (const name of ['dragstart','drop','dragend']) document.addEventListener(name, event => {
+      window.__dragEvents.push({type:name,task:event.target.closest('[data-task-id]')?.dataset.taskId,column:event.target.closest('[data-status]')?.dataset.status});
+    }, true);
+  });
+  await page.setViewportSize({ width: 1360, height: 1000 });
+  await page.locator('.kanban').evaluate(node => { node.scrollLeft = 400; });
+  const dragTask = async status => {
+    const card=page.locator(`.kanban [data-task-id="${noProject.id}"][draggable="true"]`);
+    await card.hover();
+    await page.locator('.kanban').evaluate(node => { node.scrollLeft = 400; });
+    const from=await card.boundingBox(),to=await page.locator(`[data-status="${status}"]`).boundingBox();
+    assert(from && to);
+    assert(to.x+to.width/2 < 1360 && to.x > 0, 'Drop target must be visible before mouse movement');
+    const x=from.x+from.width/2,y=from.y+from.height/2;
+    await page.mouse.move(x,y);await page.mouse.down();
+    await page.mouse.move(x+15,y+10,{steps:5});
+    await page.mouse.move(to.x+to.width/2,to.y+70,{steps:20});await page.mouse.up();
+  };
+  await dragTask('done');
+  await page.locator(`[data-status="done"] [data-task-id="${noProject.id}"]`).waitFor();
+  const moved = cli('task', 'show', String(noProject.id)).task;
+  assert.equal(moved.status, 'done'); assert.equal(moved.version, beforeMove.version + 1);
+  assert.deepEqual({ ...moved, status: beforeMove.status, version: beforeMove.version, updatedAt: beforeMove.updatedAt }, beforeMove);
+  assert.equal(cli('history', String(noProject.id)).history.length, beforeHistory.length + 1);
+  const conflict = async route => {
+    const current = cli('task', 'show', String(noProject.id)).task;
+    cli('task', 'note', String(noProject.id), '--if-version', String(current.version), '--type', 'progress', '--text', 'Synthetic concurrent modification');
+    await route.continue();
+  };
+  await page.route('**/api/commands/task-status', conflict);
+  await page.locator(`[data-status="done"] [data-task-id="${noProject.id}"][draggable="true"]`).waitFor();
+  await dragTask('blocked');
+  await page.locator('#notice').getByText('任务已被其他操作修改，未覆盖。请刷新看板后重新决定。', { exact: true }).waitFor();
+  assert.equal(await page.locator(`[data-status="done"] [data-task-id="${noProject.id}"]`).count(), 1);
+  assert.equal(await page.locator('.kanban [draggable="true"]').count(), 0);
+  assert.equal(cli('task', 'show', String(noProject.id)).task.status, 'done');
+  assert.equal(posts.filter(p => p === '/api/commands/task-status').length, 2, 'Unexpected write retry');
+  await page.unroute('**/api/commands/task-status', conflict);
+  await page.locator('#refresh').click();
+  await page.locator(`.kanban [data-task-id="${noProject.id}"][draggable="true"]`).waitFor();
+  for (const width of [1360, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Board overflows document');
+    assert(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1), 'Dashboard must fit the viewport vertically');
+    assert.equal(await page.locator('#detail').isVisible(), false, 'Dashboard should not reserve an empty detail pane');
+    const bounds=await page.locator('.kanban').boundingBox();assert(bounds && bounds.width >= width - 60, 'Dashboard must use full page width');
+    await page.screenshot({ path: path.join(artifacts, `board-${width}.png`), fullPage: true });
+  }
+  await page.locator(`.kanban [data-task-id="${noProject.id}"]`).click();
+  await page.locator('#detail').waitFor({ state: 'visible' });
+  await page.locator('#close-dashboard-detail').click();
+  assert.equal(await page.locator('#detail').isVisible(), false);
+  await page.locator('#list-mode').click();assert.equal(new URL(page.url()).pathname, '/');
+  await page.goBack();await page.locator('.kanban-column').first().waitFor();
+  assert.equal(new URL(page.url()).pathname, '/dashboard');
+  assert.deepEqual(errors, []);
+  const result = { result: 'PASS', uiVersion: status.uiVersion, release, node: process.version, browser: browser.version(), binaryHashes: Object.fromEntries(['taskd', 'taskctl'].map(name => [name, sha(fs.readFileSync(binary(name)))])), artifacts, checks: ['numeric and hash-prefixed task search', 'contract5 and in-review status', 'full rules/source copy and missing-rule copy rejection', 'full profile/provenance', 'compact task project', 'component scope', 'source directory documentation without filesystem queries', 'cancelled task navigation', 'real task/history pagination', 'before/after history', 'empty/missing/error states', 'read retry and stale project response', '1360/390/320px layout and CSP', 'readonly browsing preserves all SQLite tables', 'reader board non-draggable', 'seven-column pagination', 'admin drag with CAS and unchanged Session', 'version conflict holds card without retry', 'board responsive layout'] };
   fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2)); success = true;
+} catch (error) {
+  const failedPage = browser?.contexts()[0]?.pages()[0];
+  if (failedPage) {
+    await failedPage.screenshot({ path: path.join(artifacts, 'failure.png'), fullPage: true }).catch(() => {});
+    console.error('Synthetic board notice:', await failedPage.locator('#notice').textContent().catch(() => '(unavailable)'));
+    console.error('Synthetic drag events:', await failedPage.evaluate(() => window.__dragEvents).catch(() => []));
+  }
+  throw error;
 } finally {
   try { if (browser) await browser.close(); }
   finally {

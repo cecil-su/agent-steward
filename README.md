@@ -2,7 +2,7 @@
 
 Agent Steward 是本地优先的任务数据中心。用户主导任务方向和状态，AI 辅助理解需求、开发、记录信息并按用户指令操作；Steward 保存和提供这些数据，不替用户判断任务是否完成。
 
-`taskctl` 提供 CLI，`task-hook` 接收显式绑定的宿主事件元数据，`taskd` 提供 HTTP 与只读工作台。SQLite 保存业务状态。项目源码路径是普通资料，不访问源码目录、不查询 Git，也不管理 Worktree。
+`taskctl` 提供 CLI，`task-hook` 接收显式绑定的宿主事件元数据，`taskd` 提供 HTTP 与 Web 工作台。原生看板仅向管理员开放拖拽修改状态，其余业务操作保持只读。SQLite 保存业务状态。项目源码路径是普通资料，不访问源码目录、不查询 Git，也不管理 Worktree。
 
 ## 当前合同
 
@@ -54,7 +54,7 @@ npm test
 npm run build
 ```
 
-前端 Node 版本见 `.nvmrc`。React 与原生 UI 共用 Markdown 解析与样式，`npm run build:native-markdown` 只更新原生源码的生成前缀。页面保持业务只读；认证登录/退出不是任务写操作。
+前端 Node 版本见 `.nvmrc`。React 与原生 UI 共用 Markdown 解析与样式，`npm run build:native-markdown` 只更新原生源码的生成前缀。React 保持业务只读；原生页面提供七列看板，管理员可拖拽改变状态，保留鉴权、CAS、History及Session解耦，其余业务操作只读。认证登录/退出不是任务写操作。
 
 ## 迁移与运行
 

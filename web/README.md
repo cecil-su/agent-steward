@@ -8,7 +8,7 @@
 
 当前已提供：
 
-- 七状态：backlog 暂不开始、todo 等待开始（默认）、in_progress 执行中、in_review 待审核或验收、blocked 受阻、done 已完成、cancelled 不再推进。任意状态转换由用户或 AI 通过 CLI 完成。页面支持七状态及 active/recent 筛选；backlog/todo/done/cancelled 使用 status 参数，其余使用 view。
+- 七状态：backlog 暂不开始、todo 等待开始（新建任务默认）、in_progress 执行中、in_review 待审核或验收、blocked 受阻、done 已完成、cancelled 不再推进。任意状态转换由用户或 AI 通过 CLI 完成。页面只提供七状态筛选，默认选中“执行中”，不显示“未结束”或“最近全部”聚合入口；backlog/todo/done/cancelled 使用 status 参数，其余使用 view。
 - 项目列表、按唯一名称或 `##ID` 精确查找、详情和分页历史。
 - 项目→关联任务筛选、任务→所属项目导航及清除筛选。
 - Checkpoint、近期备注/截断提示、完整备注、Session 和任务历史只读展示。Session 与任务状态独立，无 Session 写入口。

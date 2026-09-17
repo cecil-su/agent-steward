@@ -194,6 +194,7 @@ impl ServerState {
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/", get(ui::index))
+        .route("/dashboard", get(ui::index))
         .route("/ui/status", get(ui::status))
         .route("/ui/releases/{id}/{name}", get(ui::asset))
         .route("/app.js", get(script))

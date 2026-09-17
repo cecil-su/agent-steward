@@ -42,7 +42,7 @@ Schema8的`session_events`外键指向Session，不是通用Event/Actor/Operatio
 - 请求体总上限1 MiB（Hook为16 KiB）；路径参数使用明确绝对路径，拒绝NUL及Windows设备/命名管道命名空间，不能使用Daemon cwd推断浏览器目录。没有HTTP文件正文下载端点，但管理员可在显式已审查确认后导入服务进程有权读取的普通文件（最多16 MiB）到SQLite，API显示路径、hash与大小；reader/匿名不能调用该写入。管理员Import的普通UNC文件系统路径当前并未禁用，可能触发服务端网络访问，部署必须按管理员拥有这些主机文件/网络能力评估，不能宣称只允许浏览器本地文件。源码路径登记仅保存资料，不访问目标。
 - `taskctl --json` 和 HTTP业务JSON的成功、失败都使用 schemaVersion=3 envelope；不适用于独立宿主适配器 `task-hook`：generic成功为 `{ok:true,data:...}`，Codex成功或忽略事件为 `{}`，失败写stderr并非零退出，不为统一外形改变宿主协议。400 输入无效、401 认证失败、403 来源拒绝、404 不存在、409 CAS/Session/Hook 冲突、503 busy、500 其它失败；不得依赖自然语言解析错误。
 - 所有写操作只在用户提交时发送一次。禁止自动重试 create/resume/status 等业务写请求；超时或断连提示“结果未确认，请刷新核对”。冲突保留用户输入并显示新版本，用户重新审查后提交；不能自动把最新 version 填回旧 Patch 重放。
-- GUI 是只读工作台，提供任务/项目检索、详情、备注、Checkpoint、Session 历史、Hook观测、Import元数据、History、源码路径资料、项目资料与有效规则、任务上下文复制；没有代码现场或源码导航。不提供任务/项目维护、状态变更、领取/恢复或其他业务写入口；业务维护使用CLI，HTTP写合同不因隐藏按钮而取消。认证连接/退出不属于业务写入。只读边界见[UI独立发布](14-UI独立发布.md)。
+- GUI 提供任务/项目检索、详情、备注、Checkpoint、Session 历史、Hook观测、Import元数据、History、源码路径资料、项目资料与有效规则、任务上下文复制；没有代码现场或源码导航。原生看板仅允许管理员通过拖拽调用 `POST /api/commands/task-status`，正文为 `taskId/expectedVersion/status`；保留 Origin/CSRF、CAS 和 History，状态与 Session 解耦。只读用户不可拖拽，失败不自动重试。React 及其他业务操作仍只读，不提供任务/项目维护或领取/恢复入口；HTTP写合同不因隐藏按钮而取消。认证连接/退出不属于业务写入。只读边界见[UI独立发布](14-UI独立发布.md)。
 - 提供管理员/只读两种凭据；后端在读取写请求体和执行业务操作前拒绝只读凭据的业务非 GET/HEAD 请求；建立浏览器授权和退出登录例外不赋予写权限。通过认证 SSE 推送数据失效通知，页面重新查询快照；每秒观察 SQLite data_version，支持 CLI/Hook 外部提交。最多 16 条独立订阅，断线重连但不重放写请求，表单打开时只提示待刷新。保留手动刷新，不引入 WebSocket 或通用 Operation 模型。API 与 CLI 复用结果，GUI 不解析终端文本。
 
 ## 状态与退役接口

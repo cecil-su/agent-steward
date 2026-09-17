@@ -102,14 +102,19 @@ try {
     await page.getByLabel('连接凭据（本机授权可留空）').fill(reader);
     await page.getByRole('button', { name: '连接', exact: true }).click();
   }
+  assert.equal(await page.getByRole('button', { name: '执行中', exact: true }).getAttribute('aria-pressed'), 'true');
+  await page.getByRole('button', { name: '待审核或验收', exact: true }).click();
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   await page.getByText('实时同步', { exact: true }).waitFor();
   assert(subscriptions >= 2, 'SSE failed to reconnect after HTTP 503');
   await page.reload();
+  await page.getByRole('button', { name: '执行中', exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: '执行中', exact: true }).getAttribute('aria-pressed'), 'true');
+  await page.getByRole('button', { name: '待审核或验收', exact: true }).click();
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   assert.equal(await page.getByRole('button', { name: '连接', exact: true }).count(), 0, 'Refresh did not restore cookie authorization');
   await page.getByRole('link', { name: 'Agent Steward · 本地任务工作台' }).waitFor();
-  assert.deepEqual(await page.getByLabel('任务状态视图').getByRole('button').allTextContents(), ['未结束', '暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进', '最近全部']);
+  assert.deepEqual(await page.getByLabel('任务状态视图').getByRole('button').allTextContents(), ['暂不开始', '等待开始', '执行中', '待审核或验收', '受阻', '已完成', '不再推进']);
   assert.equal(await page.getByText(/项目资料和任务由 AI|Web 仅用于检索和展示/).count(), 0);
   await page.route('**/api/tasks?**', async route => {
     if (['in-progress', 'blocked'].includes(new URL(route.request().url()).searchParams.get('view'))) await delay(800);
@@ -126,7 +131,7 @@ try {
     await page.getByRole('button', { name: '刷新', exact: true }).waitFor();
     assert.deepEqual(await Promise.all(anchors.map(anchor => anchor.boundingBox())), before, 'Completed filtering moved workspace anchors');
     await page.screenshot({ path: path.join(artifacts, `stable-filter-${width}.png`), fullPage: true });
-    await page.getByRole('button', { name: '未结束', exact: true }).click();
+    await page.getByRole('button', { name: '待审核或验收', exact: true }).click();
     await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   }
   await page.unroute('**/api/tasks?**');
@@ -134,7 +139,7 @@ try {
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).waitFor();
   assert.equal(baseline.status, 'in_review');
   assert(await page.getByText('待审核或验收', { exact: true }).count() >= 2);
-  await page.getByRole('button', { name: '未结束', exact: true }).click();
+  await page.getByRole('button', { name: '待审核或验收', exact: true }).click();
   await page.setViewportSize({ width: 1360, height: 1000 });
   await page.getByRole('button', { name: new RegExp(`^#${task.id}\\b`) }).click();
   await page.getByRole('heading', { name: '未命名任务', exact: true }).waitFor();
@@ -160,6 +165,7 @@ try {
   assert(subscriptions >= 2, 'SSE failed to reconnect after HTTP 503');
   await page.getByRole('searchbox').fill('未应用的搜索草稿');
   const extra = cli('task', 'create', 'SSE-READONLY').task;
+  cli('task', 'status', String(extra.id), 'in_review', '--if-version', String(extra.version));
   await page.getByText(/当前输入已保留/).waitFor();
   assert.equal(await page.getByRole('searchbox').inputValue(), '未应用的搜索草稿');
   assert.equal(await page.getByRole('button', { name: new RegExp(`^#${extra.id}\\b`) }).count(), 0);

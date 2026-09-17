@@ -32,7 +32,7 @@ function fixture(notes: unknown[] = [], noteFailure = false, accessFailure = fal
   });
   const writeText = vi.fn(async (_text: string) => {});
   const end = source.lastIndexOf('  startUiUpdates();');
-  const code = source.slice(0, end).replace('(() => {', 'return (() => {') + `connected=true;projectsSupported=true;projectPageVisible=true;return {api,connect,renderDetail,selectProject,copyContext,contextText,taskHistoryItem,statuses,setContext(value){context=value;selected=value.task.id;}};})();`;
+  const code = source.slice(0, end).replace('(() => {', 'return (() => {') + `connected=true;projectsSupported=true;projectPageVisible=true;return {api,connect,loadList,renderDetail,selectProject,copyContext,contextText,taskHistoryItem,statuses,setContext(value){context=value;selected=value.task.id;}};})();`;
   const api = new Function('document', 'fetch', 'navigator', code)(document, transport, { clipboard: { writeText } });
   api.setContext(responseContext);
   return { ...api, transport, writeText, response: (value: unknown) => { responseContext = value as ReturnType<typeof snapshot>; } };
@@ -48,9 +48,14 @@ it('disables credential entry until the initial authorization check settles', as
 });
 
 it('keeps native layout, filters all seven statuses and uses contract5 for reads and SSE', async () => {
-  const f = fixture(); await f.renderDetail();
+  const f = fixture();
+  expect([...document.querySelectorAll('[data-view]')].map(button => button.getAttribute('data-view'))).toEqual(['backlog','todo','in-progress','in-review','blocked','done','cancelled']);
+  expect(document.querySelector('[data-view="in-progress"]')).toHaveAttribute('aria-pressed', 'true');
+  await f.loadList();
+  expect(f.transport.mock.calls.find(([path]: [string]) => path.startsWith('/api/tasks?'))?.[0]).toContain('view=in-progress');
+  await f.renderDetail();
   expect(document.querySelector('#detail .badge')).toHaveTextContent('待审核或验收');
-  for (const [view, parameter] of [['backlog','status=backlog'],['todo','status=todo'],['in-progress','view=in-progress'],['in-review','view=in-review'],['blocked','view=blocked'],['done','status=done'],['cancelled','status=cancelled'],['recent','view=recent'],['active','view=active']]) {
+  for (const [view, parameter] of [['backlog','status=backlog'],['todo','status=todo'],['in-progress','view=in-progress'],['in-review','view=in-review'],['blocked','view=blocked'],['done','status=done'],['cancelled','status=cancelled']]) {
     await (document.querySelector<HTMLButtonElement>(`[data-view="${view}"]`)!.onclick as unknown as () => Promise<void>)();
     expect(f.transport.mock.calls.some(([path]: [string]) => path.includes(parameter))).toBe(true);
   }

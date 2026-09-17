@@ -28,7 +28,7 @@ interface WorkspaceState {
   selectProject: (id: number) => void;
   reset: () => void;
 }
-const initial = { tab: 'tasks' as Tab, view: 'active', searchInput: '', query: '', projectSearchInput: '', projectQuery: '', projectFilter: null, detailTab: 'overview' as DetailTab, selectedTaskId: null, selectedProjectId: null };
+const initial = { tab: 'tasks' as Tab, view: 'in-progress', searchInput: '', query: '', projectSearchInput: '', projectQuery: '', projectFilter: null, detailTab: 'overview' as DetailTab, selectedTaskId: null, selectedProjectId: null };
 // Only ephemeral UI state. Tasks/projects live exclusively in the Query cache.
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   ...initial,

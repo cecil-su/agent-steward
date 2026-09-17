@@ -18,7 +18,7 @@ function makeProps(overrides: Partial<ReadonlyWorkspaceProps> = {}): ReadonlyWor
     selectedTaskId: null, selectedProjectId: null, onSelectTask: vi.fn(), onSelectProject: vi.fn(),
     projectManagement: true, busy: false, error: null, hasMore: false, onMore: vi.fn(),
     onRefresh: vi.fn(), query: '', onQueryChange: vi.fn(), onSearch: vi.fn(),
-    view: 'active', onViewChange: vi.fn(), ...overrides,
+    view: 'in-progress', onViewChange: vi.fn(), ...overrides,
   };
 }
 
@@ -148,11 +148,14 @@ describe('ReadonlyWorkspace', () => {
     fireEvent.click(screen.getByRole('button', { name: /展示任务/ }));
     expect(props.onSelectTask).toHaveBeenCalledWith(12);
     const views = within(screen.getByLabelText('任务状态视图'));
-    for (const [label, value] of [['未结束', 'active'], ['执行中', 'in-progress'], ['受阻', 'blocked'], ['已完成', 'done'], ['最近全部', 'recent']]) {
+    for (const [label, value] of [['暂不开始', 'backlog'], ['等待开始', 'todo'], ['执行中', 'in-progress'], ['待审核或验收', 'in-review'], ['受阻', 'blocked'], ['已完成', 'done'], ['不再推进', 'cancelled']]) {
       fireEvent.click(views.getByRole('button', { name: label }));
       expect(props.onViewChange).toHaveBeenLastCalledWith(value);
     }
-    expect(views.getByRole('button', { name: '未结束' }).getAttribute('aria-pressed')).toBe('true');
+    expect(views.getAllByRole('button')).toHaveLength(7);
+    expect(views.queryByRole('button', { name: '未结束' })).toBeNull();
+    expect(views.queryByRole('button', { name: '最近全部' })).toBeNull();
+    expect(views.getByRole('button', { name: '执行中' }).getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     fireEvent.click(screen.getByRole('button', { name: '加载更多' }));
     fireEvent.click(screen.getByRole('button', { name: '项目' }));

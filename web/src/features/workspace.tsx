@@ -50,7 +50,6 @@ export interface ReadonlyWorkspaceProps {
 }
 
 const views = [
-  ['active', '未结束'],
   ['backlog', '暂不开始'],
   ['todo', '等待开始'],
   ['in-progress', '执行中'],
@@ -58,7 +57,6 @@ const views = [
   ['blocked', '受阻'],
   ['done', '已完成'],
   ['cancelled', '不再推进'],
-  ['recent', '最近全部'],
 ] as const;
 const statusLabels = { backlog: '暂不开始', todo: '等待开始', in_progress: '执行中', in_review: '待审核或验收', blocked: '受阻', done: '已完成', cancelled: '不再推进' };
 
