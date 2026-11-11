@@ -6,6 +6,8 @@ export function formatTaskContext(context: TaskContext): string {
   return [
     `# ${task.title || '未命名任务'} (#${task.id})`,
     `状态：${task.status} · version ${task.version}`,
+    '', '## 当前需求与待确认事项', context.work === undefined ? '需求管理不可用' : context.work === null ? '尚未整理，不代表没有需求' : json(context.work),
+    '需求项的当前进展以上述结构化清单为准；原始记录保留依据，不自动产生旧待办。',
     '', '## 目标', task.goal || '尚未填写',
     '', '## 范围', task.scope || '尚未填写',
     '', '## 验收', task.acceptanceCriteria || '尚未填写',

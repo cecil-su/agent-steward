@@ -725,6 +725,7 @@ async fn task_resource(
 ) -> Response {
     run_read(state, move |s| match resource.as_str() {
         "context" => s.task_context(&id),
+        "work" => s.task_work(&id),
         "history" => s.history(&id),
         "notes" => s.task_notes(&id),
         _ => Err(AppError::not_found("Endpoint", "resource")),
@@ -800,6 +801,11 @@ async fn hook(State(state): State<ServerState>, body: Bytes) -> Response {
     deny_unknown_fields
 )]
 enum Command {
+    TaskWorkUpdate {
+        task_id: i64,
+        expected_version: i64,
+        input: Value,
+    },
     ProjectCreate {
         name: String,
     },
@@ -970,6 +976,11 @@ fn absolute(value: &str) -> AppResult<&FsPath> {
 }
 fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
     match command {
+        Command::TaskWorkUpdate {
+            task_id,
+            expected_version,
+            input,
+        } => s.task_work_update(&task_id.to_string(), expected_version, &input.to_string()),
         Command::ProjectCreate { name } => s.project_create(&name),
         Command::ProjectRename {
             project_id,

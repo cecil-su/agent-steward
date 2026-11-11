@@ -85,6 +85,37 @@ async fn workspace_routes_serve_the_same_ui_shell_and_security_headers() {
 }
 
 #[tokio::test]
+async fn requirements_roundtrip_through_http_with_cas_and_unchanged_task_status() {
+    let (_temp, s, app) = fixture();
+    let (status, body) = request(&app, "GET", "/api/tasks/1/work", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"]["work"].is_null());
+    let input = json!({"reason":"synthetic explicit requirement", "requirements":[{"id":"R1","title":"保持需求进展","acceptanceCriteria":"可恢复","status":"done","result":"已保存","evidence":["fixture persisted"]}]});
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/commands/task-work-update",
+        Some(json!({"taskId":1,"expectedVersion":1,"input":input})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["task"]["status"], "todo");
+    let stored = body["data"]["work"].clone();
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/commands/task-work-update",
+        Some(json!({"taskId":1,"expectedVersion":1,"input":input})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = request(&app, "GET", "/api/tasks/1/context", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["work"], stored);
+    assert_eq!(s.task_show("1").unwrap().data["task"]["version"], 2);
+}
+
+#[tokio::test]
 async fn closed_task_notes_use_existing_command_and_cas() {
     let (_temp, s, app) = fixture();
     s.task_status("1", 1, "cancelled").unwrap();

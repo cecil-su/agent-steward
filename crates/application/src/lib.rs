@@ -18,6 +18,10 @@ mod sources;
 pub use sources::SourceLocation;
 mod sessions;
 mod tasks;
+mod work;
+pub use work::{
+    Confirmation, ConfirmationStatus, Requirement, RequirementStatus, TaskWork, WorkPatch,
+};
 
 use path_safety::PathError;
 use rusqlite::ErrorCode;

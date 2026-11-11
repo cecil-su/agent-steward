@@ -1,6 +1,7 @@
 import type { DetailTab, HistoryEntry, Note, Session, TaskContext, ProjectProfile, SessionRules } from '../lib/contracts';
 import { EmptyState } from '../components/ui/empty-state';
 import { Markdown } from '../components/markdown';
+import { TaskWorkPanel } from './task-work-panel';
 
 export function SessionRulesPanel({ rules }: { rules?: SessionRules }) {
   return <section aria-label="有效个人与项目规则" className="space-y-3 rounded-lg border border-border bg-card p-4">
@@ -99,6 +100,8 @@ export function TaskDetailPanel({ tab, context, notes, sessions, history }: {
 
   const checkpoint = context.checkpoint;
   return <div className="space-y-6">
+    <TaskWorkPanel work={context.work} />
+    <details><summary className="cursor-pointer text-primary">原始进展记录（按需查看）</summary>
     <section aria-label="Checkpoint">
       <h3 className="font-semibold">Checkpoint</h3>
       {checkpoint ? <div className="space-y-3 text-sm">
@@ -115,6 +118,7 @@ export function TaskDetailPanel({ tab, context, notes, sessions, history }: {
       {context.notesTruncated && <p role="status" className="my-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">近期备注已截断，并非完整记录；请查看进展备注。</p>}
       <NotesPanel notes={context.notesSinceCheckpoint} />
     </section>
+    </details>
     {context.session && <section aria-label="当前 Session"><h3 className="font-semibold">当前 Session</h3><SessionPanel sessions={[context.session]} /></section>}
   </div>;
 }

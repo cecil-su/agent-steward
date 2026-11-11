@@ -26,6 +26,7 @@ impl Service {
         let tx = connection.transaction().map_err(AppError::from_sqlite)?;
         let task = load_task_by_reference(&tx, reference)?;
         let checkpoint = load_latest_checkpoint(&tx, &task)?;
+        let work = crate::work::load_work(&tx, task.id)?;
         let session = task
             .current_session_id
             .as_deref()
@@ -64,9 +65,11 @@ impl Service {
         notes.truncate(50);
         notes.reverse();
         tx.commit().map_err(AppError::from_sqlite)?;
-        let mut outcome = Outcome::new(json!({"task": task, "checkpoint": checkpoint,
+        let mut outcome = Outcome::new(
+            json!({"task": task, "work": work, "checkpoint": checkpoint,
             "session": session, "project": project, "projectProfile": project_profile, "sessionRules": session_rules, "notesSinceCheckpoint": notes,
-            "notesTruncated": notes_truncated}));
+            "notesTruncated": notes_truncated}),
+        );
         if notes_truncated {
             outcome.warnings.push(warning("CONTEXT_NOTES_TRUNCATED", "Only the latest 50 notes after the checkpoint are included; use task notes to read all notes", json!({"taskId":task.id})));
         }

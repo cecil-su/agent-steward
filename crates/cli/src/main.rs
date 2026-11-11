@@ -260,6 +260,16 @@ enum TaskListView {
 
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Read task-local requirements and decisions without changing the database.
+    Work {
+        task_id: String,
+    },
+    /// Apply requirement/decision patches from --input, preserving other items.
+    WorkUpdate {
+        task_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+    },
     /// Select component names within the task's project (or explicitly clear the selection).
     Components {
         task_id: String,
@@ -838,6 +848,15 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
                     fields,
                 })
             }
+            TaskCommand::Work { task_id } => service.task_work(task_id),
+            TaskCommand::WorkUpdate {
+                task_id,
+                if_version,
+            } => service.task_work_update(
+                task_id,
+                *if_version,
+                &required_input(cli.input.as_deref())?,
+            ),
             TaskCommand::Show { task_id } => service.task_show(task_id),
             TaskCommand::Create { task_key, project } => {
                 let input = cli.input.as_deref().map(read_input).transpose()?;
@@ -1274,6 +1293,12 @@ fn render_task_context(data: &Value) -> String {
             text(&data["project"]["revision"])
         ));
     }
+    output.push_str("## Current requirements and user decisions\n\n");
+    match &data["work"] {
+        Value::Null => output.push_str("Not organized into structured requirements yet; this does not mean there are no requirements.\n\n"),
+        work => output.push_str(&format!("{}\n\n", serde_json::to_string_pretty(work).unwrap())),
+    }
+    output.push_str("The current requirement snapshot is authoritative for item progress; old checkpoint/notes remain evidence, not new pending work. Agent maintains items and resolves only real user decisions, never changes Task status from item totals.\n\n");
     output.push_str("## Session rules (personal preferences, not execution authorization)\n\n");
     if let Some(rules) = data["sessionRules"]["rules"].as_array() {
         if rules.is_empty() {

@@ -1,3 +1,4 @@
+import type { TaskWork } from './task-work';
 export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done' | 'cancelled';
 export interface Task {
   id: number;
@@ -40,7 +41,7 @@ export interface SessionRule {
   content: { name: string; body: string; sources: { kind: 'explicit' | 'inferred'; evidence: string; taskId: number | null; taskVersion: number | null }[] };
 }
 export interface SessionRules { formatVersion: 1; rules: SessionRule[] }
-export interface TaskContext { sessionRules?: SessionRules; task: Task; project?: Project | null; projectProfile?: ProjectProfile | null; checkpoint?: Checkpoint | null; notesSinceCheckpoint?: Note[]; notesTruncated?: boolean; session?: Session | null }
+export interface TaskContext { work?: TaskWork | null; sessionRules?: SessionRules; task: Task; project?: Project | null; projectProfile?: ProjectProfile | null; checkpoint?: Checkpoint | null; notesSinceCheckpoint?: Note[]; notesTruncated?: boolean; session?: Session | null }
 export interface Component { id: number; name: string }
 export interface Source { id: number; projectId: number; componentId: number | null; directoryPath: string; createdAt: string }
 export interface ProjectDetail { sessionRules?: SessionRules; project: Project; profile?: ProjectProfile | null; components: Component[]; sources: Source[] }
