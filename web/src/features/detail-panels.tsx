@@ -13,7 +13,7 @@ export function SessionRulesPanel({ rules }: { rules?: SessionRules }) {
         <h4 className="font-semibold">{rule.content.name}</h4>
         <p className="text-muted-foreground">规则 #{rule.id} · 修订 {rule.revision} · {rule.scope === 'global' ? '通用' : `项目 ##${rule.projectId}`}</p>
         <p className="whitespace-pre-wrap break-words">{rule.content.body}</p>
-        {rule.content.sources.length === 0 ? <p>无任务来源的直接偏好。</p> : <ul className="space-y-2">{rule.content.sources.map((source, index) => <li key={index} className="whitespace-pre-wrap break-words">{source.kind === 'explicit' ? '明确表达' : '归纳推断'}：{source.evidence}{source.taskId !== null && `（Task #${source.taskId} · 历史版本 ${source.taskVersion}）`}</li>)}</ul>}
+        {rule.content.sources.length === 0 ? <p>无任务来源的直接偏好。</p> : <ul className="space-y-2">{rule.content.sources.map((source, index) => <li key={index} className="whitespace-pre-wrap break-words">{source.kind === 'explicit' ? '明确表达' : '归纳推断'}：{source.evidence}{source.taskId !== null && `（Task #${source.taskId} · 历史版本 ${source.taskVersion}${rule.deletedSourceTaskIds?.includes(source.taskId) ? ' · 来源任务已逻辑删除，历史保留' : ''}）`}</li>)}</ul>}
       </article>)}
   </section>;
 }
@@ -36,7 +36,7 @@ export function ProjectProfilePanel({ profile }: { profile?: ProjectProfile | nu
               ['架构入口', profile.architecture],
               ['开发验证', profile.development],
               ['依据', profile.evidence],
-              ['来源 Task', `#${profile.sourceTaskId}`],
+              ['来源 Task', `#${profile.sourceTaskId}${profile.sourceTaskDeletion ? ' · 已逻辑删除，历史保留' : ''}`],
               ['来源 Task 记录版本', profile.sourceTaskVersion],
               ['资料修订', profile.revision],
               ['资料更新时间', profile.updatedAt],

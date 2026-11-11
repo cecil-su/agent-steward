@@ -40,6 +40,8 @@ pub struct RuleView {
     pub revision: i64,
     pub content_version: i64,
     pub content: RuleContent,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_source_task_ids: Vec<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -135,6 +137,7 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(RuleView, String)> {
                 body: String::new(),
                 sources: vec![],
             },
+            deleted_source_task_ids: vec![],
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
         },
@@ -155,12 +158,20 @@ fn validate_view(view: &RuleView) -> AppResult<()> {
     }
     Ok(())
 }
-fn decode((mut view, raw): (RuleView, String)) -> AppResult<RuleView> {
+fn decode(c: &Connection, (mut view, raw): (RuleView, String)) -> AppResult<RuleView> {
     if raw.len() > MAX_RULE_BYTES {
         return Err(stored_error());
     }
     view.content = serde_json::from_str(&raw).map_err(|_| stored_error())?;
     validate_view(&view)?;
+    for source in &view.content.sources {
+        if let Some(id) = source.task_id
+            && crate::deletion::deletion(c, id)?.is_some()
+            && !view.deleted_source_task_ids.contains(&id)
+        {
+            view.deleted_source_task_ids.push(id);
+        }
+    }
     Ok(view)
 }
 const SELECT: &str = "SELECT id,scope,project_id,status,revision,content_version,content_json,created_at,updated_at FROM rules";
@@ -170,7 +181,7 @@ fn load(c: &Connection, id: i64) -> AppResult<RuleView> {
         .optional()
         .map_err(AppError::from_sqlite)?
         .ok_or_else(|| AppError::not_found("rule", &id.to_string()))?;
-    decode(raw)
+    decode(c, raw)
 }
 pub(crate) fn session_rules(c: &Connection, project: Option<i64>) -> AppResult<Value> {
     let mut statement = c
@@ -181,7 +192,7 @@ pub(crate) fn session_rules(c: &Connection, project: Option<i64>) -> AppResult<V
     let rules = statement
         .query_map([project], from_row)
         .map_err(AppError::from_sqlite)?
-        .map(|r| decode(r.map_err(AppError::from_sqlite)?))
+        .map(|r| decode(c, r.map_err(AppError::from_sqlite)?))
         .collect::<AppResult<Vec<_>>>()?;
     Ok(json!({"formatVersion":1,"rules":rules}))
 }
@@ -207,7 +218,7 @@ impl Service {
         let rules = s
             .query_map(params![scope, project, status], from_row)
             .map_err(AppError::from_sqlite)?
-            .map(|r| decode(r.map_err(AppError::from_sqlite)?))
+            .map(|r| decode(&c, r.map_err(AppError::from_sqlite)?))
             .collect::<AppResult<Vec<_>>>()?;
         Ok(Outcome::new(json!({"rules":rules})))
     }
@@ -267,7 +278,7 @@ impl Service {
         }
         for source in &input.content.sources {
             if let Some(id) = source.task_id {
-                let task = crate::db::load_task(&tx, id)?;
+                let task = crate::db::load_task_for_audit(&tx, id)?;
                 // A historical reference, not CAS against a source task's current version.
                 if source.task_version.unwrap() > task.version {
                     return Err(AppError::invalid(

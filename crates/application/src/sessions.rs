@@ -79,7 +79,8 @@ impl Service {
     pub fn session_show(&self, id: &str) -> AppResult<Outcome> {
         let connection = self.connection()?;
         let session = load_session(&connection, id)?;
-        let mut outcome = Outcome::new(json!({"session": session}));
+        let deleted = crate::deletion::deletion(&connection, session.task_id)?;
+        let mut outcome = Outcome::new(json!({"session": session, "deletion": deleted}));
         if let Some(path) = outcome.data["session"]["recordPath"].as_str()
             && !Path::new(path).exists()
         {
@@ -108,7 +109,7 @@ impl Service {
             connection
                 .prepare(
                     "SELECT id,task_id,source,external_session_id,continued_from,record_path,started_at,ended_at
-                     FROM sessions ORDER BY started_at ASC,id ASC",
+                     FROM sessions WHERE NOT EXISTS (SELECT 1 FROM history deletion WHERE deletion.task_id=sessions.task_id AND deletion.change_type='task.deleted') ORDER BY started_at ASC,id ASC",
                 )
                 .map_err(AppError::from_sqlite)?
         };
@@ -536,7 +537,8 @@ impl Service {
 
     pub fn session_import_list(&self, session_id: &str) -> AppResult<Outcome> {
         let connection = self.connection()?;
-        let _ = load_session(&connection, session_id)?;
+        let session = load_session(&connection, session_id)?;
+        let deleted = crate::deletion::deletion(&connection, session.task_id)?;
         let mut statement = connection
             .prepare(
                 "SELECT id,session_id,source_path,media_type,sha256,length(content),imported_at
@@ -548,7 +550,9 @@ impl Service {
             .map_err(AppError::from_sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::from_sqlite)?;
-        Ok(Outcome::new(json!({"imports": imports})))
+        Ok(Outcome::new(
+            json!({"imports": imports, "deletion": deleted}),
+        ))
     }
 
     pub fn session_import_metadata(&self, import_id: &str) -> AppResult<SessionImportView> {

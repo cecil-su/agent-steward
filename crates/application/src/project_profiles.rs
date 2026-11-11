@@ -2,10 +2,10 @@
 //! Text validation enforces shape and size, not automatic secret detection.
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use storage_sqlite::now;
 
-use crate::db::{check_version, load_task};
+use crate::db::{check_version, load_task_for_audit};
 use crate::projects::{
     check_project_revision, load_project, record_project_change, resolve_project_id,
 };
@@ -32,6 +32,8 @@ pub struct ProjectProfileView {
     pub development: String,
     pub source_task_id: i64,
     pub source_task_version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_task_deletion: Option<Value>,
     pub evidence: String,
     pub updated_at: String,
 }
@@ -51,7 +53,7 @@ pub(crate) fn load_profile(
     connection: &Connection,
     project_id: i64,
 ) -> AppResult<Option<ProjectProfileView>> {
-    connection
+    let mut profile = connection
         .query_row(
             "SELECT project_id,revision,summary,architecture,development,source_task_id,
                     source_task_version,evidence,updated_at FROM project_profiles WHERE project_id=?1",
@@ -65,13 +67,20 @@ pub(crate) fn load_profile(
                     development: row.get(4)?,
                     source_task_id: row.get(5)?,
                     source_task_version: row.get(6)?,
+                    source_task_deletion: None,
                     evidence: row.get(7)?,
                     updated_at: row.get(8)?,
                 })
             },
         )
         .optional()
-        .map_err(AppError::from_sqlite)
+        .map_err(AppError::from_sqlite)?;
+    if let Some(profile) = &mut profile {
+        profile.source_task_deletion =
+            crate::deletion::deletion(connection, profile.source_task_id)?
+                .map(|deleted| json!(deleted));
+    }
+    Ok(profile)
 }
 
 impl Service {
@@ -107,7 +116,8 @@ impl Service {
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let project = load_project(&tx, resolve_project_id(&tx, reference)?)?;
         check_project_revision(&project, expected_revision)?;
-        let source = load_task(&tx, input.source_task_id)?;
+        // Provenance is historical, not a mutation of the source Task.
+        let source = load_task_for_audit(&tx, input.source_task_id)?;
         if source.project_id != Some(project.id) {
             return Err(AppError::invalid(
                 "sourceTaskId",
@@ -127,6 +137,7 @@ impl Service {
             development,
             source_task_id: source.id,
             source_task_version: source.version,
+            source_task_deletion: crate::deletion::deletion(&tx, source.id)?.map(|d| json!(d)),
             evidence,
             updated_at: now(),
         };

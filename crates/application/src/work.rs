@@ -266,7 +266,123 @@ pub(crate) fn load_work(connection: &Connection, task_id: i64) -> AppResult<Opti
     .transpose()
 }
 
+// Once removed from the current snapshot, an old ID cannot become a new object.
+// History is retained, so this needs no second registry or schema migration.
+fn prevent_id_reuse(
+    c: &Connection,
+    task_id: i64,
+    collection: &str,
+    item_id: &str,
+) -> AppResult<()> {
+    let exists: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM history h, json_each(h.payload_json, ?3) item WHERE h.task_id=?1 AND h.change_type=?2 AND json_extract(item.value,'$.id')=?4)",
+        rusqlite::params![task_id, EVENT, format!("$.work.{collection}"), item_id], |r| r.get(0),
+    ).map_err(AppError::from_sqlite)?;
+    if exists {
+        return Err(AppError::new(
+            "WORK_ITEM_DELETED",
+            "a deleted work item ID cannot be reused",
+            false,
+            json!({"taskId": task_id, "collection": collection, "id": item_id}),
+            4,
+        ));
+    }
+    Ok(())
+}
+
+fn requirement_impact(work: &TaskWork, requirement_id: &str) -> AppResult<serde_json::Value> {
+    id(requirement_id)?;
+    let requirement = work
+        .requirements
+        .iter()
+        .find(|r| r.id == requirement_id)
+        .ok_or_else(|| AppError::not_found("Requirement", requirement_id))?;
+    let affected: Vec<_> = work
+        .confirmations
+        .iter()
+        .filter(|c| c.requirement_ids.iter().any(|r| r == requirement_id))
+        .collect();
+    Ok(
+        json!({"requirement": requirement, "mode": "current_snapshot", "preserveHistory": true,
+            "removedConfirmations": affected.iter().filter(|c| c.requirement_ids.len() == 1).collect::<Vec<_>>(),
+            "updatedConfirmations": affected.iter().filter(|c| c.requirement_ids.len() > 1).map(|c|
+                json!({"id": c.id, "question": c.question, "previousRequirementIds": c.requirement_ids,
+                    "requirementIds": c.requirement_ids.iter().filter(|r| r.as_str() != requirement_id).collect::<Vec<_>>()})
+            ).collect::<Vec<_>>()
+        }),
+    )
+}
+
 impl Service {
+    pub fn task_requirement_delete_preview(
+        &self,
+        reference: &str,
+        requirement_id: &str,
+    ) -> AppResult<Outcome> {
+        let mut c = self.context_connection()?;
+        let tx = c.transaction().map_err(AppError::from_sqlite)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        let work = load_work(&tx, task.id)?
+            .ok_or_else(|| AppError::not_found("Requirement", requirement_id))?;
+        let mut data = requirement_impact(&work, requirement_id)?;
+        data["task"] = json!(task);
+        tx.commit().map_err(AppError::from_sqlite)?;
+        Ok(Outcome::new(data))
+    }
+
+    pub fn task_requirement_delete(
+        &self,
+        reference: &str,
+        expected: i64,
+        requirement_id: &str,
+        confirmed: bool,
+        reason: &str,
+    ) -> AppResult<Outcome> {
+        crate::deletion::delete_confirmation(confirmed, reason)?;
+        let mut c = self.connection()?;
+        let tx = storage_sqlite::write_transaction(&mut c).map_err(AppError::from_storage)?;
+        let task = load_task_by_reference(&tx, reference)?;
+        check_version(&task, expected)?;
+        let mut work = load_work(&tx, task.id)?
+            .ok_or_else(|| AppError::not_found("Requirement", requirement_id))?;
+        let impact = requirement_impact(&work, requirement_id)?;
+        let timestamp = now();
+        work.requirements.retain(|r| r.id != requirement_id);
+        let mut removed_confirmations = Vec::new();
+        let mut changed_confirmations = Vec::new();
+        work.confirmations.retain_mut(|c| {
+            if !c.requirement_ids.iter().any(|id| id == requirement_id) {
+                return true;
+            }
+            changed_confirmations.push(c.id.clone());
+            c.requirement_ids.retain(|id| id != requirement_id);
+            if c.requirement_ids.is_empty() {
+                removed_confirmations.push(c.id.clone());
+                return false;
+            }
+            c.updated_at = timestamp.clone();
+            true
+        });
+        validate(&work)?;
+        bump_task(&tx, task.id, expected, &timestamp)?;
+        insert_history(
+            &tx,
+            task.id,
+            EVENT,
+            task.current_session_id.as_deref(),
+            "requirement deleted from current work; history retained",
+            json!({"work": work, "reason": reason, "operation": "requirement_deleted",
+                "deletedRequirementId": requirement_id, "changedRequirementIds": [requirement_id],
+                "changedConfirmationIds": changed_confirmations, "removedConfirmationIds": removed_confirmations}),
+            &timestamp,
+        )?;
+        let task = load_task(&tx, task.id)?;
+        tx.commit().map_err(AppError::from_sqlite)?;
+        Ok(Outcome::new(
+            json!({"task": task, "work": work, "impact": impact}),
+        ))
+    }
+
     pub fn task_work(&self, reference: &str) -> AppResult<Outcome> {
         let mut connection = self.context_connection()?;
         let tx = connection.transaction().map_err(AppError::from_sqlite)?;
@@ -315,6 +431,9 @@ impl Service {
         let mut changed_confirmations = Vec::new();
         for p in patch.requirements {
             let index = work.requirements.iter().position(|r| r.id == p.id);
+            if index.is_none() {
+                prevent_id_reuse(&tx, task.id, "requirements", &p.id)?;
+            }
             let mut r = index
                 .map(|i| work.requirements[i].clone())
                 .unwrap_or(Requirement {
@@ -357,6 +476,9 @@ impl Service {
         }
         for p in patch.confirmations {
             let index = work.confirmations.iter().position(|c| c.id == p.id);
+            if index.is_none() {
+                prevent_id_reuse(&tx, task.id, "confirmations", &p.id)?;
+            }
             let mut c = index
                 .map(|i| work.confirmations[i].clone())
                 .unwrap_or(Confirmation {

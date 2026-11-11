@@ -25,6 +25,7 @@ export interface Project {
 export interface ProjectProfile {
   projectId: number; revision: number; summary: string; architecture: string;
   development: string; evidence: string; sourceTaskId: number; sourceTaskVersion: number; updatedAt: string;
+  sourceTaskDeletion?: { deletedAt: string; reason: string; previousVersion: number };
 }
 export interface Access { role: 'admin' | 'reader'; local: boolean; projectManagement?: boolean }
 export interface Warning { code: string; message: string }
@@ -38,6 +39,7 @@ export interface ProjectHistoryPage { history: HistoryEntry[]; hasMore: boolean;
 export type DetailTab = 'overview' | 'notes' | 'sessions' | 'history';
 export interface SessionRule {
   id: number; scope: 'global' | 'project'; projectId: number | null; revision: number; contentVersion: 1;
+  deletedSourceTaskIds?: number[];
   content: { name: string; body: string; sources: { kind: 'explicit' | 'inferred'; evidence: string; taskId: number | null; taskVersion: number | null }[] };
 }
 export interface SessionRules { formatVersion: 1; rules: SessionRule[] }

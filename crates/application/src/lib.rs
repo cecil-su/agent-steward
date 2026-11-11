@@ -1,4 +1,5 @@
 mod db;
+mod deletion;
 mod host_context;
 pub use host_context::{HostContextRequest, HostInstance};
 mod host_evidence;

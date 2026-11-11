@@ -9,6 +9,15 @@ use steward_core::{
 use crate::{AppError, AppResult};
 
 pub(crate) fn resolve_task_id(connection: &Connection, reference: &str) -> AppResult<i64> {
+    let id = resolve_task_id_for_audit(connection, reference)?;
+    crate::deletion::ensure_live(connection, id)?;
+    Ok(id)
+}
+
+pub(crate) fn resolve_task_id_for_audit(
+    connection: &Connection,
+    reference: &str,
+) -> AppResult<i64> {
     let reference = reference.trim();
     if reference.is_empty() {
         return Err(AppError::invalid(
@@ -70,6 +79,13 @@ pub(crate) fn load_task_by_reference(
 }
 
 pub(crate) fn load_task(connection: &Connection, id: i64) -> AppResult<TaskView> {
+    let task = load_task_for_audit(connection, id)?;
+    crate::deletion::ensure_live(connection, id)?;
+    Ok(task)
+}
+
+// For explicit read-only audit and historical provenance, never for Task mutations.
+pub(crate) fn load_task_for_audit(connection: &Connection, id: i64) -> AppResult<TaskView> {
     connection
         .query_row(
             "SELECT id,task_key,title,status,version,goal,scope,acceptance_criteria,next_step,

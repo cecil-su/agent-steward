@@ -76,6 +76,8 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   let projectsSupported=false,projectPageVisible=false,projectFilter='',projectFilterRevision=0,projectRows=[],projectListLoaded=false,projectCursor=null,projectListRevision=0,projectDetailRevision=0,projectContext=null,selectedProject=null;
   let pendingWrites=0, uncertainWrite=false, modalEpoch=0;
   let canWrite=false,liveAbort=null,liveTimer=null,liveDirty=false,liveRefreshing=false;
+  let canDeleteTask=false,canDeleteRequirement=false,deletePreviewBusy=false;
+  let selectionMode='task';
   let canManageAccess=false,accessData={pending:[],grants:[]},accessRevision=0,accessBusy=false,accessNeedsRefresh=false,accessRequestBusy=false,accessPollRunning=false,reviewRequest=null;
   const seenAccessRequests=new Set();
   let layout=location.pathname==='/credentials'?'credentials':location.pathname==='/dashboard'?'board':'list',canChangeStatus=false,board={},boardScope='',boardLoading=false,statusPending=false,statusNeedsRefresh=false,dragged=null;
@@ -91,7 +93,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   // Remove the previous JS-readable credential; browser grants now use HttpOnly cookies.
   try{sessionStorage.removeItem('steward.connection-token');}catch{}
   function sessionId(){const bytes=crypto.getRandomValues(new Uint8Array(16));return 'session-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-  function resetConnection(){stopLive();canManageAccess=false;accessNeedsRefresh=false;accessRevision++;seenAccessRequests.clear();accessData={pending:[],grants:[]};$('credentials-mode').hidden=true;clear($('access-pending'));clear($('access-grants'));$('access-review-dialog').close();reviewRequest=null;document.body.classList.remove('dashboard-detail-open');canChangeStatus=false;board={};dragged=null;statusNeedsRefresh=false;projectsSupported=false;projectFilter='';projectFilterRevision++;projectListRevision++;projectDetailRevision++;projectRows=[];projectListLoaded=false;projectCursor=null;selectedProject=null;projectContext=null;projectPageVisible=false;$('project-filter').value='';$('projects').hidden=true;$('project-filter-form').hidden=true;$('project-page').hidden=true;$('task-page').hidden=false;clear($('project-list'));clear($('project-detail'));canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;renderAccessRequest({state:'none'});clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
+  function resetConnection(){stopLive();canDeleteTask=false;canDeleteRequirement=false;canManageAccess=false;accessNeedsRefresh=false;accessRevision++;seenAccessRequests.clear();accessData={pending:[],grants:[]};$('credentials-mode').hidden=true;clear($('access-pending'));clear($('access-grants'));$('access-review-dialog').close();reviewRequest=null;document.body.classList.remove('dashboard-detail-open');canChangeStatus=false;board={};dragged=null;statusNeedsRefresh=false;projectsSupported=false;projectFilter='';projectFilterRevision++;projectListRevision++;projectDetailRevision++;projectRows=[];projectListLoaded=false;projectCursor=null;selectedProject=null;projectContext=null;projectPageVisible=false;$('project-filter').value='';$('projects').hidden=true;$('project-filter-form').hidden=true;$('project-page').hidden=true;$('task-page').hidden=false;clear($('project-list'));clear($('project-detail'));canWrite=false;connected=false;warningText='';listRevision++;rows=[];selected=null;selectionMode='task';context=null;revision++;$('workspace').hidden=true;$('login').hidden=false;renderAccessRequest({state:'none'});clear($('task-list'));clear($('detail'));$('action-dialog').close();modal=null;}
   async function api(path,body,extraHeaders={}) {
     if(body!==undefined)pendingWrites++;
     try{return await apiRequest(path,body,extraHeaders);}
@@ -99,7 +101,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     finally{if(body!==undefined)pendingWrites--;}
   }
   async function apiRequest(path,body,extraHeaders={}) {
-    if(body!==undefined&&!['/api/login','/api/logout','/api/connect'].includes(path)&&path!=='/api/access-request'&&!(canManageAccess&&/^\/api\/access-requests\/[a-f0-9]{64}\/(approve|revoke)$/.test(path))&&!(path==='/api/commands/task-status'&&canChangeStatus))throw new Error('当前界面只读，请通过 CLI 维护。');
+    if(body!==undefined&&!['/api/login','/api/logout','/api/connect'].includes(path)&&path!=='/api/access-request'&&!(canManageAccess&&/^\/api\/access-requests\/[a-f0-9]{64}\/(approve|revoke)$/.test(path))&&!(path==='/api/commands/task-status'&&canChangeStatus)&&!(path==='/api/commands/task-delete'&&canDeleteTask)&&!(path==='/api/commands/task-requirement-delete'&&canDeleteRequirement))throw new Error('当前界面只读，请通过 CLI 维护。');
     let response;
     try { response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'X-Steward-UI-Contract':'5',...(body===undefined?{}:{'Content-Type':'application/json','X-Steward-CSRF':'1'}),...extraHeaders},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),cache:'no-store'}); }
     catch {const error=new Error(body===undefined?'无法读取本地服务，请检查服务是否仍在运行。':'结果未确认：请求中断或超时。请核对当前授权，不要直接重复提交。');error.uncertain=body!==undefined;throw error;}
@@ -204,7 +206,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     }catch(error){if(connected&&connection===liveAbort)notify(error.code==='VERSION_CONFLICT'?'任务已被其他操作修改，未覆盖。请刷新看板后重新决定。':error.uncertain?'状态结果未确认，请刷新核对，不要重复拖拽。':'状态修改失败：'+error.message+' 请刷新看板核对。');}
     finally{statusPending=false;if(connected&&connection===liveAbort){
       renderBoard();
-      if(saved)try{await loadList(false,true);if(selected===task.id)await selectTask(task.id);}catch{notify('状态已修改，但刷新失败。请手动刷新，不要重复提交。');}
+      if(saved)try{await loadList(false,true);if(selected===task.id)await refreshSelectedTask();}catch{notify('状态已修改，但刷新失败。请手动刷新，不要重复提交。');}
     }}
   }
   function applyLayout(next){
@@ -216,22 +218,28 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   async function changeLayout(next,navigate=true){
     if(statusPending||dragged||accessBusy||next==='credentials'&&!canManageAccess)return;
     const path=next==='credentials'?'/credentials':next==='board'?'/dashboard':'/';if(navigate&&location.pathname!==path)history.pushState(null,'',path);
-    applyLayout(next);showTaskPage();listRevision++;revision++;selected=null;context=null;rows=[];cursor=null;clear($('detail'));clear($('task-list'));$('task-count').textContent='';$('more').hidden=true;
+    applyLayout(next);showTaskPage();listRevision++;revision++;selected=null;selectionMode='task';context=null;rows=[];cursor=null;clear($('detail'));clear($('task-list'));$('task-count').textContent='';$('more').hidden=true;
     await loadList();
   }
   for(const [id,mode] of [['list-mode','list'],['board-mode','board'],['credentials-mode','credentials']])$(id).onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();void safely(()=>changeLayout(mode))();};
   window.onpopstate=()=>{if(statusPending||dragged||accessBusy){history.pushState(null,'',layout==='credentials'?'/credentials':layout==='board'?'/dashboard':'/');notify('当前操作尚未结束，请稍后切换页面。');return;}let next=location.pathname==='/credentials'?'credentials':location.pathname==='/dashboard'?'board':'list';if(next==='credentials'&&!canManageAccess){next='list';history.replaceState(null,'','/');}void safely(()=>changeLayout(next,false))();};
-  $('close-dashboard-detail').onclick=()=>{document.body.classList.remove('dashboard-detail-open');selected=null;context=null;revision++;renderList();};
+  $('close-dashboard-detail').onclick=()=>{document.body.classList.remove('dashboard-detail-open');selected=null;selectionMode='task';context=null;revision++;renderList();};
   applyLayout(layout);
   function expandedDetails(root){return new Set(Array.from(root.querySelectorAll('details[open][data-detail-key]'),node=>node.dataset.detailKey));}
+  async function refreshSelectedTask(){
+    // A pending list read must not navigate away from a later project selection.
+    if(!connected||projectPageVisible||selected===null)return;
+    return selectionMode==='audit'?openTaskAudit(selected):selectTask(selected);
+  }
   async function selectTask(id){
+    selectionMode='task';
     if(layout==='board')document.body.classList.add('dashboard-detail-open');
     const expanded=selected===id?expandedDetails($('detail')):new Set();
     selected=id;context=null;const generation=++revision;renderList();
     const root=$('detail');root.replaceChildren(el('p','正在读取任务…','muted'));
     let data;
     try{data=await api(`/api/tasks/${id}/context`);}
-    catch(error){if(generation===revision&&connected)readFailure(root,'任务',error,()=>selectTask(id));return;}
+    catch(error){if(generation===revision&&connected){readFailure(root,'任务',error,()=>selectTask(id));if(error.code==='TASK_DELETED')root.append(button('查看已删除任务的只读审计',safely(()=>openTaskAudit(id))));}return;}
     if(generation!==revision||!connected)return;context=data;await renderDetail(expanded);
   }
   function readFailure(root,label,error,retry){
@@ -246,13 +254,30 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     if(layout==='credentials')await changeLayout('list');showTaskPage();activeTab='overview';await selectTask(id);
     if(selected===id&&context)$('detail').scrollIntoView({block:'start'});
   }
-  function taskLink(id,label){return button(label||'#'+id,safely(()=>openRelatedTask(id)),'text-link');}
+  function taskLink(id,label,audit=false){return button(label||'#'+id,safely(()=>audit?openTaskAudit(id):openRelatedTask(id)),'text-link');}
+  async function openTaskAudit(id){
+    if(layout==='credentials')await changeLayout('list');
+    const expanded=selected===id&&selectionMode==='audit'?expandedDetails($('detail')):new Set();
+    showTaskPage();selected=id;selectionMode='audit';context=null;const generation=++revision;if(layout==='board')document.body.classList.add('dashboard-detail-open');
+    const data=await api(`/api/tasks/${id}/audit`);if(generation!==revision||!connected)return;
+    const root=$('detail');clear(root);root.append(el('h2',`#${data.task.id} · ${data.task.title||'未命名任务'} · 只读审计`));
+    root.append(section('删除记录',data.deletion?`${date(data.deletion.deletedAt)} · ${data.deletion.reason}\n逻辑删除，历史数据保留；不是取消或完成，不提供恢复操作。`:'尚未删除；此入口仍为只读。'));
+    root.append(section('历史任务说明',data.task.goal,true));workContent(root,data.work);
+    for(const note of data.notes)root.append(section('历史备注',note.text,true));
+    for(const cp of data.checkpoints){
+      const checkpoint=el('details',undefined,'info-box');checkpoint.dataset.detailKey='audit-checkpoint-'+cp.id;checkpoint.open=expanded.has(checkpoint.dataset.detailKey);
+      checkpoint.append(el('summary',`历史检查点 ${cp.id} · ${date(cp.createdAt)}`),section('会话与时间',`${cp.sessionId} · ${cp.createdAt}`),section('进展摘要',cp.summary,true),section('已完成',cp.completed,true),section('决策',cp.decisions,true),section('待办',cp.pending,true),section('风险',cp.risks,true),section('下一步',cp.nextStep,true));
+      if(cp.gitHead)checkpoint.append(section('历史 Git HEAD',cp.gitHead));root.append(checkpoint);
+    }
+    for(const s of data.sessions){const box=section('历史会话',s.id);box.append(button('查看观测',safely(()=>loadEvents(s.id,box))),button('查看导入记录',safely(()=>loadImports(s.id,box))));root.append(box);}
+    const history=el('details');history.dataset.detailKey='audit-history';history.open=expanded.has(history.dataset.detailKey);history.append(el('summary','全部保留历史（原始记录）'),el('pre',JSON.stringify(data.history,null,2)));root.append(history);
+  }
   function profileContent(root,profile){
     if(profile===undefined){root.append(el('p','后端未提供项目资料字段，无法读取资料。','muted'));return;}
     if(profile===null){root.append(el('p','项目资料尚未填写。','muted'));return;}
     for(const [key,label] of [['summary','项目简介'],['architecture','架构与关键入口'],['development','开发与验证方法'],['evidence','核实依据']])root.append(section(label,profile[key]));
     const provenance=section('资料来源',`资料 revision ${profile.revision} · 更新 ${profile.updatedAt}`);
-    provenance.append(taskLink(profile.sourceTaskId,`来源任务 #${profile.sourceTaskId}`),el('p',`记录时任务版本 ${profile.sourceTaskVersion}（历史引用，不代表任务当前版本）`));root.append(provenance);
+    provenance.append(taskLink(profile.sourceTaskId,`来源任务 #${profile.sourceTaskId}${profile.sourceTaskDeletion?' · 已删除（只读审计）':''}`,!!profile.sourceTaskDeletion),el('p',`记录时任务版本 ${profile.sourceTaskVersion}（历史引用，不代表任务当前版本）`));root.append(provenance);
   }
   function checkedRules(value,projectId){
     const positive=n=>Number.isSafeInteger(n)&&n>0,nonblank=s=>typeof s==='string'&&s.trim().length>0;
@@ -281,7 +306,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       if(!rule.content.sources.length)detail.append(el('p','未关联来源任务（直接偏好）。','muted'));
       for(const source of rule.content.sources){
         const origin=section(source.kind==='explicit'?'明确表达的依据':'推断依据',source.evidence);
-        if(source.taskId!==null)origin.append(taskLink(source.taskId,`来源任务 #${source.taskId}`),el('p',`记录时任务版本 ${source.taskVersion}（历史引用，不代表当前版本）`));
+        if(source.taskId!==null)origin.append(taskLink(source.taskId,`来源任务 #${source.taskId}${rule.deletedSourceTaskIds?.includes(source.taskId)?' · 已删除（只读审计）':''}`,rule.deletedSourceTaskIds?.includes(source.taskId)),el('p',`记录时任务版本 ${source.taskVersion}（历史引用，不代表当前版本）`));
         else origin.append(el('p','未关联来源任务。','muted'));detail.append(origin);
       }
       box.append(detail);
@@ -329,7 +354,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     for(const c of open){const item=el('article',undefined,'work-decision');item.append(el('strong',c.question),el('p',`关联需求：${c.requirementIds.join('、')}`,'muted'),section('建议',c.recommendation,true),section('影响',c.impact,true));decisions.append(item);}
     const list=el('ol',undefined,'work-requirements');area.append(list);
     for(const r of work.requirements){const item=el('li',undefined,'work-requirement');item.dataset.requirementId=r.id;const head=el('div',undefined,'work-heading');head.append(el('strong',`${r.id} · ${r.title}`),el('span',labels[r.status],'work-stage'));item.append(head,markdown(r.result||'尚未形成结果。'));if(r.nextStep)item.append(section('下一步',r.nextStep,true));
-      const detail=el('details');detail.dataset.detailKey='work-'+r.id;detail.open=expanded.has(detail.dataset.detailKey);detail.append(el('summary','完成条件与依据'),section('完成条件',r.acceptanceCriteria,true));for(const entry of r.evidence)detail.append(markdown(entry));detail.append(el('small','记录更新时间：'+date(r.updatedAt)));item.append(detail);list.append(item);
+      const detail=el('details');detail.dataset.detailKey='work-'+r.id;detail.open=expanded.has(detail.dataset.detailKey);detail.append(el('summary','完成条件与依据'),section('完成条件',r.acceptanceCriteria,true));for(const entry of r.evidence)detail.append(markdown(entry));detail.append(el('small','记录更新时间：'+date(r.updatedAt)));item.append(detail);if(canDeleteRequirement&&context?.work===work){const controls=el('div',undefined,'delete-controls');controls.append(button('删除需求',safely(()=>openDelete(r.id)),'danger'));item.append(controls);}list.append(item);
     }
     const closed=work.confirmations.filter(c=>c.status!=='open');if(closed.length){const history=el('details');history.dataset.detailKey='work-decisions-history';history.open=expanded.has(history.dataset.detailKey);history.append(el('summary',`已处理的确认事项（${closed.length}）`));for(const c of closed){const item=el('article',undefined,'work-decision');item.append(el('strong',c.question),el('p',c.status==='resolved'?'已答复':'已撤回'),markdown(c.answer));for(const entry of c.evidence)item.append(markdown(entry));history.append(item);}area.append(history);}
   }
@@ -337,6 +362,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     if(!context)return;++revision;const t=context.task;const root=$('detail');clear(root);
     const heading=el('div',undefined,'detail-heading');const meta=el('div',undefined,'meta');meta.append(el('span','#'+t.id),badge(t.status),el('span','版本 '+t.version),el('span','更新 '+date(t.updatedAt)));heading.append(meta,el('h2',t.title||'未命名任务'));
     const actions=el('div',undefined,'actions');actions.append(button('复制交接上下文',safely(copyContext)));
+    if(canDeleteTask)actions.append(button('删除任务',safely(()=>openDelete()),'danger'));
     heading.append(actions);root.append(heading);
     const next=el('div',undefined,'next-step');if(context.work&&context.work.formatVersion===1&&Array.isArray(context.work.requirements)&&Array.isArray(context.work.confirmations)){next.append(el('h3','当前进展'),el('p',`${context.work.requirements.length} 项需求，${context.work.confirmations.filter(c=>c.status==='open').length} 项待你确认；各项进展见概览。`));}else next.append(el('h3','下一步'),markdown(t.nextStep||'尚未明确下一步'));root.append(next);
     if(t.closureOutcome||t.closureReason||t.closedAt){const legacy=section('历史关闭记录','仅为历史资料，不代表当前状态。');legacy.append(section('历史关闭结果',t.closureOutcome),section('历史关闭原因',t.closureReason,true),section('历史关闭时间',t.closedAt));root.append(legacy);}
@@ -380,7 +406,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     }
   }
   function taskHistoryItem(h,snapshot,notes,noteError,expanded){
-    const labels={'task.work_updated':'更新需求进展与待确认','task.status_changed':'变更任务状态','task.created':'创建任务','task.updated':'更新任务信息','task.retitled':'修改任务标题','task.project_changed':'调整所属项目','task.components_changed':'调整组件范围','task.noted':'记录进展、决策或风险','task.blocked':'记录阻塞','task.unblocked':'解除阻塞','task.closed':'关闭任务','task.claimed':'开始执行任务','task.pending_release':'开发结束，待上线','task.continued':'返回开发中','checkpoint.saved':'保存进展检查点','session.resumed':'换会话继续任务','session.attached':'关联执行会话','session.closed':'结束执行会话','session.bound':'绑定会话来源','session.imported':'导入会话记录','session.import_removed':'删除会话导入副本','worktree.created':'创建任务工作区','worktree.adopted':'登记任务工作区','worktree.removed':'删除任务工作区','worktree.detached':'解除失效工作区登记'};
+    const labels={'task.deleted':'逻辑删除任务（历史保留）','task.work_updated':'更新需求进展与待确认','task.status_changed':'变更任务状态','task.created':'创建任务','task.updated':'更新任务信息','task.retitled':'修改任务标题','task.project_changed':'调整所属项目','task.components_changed':'调整组件范围','task.noted':'记录进展、决策或风险','task.blocked':'记录阻塞','task.unblocked':'解除阻塞','task.closed':'关闭任务','task.claimed':'开始执行任务','task.pending_release':'开发结束，待上线','task.continued':'返回开发中','checkpoint.saved':'保存进展检查点','session.resumed':'换会话继续任务','session.attached':'关联执行会话','session.closed':'结束执行会话','session.bound':'绑定会话来源','session.imported':'导入会话记录','session.import_removed':'删除会话导入副本','worktree.created':'创建任务工作区','worktree.adopted':'登记任务工作区','worktree.removed':'删除任务工作区','worktree.detached':'解除失效工作区登记'};
     const p=h.payload||{},item=el('div',undefined,'timeline-item'),type=h.changeType;
     item.append(el('small',date(h.occurredAt)),el('h3',labels[type]||h.summary||'其他历史事件'));
     const fields={title:'标题',taskKey:'任务标识',goal:'目标',scope:'范围',acceptanceCriteria:'验收条件',nextStep:'下一步',projectId:'所属项目',componentIds:'组件范围',status:'状态',closureOutcome:'关闭结果',closureReason:'关闭原因',blockReason:'阻塞原因',blockRecovery:'恢复条件'};
@@ -426,7 +452,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     const result=input?await api('/api/projects/'+encodeURIComponent(input)):null;
     if(generation!==projectFilterRevision||!connected||$('project-filter').value.trim()!==input)return;
     projectFilter=result?'##'+result.project.id:'';$('project-filter').value=projectFilter;
-    selected=null;context=null;revision++;clear($('detail'));cursor=null;rows=[];renderList();$('more').hidden=true;await loadList();
+    selected=null;selectionMode='task';context=null;revision++;clear($('detail'));cursor=null;rows=[];renderList();$('more').hidden=true;await loadList();
   }
   async function loadProjects(append=false,preserveRange=false,background=false){
     const generation=++projectListRevision,target=preserveRange?Math.max(50,projectRows.length):50;
@@ -530,15 +556,64 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     };return load().finally(()=>{atomic=false;});
   }
   $('projects').onclick=safely(async()=>{if(!projectsSupported)return;document.body.classList.remove('dashboard-detail-open');projectPageVisible=true;$('access-page').hidden=true;$('task-page').hidden=true;$('project-page').hidden=false;await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);});
-  $('back-tasks').onclick=safely(async()=>{if(layout==='credentials'){await changeLayout('list');return;}showTaskPage();if(!await loadList(false,true)||projectPageVisible||!connected||modal)return;if(selected)await selectTask(selected);});
+  $('back-tasks').onclick=safely(async()=>{if(layout==='credentials'){await changeLayout('list');return;}showTaskPage();if(!await loadList(false,true)||projectPageVisible||!connected||modal)return;await refreshSelectedTask();});
   $('create-project').onclick=()=>openAction('project-create','新建项目',[text('name','项目名称')],'只创建项目记录；登记源码、关联任务均为后续显式操作。');
   $('project-more').onclick=safely(()=>loadProjects(true));
   $('project-filter-form').onsubmit=event=>{event.preventDefault();safely(applyProjectFilter)();};
   $('clear-project-filter').onclick=safely(async()=>{$('project-filter').value='';await applyProjectFilter();});
+  async function openDelete(requirementId=null){
+    const requirement=requirementId!==null;
+    if(!(requirement?canDeleteRequirement:canDeleteTask)||!context?.task||modal||deletePreviewBusy||pendingWrites||statusPending||dragged)return;
+    const task=structuredClone(context.task),generation=revision;deletePreviewBusy=true;
+    try{
+      const preview=await api(requirement?`/api/tasks/${task.id}/requirements/${encodeURIComponent(requirementId)}/delete-preview`:`/api/tasks/${task.id}/delete-preview`);
+      if(generation!==revision||context?.task.id!==task.id)return;
+      if(preview.task.id!==task.id||preview.task.version!==task.version){notify('任务版本已变化，请刷新详情并重新选择删除；未发送删除请求。');return;}
+      if(requirement&&preview.requirement?.id!==requirementId)throw new Error('删除预览目标不一致，未发送删除请求。');
+      const label=requirement?`需求 ${requirementId} · ${preview.requirement.title}`:`任务 #${task.id} · ${task.title||'未命名任务'}`;
+      let description=`删除目标：#${task.id} · ${task.title||'未命名任务'} · 版本 ${task.version}\n${label}\n`;
+      if(requirement){
+        description+='从当前需求清单移除，历史原文保留，不改变任务状态或 Session。已删除编号不可复用。\n';
+        description+='一并移出的独占确认：'+(preview.removedConfirmations.map(c=>`${c.id} · ${c.question}`).join('；')||'无')+'\n';
+        description+='去除该关联的共享确认：'+(preview.updatedConfirmations.map(c=>`${c.id} · ${c.question}（剩余 ${c.requirementIds.join('、')}）`).join('；')||'无');
+      }else{
+        description+='逻辑删除：从列表、看板和统计排除并禁止业务写入。保留全部历史与只读审计，不是物理清除，本轮不提供恢复入口。\n';
+        const labels={requirements:'需求',confirmations:'确认',notes:'备注',checkpoints:'检查点',history:'历史',sessions:'会话',imports:'导入副本',events:'观测记录'};
+        description+='保留：'+Object.entries(preview.retainedCounts).map(([key,count])=>`${labels[key]||key} ${count}`).join(' · ')+'\n';
+        description+=`保留来源引用：项目 ${preview.sourceReferences.projectIds.map(id=>'##'+id).join('、')||'无'}；规则 ${preview.sourceReferences.ruleIds.map(id=>'#'+id).join('、')||'无'}。不删除外部文件、Pi记录或备份。`;
+      }
+      openAction(requirement?'task-requirement-delete':'task-delete',requirement?'删除需求':'删除任务',[area('reason','删除原因'),check('confirmed','我确认删除上述'+(requirement?'需求':'任务')+'，并已核对保留范围')],description,requirement?{requirementId}:{});
+      modal.deletion=true;modal.task=task;modal.submitted=false;modal.submitting=false;
+      $('submit-action').textContent=requirement?'确认删除此需求':'确认逻辑删除此任务';$('submit-action').className='danger';
+      if(preview.blocked){$('action-error').textContent='不能删除：以下 Session 尚未结束：'+preview.openSessionIds.join('、')+'。本操作不会结束或接管会话。';$('submit-action').disabled=true;modal.blocked=true;}
+    }finally{deletePreviewBusy=false;}
+  }
+  async function submitDeletion(current,v){
+    if(current.submitted||current.blocked||!v.confirmed||!v.reason)return;
+    current.submitted=true;current.submitting=true;const submit=$('submit-action');submit.disabled=true;clear($('action-error'));clear($('conflict'));
+    try{
+      const result=await api('/api/commands/'+current.name,{taskId:current.task.id,expectedVersion:current.task.version,...current.extra,confirmed:v.confirmed,reason:v.reason});
+      if(modal!==current||!connected)return;
+      if(result.task?.id!==current.task.id||result.task?.version!==current.task.version+1){const error=new Error('删除响应与目标或版本不一致，请刷新核对，不要重复提交。');error.uncertain=true;throw error;}
+      $('action-dialog').close();modal=null;
+      if(current.name==='task-delete'){
+        rows=rows.filter(t=>t.id!==current.task.id);for(const data of Object.values(board))data.tasks=data.tasks.filter(t=>t.id!==current.task.id);
+        selected=null;selectionMode='task';context=null;revision++;listRevision++;document.body.classList.remove('dashboard-detail-open');renderList();
+        $('detail').replaceChildren(el('p',`任务 #${current.task.id} 已逻辑删除，历史保留。`),button('查看只读审计',safely(()=>openTaskAudit(current.task.id))));
+      }
+      try{await loadList(false,true);if(current.name==='task-requirement-delete')await selectTask(result.task.id);notify('删除已成功；历史保留。',true);}
+      catch(error){notify('删除已成功，但刷新失败。请手动刷新，不要重复提交。\n'+error.message);}
+    }catch(error){
+      if(modal!==current)return;
+      $('action-error').textContent=(error.uncertain?'删除结果未确认，请刷新核对，不要重复提交。':error.code==='VERSION_CONFLICT'?'版本已变化，未按旧版本删除。请重新读取影响后再次确认。':error.code==='DELETE_BLOCKED'?'有未结束的 Session，未删除任务，也未改变会话。':error.message);
+      if(error.details)$('conflict').append(el('pre',JSON.stringify(error.details,null,2)));
+      $('conflict').append(button('关闭并刷新核对（不会重试）',safely(async()=>{$('action-dialog').close();modal=null;await loadList(false,true);await selectTask(current.task.id);})));submit.disabled=true;
+    }finally{current.submitting=false;}
+  }
   function openAction(name,title,fields,description='',extra={}){
-    if(!canWrite&&name!=='copy-context'){notify('当前连接为只读，不能修改任务。');return;}
+    if(!canWrite&&name!=='copy-context'&&!(name==='task-delete'&&canDeleteTask)&&!(name==='task-requirement-delete'&&canDeleteRequirement)){notify('当前连接为只读，不能修改任务。');return;}
     modalEpoch++;
-    modal={name,fields,extra,task:context?.task?structuredClone(context.task):null,project:extra.projectId&&projectContext?structuredClone(projectContext.project):null};$('action-title').textContent=title;$('action-description').textContent=description;clear($('action-fields'));clear($('action-error'));clear($('conflict'));$('submit-action').hidden=false;$('submit-action').disabled=false;
+    modal={name,fields,extra,task:context?.task?structuredClone(context.task):null,project:extra.projectId&&projectContext?structuredClone(projectContext.project):null};$('action-title').textContent=title;$('action-description').textContent=description;clear($('action-fields'));clear($('action-error'));clear($('conflict'));$('submit-action').hidden=false;$('submit-action').disabled=false;$('submit-action').textContent='确认提交';$('submit-action').className='primary';
     for(const f of fields){const label=el('label',f.label);label.htmlFor='field-'+f.key;const input=el(f.type==='textarea'?'textarea':f.type==='select'?'select':'input');input.id='field-'+f.key;input.name=f.key;input.required=!!f.required;if(f.type==='select')for(const [value,label] of f.options){const o=el('option',label);o.value=value;input.append(o);}if(f.type==='checkbox'){input.type='checkbox';label.prepend(input);$('action-fields').append(label);}else{input.value=f.value??'';$('action-fields').append(label,input);}}
     $('action-dialog').showModal();
   }
@@ -554,7 +629,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     return{...base,...extra,...v};
   }
   $('action-form').onsubmit=async event=>{
-    event.preventDefault();if(!modal)return;const current=modal;const submit=$('submit-action');submit.disabled=true;clear($('action-error'));clear($('conflict'));
+    event.preventDefault();if(!modal)return;const current=modal;if(current.deletion){await submitDeletion(current,values());return;}const submit=$('submit-action');submit.disabled=true;clear($('action-error'));clear($('conflict'));
     try{
       const result=await api('/api/commands/'+current.name,bodyFor(values()));if(modal!==current)return;const id=result.task?.id??selected;
       try { if(current.name.startsWith('project-')){await loadProjects(false,true);if(modal!==current)return;if(result.project)await selectProject(result.project.id);}else{await loadList();if(modal!==current)return;if(id)await selectTask(id);}notify('已保存。',true); } catch(readError) {notify('提交已成功，但刷新失败。请手动刷新，不要重复提交。\n'+readError.message);}
@@ -564,7 +639,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       if(error.code==='VERSION_CONFLICT'){
         try{const isProject=!!current.project;const latest=await api(isProject?'/api/projects/'+current.project.id:'/api/tasks/'+current.task.id);if(modal!==current)return;const box=el('div',undefined,'notice');box.append(el('p','你的填写内容已保留。请对照服务中的最新内容，调整后再提交。'),el('pre',JSON.stringify(isProject?latest.project:latest.task,null,2)));box.append(button('采用此版本，重新审查后提交',()=>{if(isProject)current.project=latest.project;else current.task=latest.task;box.remove();$('action-error').textContent='已采用版本 '+(isProject?latest.project.revision:latest.task.version)+'。请审查填写内容，然后再次点击确认提交。';submit.disabled=false;}));$('conflict').append(box);}catch(e){$('action-error').append(el('p',e.message));}
       } else if(error.uncertain){
-        const box=el('div',undefined,'notice');if(error.details)box.append(el('pre',JSON.stringify(error.details,null,2)));box.append(button('刷新列表和详情',safely(async()=>{if(current.project||current.name==='project-create'){await loadProjects(false,true);if(current.project)await selectProject(current.project.id);}else{await loadList();if(selected)await selectTask(selected);}})),button('已核对执行结果，允许再次提交',()=>{submit.disabled=false;box.remove();}));$('conflict').append(box);
+        const box=el('div',undefined,'notice');if(error.details)box.append(el('pre',JSON.stringify(error.details,null,2)));box.append(button('刷新列表和详情',safely(async()=>{if(current.project||current.name==='project-create'){await loadProjects(false,true);if(current.project)await selectProject(current.project.id);}else{await loadList();await refreshSelectedTask();}})),button('已核对执行结果，允许再次提交',()=>{submit.disabled=false;box.remove();}));$('conflict').append(box);
       }else submit.disabled=false;
     }
   };
@@ -575,7 +650,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     $('login-error').textContent='';stopLive();
     try{
       if(value)await api('/api/login',{}, {'X-Steward-Token':value});
-      const access=await api('/api/access');localAccess=access.local===true;canWrite=false;canChangeStatus=access.role==='admin';canManageAccess=access.role==='admin'&&access.accessApproval===true;$('credentials-mode').hidden=!canManageAccess;if(layout==='credentials'&&!canManageAccess){applyLayout('list');history.replaceState(null,'','/');}projectsSupported=access.projectManagement===true;$('projects').hidden=!projectsSupported;$('project-filter-form').hidden=!projectsSupported;$('create-project').hidden=!canWrite;applyLayout(layout);showTaskPage();await loadList();
+      const access=await api('/api/access');localAccess=access.local===true;canWrite=false;canChangeStatus=access.role==='admin';canDeleteTask=access.role==='admin'&&access.taskDeletion===true;canDeleteRequirement=access.role==='admin'&&access.requirementDeletion===true;canManageAccess=access.role==='admin'&&access.accessApproval===true;$('credentials-mode').hidden=!canManageAccess;if(layout==='credentials'&&!canManageAccess){applyLayout('list');history.replaceState(null,'','/');}projectsSupported=access.projectManagement===true;$('projects').hidden=!projectsSupported;$('project-filter-form').hidden=!projectsSupported;$('create-project').hidden=!canWrite;applyLayout(layout);showTaskPage();await loadList();
     }catch(e){$('login-error').textContent=!value&&e.code==='UNAUTHORIZED'?'':e.message;renderAccessRequest({state:'none'});return;}
     connected=true;if(layout==='board')renderBoard();$('create').hidden=!canWrite;$('revoke-browsers').hidden=!canWrite;$('logout').hidden=localAccess;$('access-role').textContent=canChangeStatus?(localAccess?'本机 · 可拖拽状态':'管理员 · 可拖拽状态'):'只读';
     $('login').hidden=true;$('workspace').hidden=false;
@@ -586,11 +661,12 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   async function logout(){await api('/api/logout',{});resetConnection();}
   $('connect-form').onsubmit=event=>{event.preventDefault();void requestAccess();};
   $('logout').onclick=safely(logout);
-  $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有已保存的浏览器授权？不影响本机免登录和凭据文件。')){await api('/api/browser-sessions/revoke',{});if(localAccess)notify('已撤销保存的浏览器授权。');else resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');if(projectPageVisible){await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);}else{await loadList();if(selected)await selectTask(selected);}});
+  $('revoke-browsers').onclick=safely(async()=>{if(canWrite&&confirm('撤销所有已保存的浏览器授权？不影响本机免登录和凭据文件。')){await api('/api/browser-sessions/revoke',{});if(localAccess)notify('已撤销保存的浏览器授权。');else resetConnection();}});$('refresh').onclick=safely(async()=>{notify('');if(projectPageVisible){await loadProjects(false,true);if(selectedProject)await selectProject(selectedProject);}else{await loadList();await refreshSelectedTask();}});
   $('create').onclick=()=>openAction('task-create','新建任务',[...taskFields(null),...(projectsSupported?[text('project','项目（##编号或唯一名称，可留空）',projectFilter,false)]:[])],'可以先创建最小任务，随后补充目标、范围和验收条件。');
   $('search-form').onsubmit=event=>{event.preventDefault();query=$('search').value.trim();safely(()=>loadList())();};$('more').onclick=safely(()=>loadList(true));
   for(const b of document.querySelectorAll('[data-view]'))b.onclick=safely(async()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));await loadList();});
-  for(const id of ['cancel','cancel-bottom'])$(id).onclick=()=>$('action-dialog').close();$('action-dialog').addEventListener('close',()=>{if($('action-dialog').open)return;modal=null;if(liveDirty)scheduleLiveRefresh();});
+  $('action-dialog').addEventListener('cancel',event=>{if(modal?.submitting)event.preventDefault();});
+  for(const id of ['cancel','cancel-bottom'])$(id).onclick=()=>{if(!modal?.submitting)$('action-dialog').close();};$('action-dialog').addEventListener('close',()=>{if($('action-dialog').open)return;modal=null;if(liveDirty)scheduleLiveRefresh();});
   function stopLive(){
     if(liveAbort)liveAbort.abort();liveAbort=null;
     if(liveTimer)clearTimeout(liveTimer);liveTimer=null;liveDirty=false;
@@ -602,7 +678,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     liveTimer=setTimeout(async()=>{
       liveTimer=null;if(!connected||modal||statusPending||dragged||(statusNeedsRefresh&&layout==='board'&&!projectPageVisible))return;
       liveDirty=false;liveRefreshing=true;const connection=liveAbort;
-      try{if(projectPageVisible){if(await loadProjects(false,true,true)&&connection===liveAbort&&selectedProject&&!modal)await selectProject(selectedProject,true);return;}if(!await loadList(false,true)||connection!==liveAbort)return;if(modal){liveDirty=true;return;}if(selected)await selectTask(selected);}
+      try{if(projectPageVisible){if(await loadProjects(false,true,true)&&connection===liveAbort&&selectedProject&&!modal)await selectProject(selectedProject,true);return;}if(!await loadList(false,true)||connection!==liveAbort)return;if(modal){liveDirty=true;return;}await refreshSelectedTask();}
       catch(e){if(connection===liveAbort)notify(e.message);}
       finally{liveRefreshing=false;if(liveDirty&&connected)scheduleLiveRefresh();}
     },250);

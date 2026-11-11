@@ -13,6 +13,8 @@ Cargo workspace 有五个 crate。CLI / HTTP 调用 Application Service，Applic
 | `crates/core/src/host_evidence.rs` | 宿主证据格式、绑定与有效期校验，不是身份认证或执行授权 |
 | `crates/storage-sqlite/src/lib.rs` | Schema8、空库初始化、WAL、busy timeout、外键、写事务与版本拒绝 |
 | `crates/application/src/tasks.rs` | Task 创建、查询、信息维护、通用状态设置、Note、显式 Session 领取和 Checkpoint |
+| `crates/application/src/deletion.rs` | Task逻辑删除、影响预览、未结束Session保护、只读审计及正常查询的删除标记保护 |
+| `crates/application/src/work.rs` | History完整快照驱动的需求/确认当前态、局部维护、单需求删除与历史ID复用保护 |
 | `crates/application/src/sessions.rs` | 只读数据上下文、Session attach/resume/close、显式文件 Import、History、数据库诊断 |
 | `crates/application/src/projects.rs` | 项目、任务归属及独立 Project revision |
 | `crates/application/src/sources.rs` | 组件及源码路径资料 CRUD，任务组件选择，不做仓库识别或源码扫描 |
@@ -49,6 +51,10 @@ Cargo workspace 有五个 crate。CLI / HTTP 调用 Application Service，Applic
 ### Session 与 Note
 
 显式 claim/attach/resume/session close 只维护执行会话，保留归属、未结束状态、明确续接来源及接管保护，不改变任务状态。Checkpoint 要求有效的当前 Session，但不限制业务状态。Note 不要求领取，所有状态均可追加。
+
+### 删除
+
+原生管理员详情 → 只读影响预览 → 明确确认/原因及目标版本 → CLI/HTTP → Application IMMEDIATE事务 → 重查CAS和关联 → 任务追加 `task.deleted` 或需求追加完整 `task.work_updated` 快照。逻辑删除任务排除正常读取/写入，保留审计及共享来源；需求删除只移除当前项并修正确认引用。任一未结束Session阻止整任务删除，无自动关闭/接管或恢复入口。配套程序版本与接口见[删除合同](docs/v0/24-删除任务与需求.md)。
 
 ### 数据上下文
 

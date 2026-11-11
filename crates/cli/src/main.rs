@@ -260,6 +260,36 @@ enum TaskListView {
 
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Read deletion impact without changing the database.
+    DeletePreview {
+        task_id: String,
+    },
+    /// Logically delete one task; retain history. Requires --yes; never closes Sessions.
+    Delete {
+        task_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Explicit read-only audit, also available after logical deletion.
+    Audit {
+        task_id: String,
+    },
+    /// Preview removal of one requirement and its confirmation references.
+    RequirementDeletePreview {
+        task_id: String,
+        requirement_id: String,
+    },
+    /// Remove one requirement from current work, retaining history. Requires --yes.
+    RequirementDelete {
+        task_id: String,
+        requirement_id: String,
+        #[arg(long = "if-version")]
+        if_version: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Read task-local requirements and decisions without changing the database.
     Work {
         task_id: String,
@@ -794,6 +824,29 @@ fn dispatch(cli: &Cli, service: &Service) -> Result<Outcome, AppError> {
             } => service.project_history(project, *after, *limit),
         },
         TopCommand::Task { command } => match command {
+            TaskCommand::DeletePreview { task_id } => service.task_delete_preview(task_id),
+            TaskCommand::Delete {
+                task_id,
+                if_version,
+                reason,
+            } => service.task_delete(task_id, *if_version, cli.yes, reason),
+            TaskCommand::Audit { task_id } => service.task_audit(task_id),
+            TaskCommand::RequirementDeletePreview {
+                task_id,
+                requirement_id,
+            } => service.task_requirement_delete_preview(task_id, requirement_id),
+            TaskCommand::RequirementDelete {
+                task_id,
+                requirement_id,
+                if_version,
+                reason,
+            } => service.task_requirement_delete(
+                task_id,
+                *if_version,
+                requirement_id,
+                cli.yes,
+                reason,
+            ),
             TaskCommand::Components {
                 task_id,
                 if_version,

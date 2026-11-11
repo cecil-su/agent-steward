@@ -229,6 +229,10 @@ pub fn router(state: ServerState) -> Router {
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
         .route("/api/tasks/{id}/{resource}", get(task_resource))
+        .route(
+            "/api/tasks/{id}/requirements/{requirement_id}/delete-preview",
+            get(requirement_delete_preview),
+        )
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}", get(session))
         .route("/api/sessions/{id}/{resource}", get(session_resource))
@@ -480,6 +484,8 @@ async fn run(
                 let status=match error.body.code.as_str() {
                     "INVALID_INPUT"|"UNSUPPORTED_SCHEMA_VERSION"=>StatusCode::BAD_REQUEST,
                     "NOT_FOUND"=>StatusCode::NOT_FOUND,
+                    "TASK_DELETED"=>StatusCode::GONE,
+                    "DELETE_BLOCKED"|"WORK_ITEM_DELETED"=>StatusCode::CONFLICT,
                     "VERSION_CONFLICT"|"SESSION_CONFLICT"|"CONSTRAINT_VIOLATION"|"HOOK_EVENT_CONFLICT"|"HOOK_CAPACITY_REACHED"|"WORKTREE_SAFETY_REFUSED"=>StatusCode::CONFLICT,
                     "DATABASE_BUSY"|"WORKTREE_OPERATION_BUSY"|"GIT_READ_LIMIT"=>StatusCode::SERVICE_UNAVAILABLE,
                     _=>StatusCode::INTERNAL_SERVER_ERROR,
@@ -612,7 +618,7 @@ async fn access(
     State(state): State<ServerState>,
     Extension(access): Extension<Access>,
 ) -> Response {
-    Json(json!({"schemaVersion":3,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true,"sessionRules":true,"accessApproval":state.readonly_token.is_some()},"warnings":[],"error":null})).into_response()
+    Json(json!({"schemaVersion":3,"ok":true,"data":{"role":access.role,"local":access.local,"projectManagement":true,"sessionRules":true,"taskDeletion":true,"requirementDeletion":true,"accessApproval":state.readonly_token.is_some()},"warnings":[],"error":null})).into_response()
 }
 
 async fn connect(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -725,10 +731,21 @@ async fn task_resource(
 ) -> Response {
     run_read(state, move |s| match resource.as_str() {
         "context" => s.task_context(&id),
+        "delete-preview" => s.task_delete_preview(&id),
+        "audit" => s.task_audit(&id),
         "work" => s.task_work(&id),
         "history" => s.history(&id),
         "notes" => s.task_notes(&id),
         _ => Err(AppError::not_found("Endpoint", "resource")),
+    })
+    .await
+}
+async fn requirement_delete_preview(
+    State(state): State<ServerState>,
+    Path((id, requirement_id)): Path<(String, String)>,
+) -> Response {
+    run_read(state, move |s| {
+        s.task_requirement_delete_preview(&id, &requirement_id)
     })
     .await
 }
@@ -801,6 +818,19 @@ async fn hook(State(state): State<ServerState>, body: Bytes) -> Response {
     deny_unknown_fields
 )]
 enum Command {
+    TaskDelete {
+        task_id: i64,
+        expected_version: i64,
+        confirmed: bool,
+        reason: String,
+    },
+    TaskRequirementDelete {
+        task_id: i64,
+        expected_version: i64,
+        requirement_id: String,
+        confirmed: bool,
+        reason: String,
+    },
     TaskWorkUpdate {
         task_id: i64,
         expected_version: i64,
@@ -976,6 +1006,25 @@ fn absolute(value: &str) -> AppResult<&FsPath> {
 }
 fn execute(s: &Service, command: Command) -> AppResult<Outcome> {
     match command {
+        Command::TaskDelete {
+            task_id,
+            expected_version,
+            confirmed,
+            reason,
+        } => s.task_delete(&task_id.to_string(), expected_version, confirmed, &reason),
+        Command::TaskRequirementDelete {
+            task_id,
+            expected_version,
+            requirement_id,
+            confirmed,
+            reason,
+        } => s.task_requirement_delete(
+            &task_id.to_string(),
+            expected_version,
+            &requirement_id,
+            confirmed,
+            &reason,
+        ),
         Command::TaskWorkUpdate {
             task_id,
             expected_version,

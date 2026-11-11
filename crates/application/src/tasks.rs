@@ -205,7 +205,7 @@ impl Service {
                     (SELECT json_group_array(component_id) FROM (SELECT component_id FROM task_components WHERE task_id=tasks.id ORDER BY component_id))
              FROM tasks",
         );
-        let mut conditions = Vec::new();
+        let mut conditions = vec![crate::deletion::LIVE_TASK];
         let mut values = Vec::<SqlValue>::new();
         if let Some(project_id) = project_id {
             conditions.push("project_id=?");

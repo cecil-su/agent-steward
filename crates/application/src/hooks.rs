@@ -152,6 +152,8 @@ impl Service {
         let tx =
             storage_sqlite::write_transaction(&mut connection).map_err(AppError::from_storage)?;
         let session = load_session(&tx, &event.session_id)?;
+        // Observations never revive a logically deleted task, including late replays.
+        load_task(&tx, session.task_id)?;
         if session.source.as_deref() != Some(&event.source)
             || session.external_session_id.as_deref() != Some(&event.external_session_id)
         {
@@ -204,14 +206,15 @@ impl Service {
             ));
         }
         let connection = self.connection()?;
-        load_session(&connection, session_id)?;
+        let session = load_session(&connection, session_id)?;
+        let deleted = crate::deletion::deletion(&connection, session.task_id)?;
         let mut statement = connection.prepare("SELECT sequence,event_id,kind,occurred_at,received_at FROM session_events WHERE session_id=?1 AND sequence>?2 AND kind IS NOT NULL ORDER BY sequence LIMIT ?3").map_err(AppError::from_sqlite)?;
         let mut events: Vec<serde_json::Value> = statement.query_map(params![session_id,after,limit + 1], |r| Ok(json!({"sequence":r.get::<_,i64>(0)?,"eventId":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"occurredAt":r.get::<_,String>(3)?,"receivedAt":r.get::<_,String>(4)?}))).map_err(AppError::from_sqlite)?.collect::<Result<_,_>>().map_err(AppError::from_sqlite)?;
         let has_more = events.len() > limit as usize;
         events.truncate(limit as usize);
         let next = events.last().and_then(|v| v["sequence"].as_i64());
         Ok(Outcome::new(
-            json!({"sessionId":session_id,"events":events,"hasMore":has_more,"nextAfter":next}),
+            json!({"sessionId":session_id,"deletion":deleted,"events":events,"hasMore":has_more,"nextAfter":next}),
         ))
     }
 
